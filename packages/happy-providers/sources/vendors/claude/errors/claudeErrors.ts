@@ -53,6 +53,12 @@ export function classifyClaudeError(options: {
         upstreamMessage: options.message,
     });
     const normalized = options.message.toLowerCase();
+    if (options.assistantError === "authentication_failed") {
+        return {
+            type: "authentication",
+            ...(diagnostics === undefined ? {} : { diagnostics }),
+        };
+    }
     const resetAt = earliestResetAt(options.rateLimitInfo);
     const outOfTokens =
         options.assistantError === "billing_error" ||
