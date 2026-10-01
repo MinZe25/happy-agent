@@ -78,11 +78,27 @@ export class CodexSessionCredential extends BaseCredential<
             if (current === undefined || !this.matchesAccount(current.accountId)) return undefined;
             // Another session or the native CLI may already have rotated this credential.
             if (current.accessToken !== this.credential.accessToken) return current;
-            return await refreshCodexAuthFile({
-                authFile,
-                clientId: this.clientId,
-                refreshTokenUrl: this.refreshTokenUrl,
-            });
+            try {
+                return await refreshCodexAuthFile({
+                    authFile,
+                    clientId: this.clientId,
+                    refreshTokenUrl: this.refreshTokenUrl,
+                });
+            } catch (error) {
+                // An external owner can rotate while our exchange is pending, either invalidating
+                // its refresh token or winning the guarded file write. Adopt one newer token only
+                // when its account is the one we already know; never retry the exchange or restore
+                // a removed/changed login. A failed reread preserves the original refresh error.
+                const replacement = await readCodexQuotaAuthFile(authFile).catch(() => undefined);
+                if (
+                    this.credential.accountId !== undefined &&
+                    replacement?.accountId === this.credential.accountId &&
+                    replacement.accessToken !== current.accessToken
+                ) {
+                    return replacement;
+                }
+                throw error;
+            }
         });
         if (refreshed === undefined || !this.matchesAccount(refreshed.accountId)) return undefined;
         return this.withAuth(refreshed);

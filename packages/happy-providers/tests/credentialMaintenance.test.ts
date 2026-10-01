@@ -97,7 +97,9 @@ describe("credential maintenance without inference", () => {
             );
             await writeFile(fixture.authFile, replacement);
             fixture.release();
-            expect(await result).toBeFalsy();
+            // Codex may adopt another owner's replacement for this same known account,
+            // but neither provider may overwrite it with its own losing exchange.
+            expect(Boolean(await result)).toBe(vendor === "codex");
             expect(await readFile(fixture.authFile, "utf8")).toBe(replacement);
         });
 
