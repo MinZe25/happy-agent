@@ -59,7 +59,7 @@ export function toClaudeSdkOptions(options: {
             ? {}
             : { pathToClaudeCodeExecutable: options.pathToClaudeCodeExecutable }),
         env: {
-            ...withoutClaudeCredentials(options.env),
+            ...withoutClaudeCredentials(options.env, options.credential),
             ...credentialEnvironment(options.credential),
             ...CLAUDE_SDK_PRIVACY_ENVIRONMENT,
             ...customHeaders(options.env, options.userAgent),
@@ -131,7 +131,7 @@ function credentialEnvironment(credential: ClaudeCredential): NodeJS.ProcessEnv 
         return { CLAUDE_CODE_OAUTH_TOKEN: credential.credential.accessToken };
     }
     credential.name satisfies "claude-code";
-    return { CLAUDE_CONFIG_DIR: credential.configDir };
+    return credential.configDir === undefined ? {} : { CLAUDE_CONFIG_DIR: credential.configDir };
 }
 
 function createClaudeMcpServer(
@@ -233,8 +233,17 @@ function toAbortController(signal: AbortSignal | undefined): {
     };
 }
 
-function withoutClaudeCredentials(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function withoutClaudeCredentials(
+    env: NodeJS.ProcessEnv,
+    credential: ClaudeCredential,
+): NodeJS.ProcessEnv {
     const sanitized = { ...env };
+    if (credential.name === "claude-code") {
+        // Only the source retained by native discovery may choose the child keychain. Omit
+        // absent keys entirely instead of relying on a spawn runtime to drop undefined values.
+        delete sanitized.CLAUDE_CONFIG_DIR;
+        delete sanitized.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+    }
     delete sanitized.ANTHROPIC_API_KEY;
     delete sanitized.ANTHROPIC_AUTH_TOKEN;
     delete sanitized.CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR;

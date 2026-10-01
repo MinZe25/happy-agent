@@ -238,7 +238,8 @@ closed across unknown or different regions, and usage remains attributed to conc
 Failed accounts used to remain excluded for the agent's entire lifetime, so even a new human
 submission after credential recovery returned the cached failure without inference. A committed
 message with explicit human provenance now clears that turn's exclusions and terminal failure,
-while retaining the sticky account choice. Session recreation, automatic continuation, unmarked
+while retaining the most recently selected account rather than choosing randomly again. After
+exhaustion, that is the last account attempted. Session recreation, automatic continuation, unmarked
 user-role messages, and duplicate delivery of the same accepted message do not reset failures.
 Candidate attempts remain bounded, and routing still cannot replay after visible output.
 

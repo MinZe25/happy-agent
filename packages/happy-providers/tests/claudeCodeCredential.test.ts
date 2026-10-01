@@ -103,6 +103,51 @@ describe("Claude credentials", () => {
 
         expect(childEnvironment.CLAUDE_CONFIG_DIR).toBeUndefined();
     });
+
+    it.each([undefined, "", "   "])(
+        "omits native directory overrides entirely for a default source (%j)",
+        async (configDir) => {
+            const discovery = vi
+                .spyOn(claudeAuth, "readClaudeCodeOAuthToken")
+                .mockResolvedValue("default-native-token");
+            const credential = await ClaudeCodeCredential.tryLoad({
+                env: {
+                    CLAUDE_CONFIG_DIR: configDir,
+                    CLAUDE_SECURESTORAGE_CONFIG_DIR: "/unrelated/discovery-keychain",
+                },
+            });
+            if (credential === null) expect.fail("Expected native Claude Code authentication.");
+
+            const childEnvironment = await captureChildEnvironment(credential, {
+                CLAUDE_CONFIG_DIR: "/unrelated/session-config",
+                CLAUDE_SECURESTORAGE_CONFIG_DIR: "/unrelated/session-keychain",
+            });
+
+            expect(discovery).toHaveBeenCalledWith({ env: {} });
+            expect(credential.configDir).toBeUndefined();
+            expect(Object.hasOwn(childEnvironment, "CLAUDE_CONFIG_DIR")).toBe(false);
+            expect(Object.hasOwn(childEnvironment, "CLAUDE_SECURESTORAGE_CONFIG_DIR")).toBe(false);
+        },
+    );
+
+    it("does not let an inherited secure-storage directory override the selected native source", async () => {
+        vi.spyOn(claudeAuth, "readClaudeCodeOAuthToken").mockResolvedValue("selected-native-token");
+        const credential = await ClaudeCodeCredential.tryLoad({
+            configDir: "/selected/native-source",
+            env: {},
+        });
+        if (credential === null) expect.fail("Expected native Claude Code authentication.");
+        const env = {
+            CLAUDE_CONFIG_DIR: "/unrelated/session-config",
+            CLAUDE_SECURESTORAGE_CONFIG_DIR: "/unrelated/session-keychain",
+        };
+
+        const childEnvironment = await captureChildEnvironment(credential, env);
+
+        expect(childEnvironment.CLAUDE_CONFIG_DIR).toBe("/selected/native-source");
+        expect(Object.hasOwn(childEnvironment, "CLAUDE_SECURESTORAGE_CONFIG_DIR")).toBe(false);
+        expect(env.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBe("/unrelated/session-keychain");
+    });
 });
 
 async function captureChildEnvironment(

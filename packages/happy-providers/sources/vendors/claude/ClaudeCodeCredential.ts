@@ -15,6 +15,12 @@ export class ClaudeCodeCredential extends BaseCredential<"claude-code", undefine
             ...(options.configDir === undefined ? {} : { CLAUDE_CONFIG_DIR: options.configDir }),
         };
         delete env.CLAUDE_CODE_OAUTH_TOKEN;
+        // Discovery owns one source. Match its path normalization and do not let the SDK's
+        // separate secure-storage override select a different keychain namespace later.
+        const configDir = env.CLAUDE_CONFIG_DIR?.trim();
+        if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
+        else delete env.CLAUDE_CONFIG_DIR;
+        delete env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
         if ((await readClaudeCodeOAuthToken({ env })) === undefined) return null;
         return new ClaudeCodeCredential(env.CLAUDE_CONFIG_DIR);
     }
