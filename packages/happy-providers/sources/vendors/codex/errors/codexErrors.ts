@@ -284,7 +284,12 @@ export function readCodexMissingToolOutputCallId(error: unknown): string | undef
 }
 
 export function isCodexUnauthorizedError(error: unknown): boolean {
-    return hasUnauthorized(error, new Set());
+    // The SDK wraps an in-band WebSocket rejection in `error`, unlike an HTTP error's
+    // own status. Use the same bounded envelope traversal as diagnostics so a recorded
+    // 401 also reaches credential recovery. Upgrade failures still need their sentence.
+    return (
+        extractProviderErrorDiagnostics(error)?.status === 401 || hasUnauthorized(error, new Set())
+    );
 }
 
 const BEDROCK_EXPIRED_SIGNATURE_MESSAGE =

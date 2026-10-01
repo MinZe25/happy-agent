@@ -29,6 +29,27 @@ import {
 import { resolveInferenceMaxRetries } from "@/core/inferenceRetrySettings.js";
 
 describe("Codex stream retries", () => {
+    it.each([
+        { error: { status: 401 } },
+        { cause: { body: { status_code: 401 } } },
+        { response: { statusCode: 401 } },
+    ])("recognizes a structured unauthorized envelope for recovery and classification", (error) => {
+        expect(isCodexUnauthorizedError(error)).toBe(true);
+        expect(classifyCodexProviderError(error, "Credential rejected", 1)).toMatchObject({
+            type: "authentication",
+            diagnostics: { status: 401 },
+        });
+    });
+
+    it("does not treat an untrusted textual 401 or a cyclic envelope as an unauthorized status", () => {
+        const cyclic: { error?: unknown; message: string } = {
+            message: "401 appears in user text",
+        };
+        cyclic.error = cyclic;
+        expect(isCodexUnauthorizedError(cyclic)).toBe(false);
+        expect(isCodexUnauthorizedError({ error: { status: 429 } })).toBe(false);
+    });
+
     it("classifies a generic HTTP 500 as an internal server error", () => {
         const error = Object.assign(new Error("request failed"), { status: 500 });
 
