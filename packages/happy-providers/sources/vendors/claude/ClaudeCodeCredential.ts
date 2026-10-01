@@ -16,10 +16,15 @@ export class ClaudeCodeCredential extends BaseCredential<"claude-code", undefine
         };
         delete env.CLAUDE_CODE_OAUTH_TOKEN;
         if ((await readClaudeCodeOAuthToken({ env })) === undefined) return null;
-        return new ClaudeCodeCredential();
+        return new ClaudeCodeCredential(env.CLAUDE_CONFIG_DIR);
     }
 
-    private constructor() {
+    // Preserve absence as well as a selected directory: setting the default path explicitly
+    // changes Claude Code's macOS keychain namespace. Never retain the discovered token.
+    readonly configDir?: string;
+
+    private constructor(configDir: string | undefined) {
         super("claude-code", undefined);
+        if (configDir !== undefined) this.configDir = configDir;
     }
 }

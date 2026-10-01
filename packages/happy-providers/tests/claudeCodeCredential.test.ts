@@ -4,16 +4,18 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ClaudeCodeCredential } from "@/vendors/claude/ClaudeCodeCredential.js";
 import { ClaudeOAuthCredential } from "@/vendors/claude/ClaudeOAuthCredential.js";
 import { ClaudeSession, type ClaudeSdkQuery } from "@/vendors/claude/ClaudeSession.js";
+import * as claudeAuth from "@/vendors/claude/impl/auth.js";
 import type { ClaudeCredential } from "@/vendors/VendorCredential.js";
 
 const roots = new Set<string>();
 
 afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all([...roots].map((root) => rm(root, { force: true, recursive: true })));
     roots.clear();
 });
@@ -65,6 +67,41 @@ describe("Claude credentials", () => {
         });
 
         expect(childEnvironment.CLAUDE_CODE_OAUTH_TOKEN).toBe("external-oauth-token");
+    });
+
+    it.each(["option", "environment"] as const)(
+        "keeps the native credential source selected through its %s",
+        async (source) => {
+            const configDir = await createClaudeConfig("selected-native-token");
+            const otherConfigDir = await createClaudeConfig("unrelated-native-token");
+            const credential = await ClaudeCodeCredential.tryLoad(
+                source === "option"
+                    ? { configDir, env: {} }
+                    : { env: { CLAUDE_CONFIG_DIR: configDir } },
+            );
+            if (credential === null) expect.fail("Expected native Claude Code authentication.");
+
+            const childEnvironment = await captureChildEnvironment(credential, {
+                CLAUDE_CONFIG_DIR: otherConfigDir,
+                PATH: process.env.PATH,
+            });
+
+            expect(childEnvironment.CLAUDE_CONFIG_DIR).toBe(configDir);
+        },
+    );
+
+    it("keeps the default native credential namespace when the session environment differs", async () => {
+        // Never consult the host's real default keychain in this regression.
+        vi.spyOn(claudeAuth, "readClaudeCodeOAuthToken").mockResolvedValue("default-native-token");
+        const credential = await ClaudeCodeCredential.tryLoad({ env: {} });
+        if (credential === null) expect.fail("Expected native Claude Code authentication.");
+
+        const childEnvironment = await captureChildEnvironment(credential, {
+            CLAUDE_CONFIG_DIR: "/unrelated/claude-source",
+            PATH: process.env.PATH,
+        });
+
+        expect(childEnvironment.CLAUDE_CONFIG_DIR).toBeUndefined();
     });
 });
 
