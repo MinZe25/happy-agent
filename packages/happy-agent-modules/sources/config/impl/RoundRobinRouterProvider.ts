@@ -27,6 +27,7 @@ export interface RoundRobinRouterProviderOptions {
 interface AgentRouteState {
     current: number;
     readonly failed: Set<number>;
+    acceptedMessageId?: string;
     terminal?: Extract<SessionEvent, { type: "done"; state: "error" }>;
 }
 
@@ -72,6 +73,25 @@ export class RoundRobinRouterProvider extends BaseProvider {
     }
 
     async session(id: string, options: SessionOptions): Promise<BaseSession> {
+        return new RoundRobinRouterSession(id, options, this.#stateFor(id), {
+            candidates: this.#candidates,
+            isEnabled: this.#isEnabled,
+            model: this.#model,
+            resolve: this.#resolve,
+            signal: this.#signal,
+        });
+    }
+
+    /** A committed human submission permits reevaluation, never an automatic inference retry. */
+    acceptUserMessage(id: string, messageId: string): void {
+        const state = this.#stateFor(id);
+        if (state.acceptedMessageId === messageId) return;
+        state.acceptedMessageId = messageId;
+        state.failed.clear();
+        delete state.terminal;
+    }
+
+    #stateFor(id: string): AgentRouteState {
         let state = this.#agents.get(id);
         if (state === undefined) {
             state = {
@@ -80,13 +100,7 @@ export class RoundRobinRouterProvider extends BaseProvider {
             };
             this.#agents.set(id, state);
         }
-        return new RoundRobinRouterSession(id, options, state, {
-            candidates: this.#candidates,
-            isEnabled: this.#isEnabled,
-            model: this.#model,
-            resolve: this.#resolve,
-            signal: this.#signal,
-        });
+        return state;
     }
 }
 

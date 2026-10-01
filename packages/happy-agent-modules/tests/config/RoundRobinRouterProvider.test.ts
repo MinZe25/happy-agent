@@ -9,9 +9,14 @@ import {
     type SessionStream,
 } from "@slopus/happy-providers";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
+import { AgentProviders, type AgentModuleScope } from "@slopus/happy-agent-base";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { RoundRobinRouterProvider } from "../../sources/config/impl/RoundRobinRouterProvider.js";
+import { testConfigRootedAt } from "../support/configModule.js";
 
 const request: SessionRunRequest = {
     context: {
@@ -89,6 +94,179 @@ describe("RoundRobinRouterProvider", () => {
         expect(second).toEqual([first.at(-1)]);
         expect(accounts.first.runs).toBe(1);
         expect(accounts.second.runs).toBe(1);
+    });
+
+    it("retains a healthy sticky account when a new human message clears old exclusions", async () => {
+        const accounts = {
+            first: scriptedAccount([authenticationFailure("expired")]),
+            second: scriptedAccount([normal("fallback"), normal("sticky")]),
+        };
+        const provider = routedProvider(accounts, 0);
+        const session = await provider.session("agent-a", sessionOptions());
+        try {
+            expect(await textOf(session.run(createRootContext(), request))).toBe("fallback");
+            provider.acceptUserMessage("agent-a", "next-human-message");
+            expect(await textOf(session.run(createRootContext(), request))).toBe("sticky");
+            expect(accounts.first.runs).toBe(1);
+            expect(accounts.second.runs).toBe(2);
+        } finally {
+            await session.destroy();
+        }
+    });
+
+    it("tries every still-failing candidate at most once per accepted human message", async () => {
+        const accounts = {
+            first: scriptedAccount([authenticationFailure("expired")]),
+            second: scriptedAccount([authenticationFailure("also expired")]),
+        };
+        const provider = routedProvider(accounts, 0);
+        const session = await provider.session("agent-a", sessionOptions());
+        try {
+            for (const turn of [1, 2]) {
+                provider.acceptUserMessage("agent-a", `human-${turn}`);
+                await eventsOf(session.run(createRootContext(), request));
+                await eventsOf(session.run(createRootContext(), request));
+                expect(accounts.first.runs).toBe(turn);
+                expect(accounts.second.runs).toBe(turn);
+            }
+        } finally {
+            await session.destroy();
+        }
+    });
+
+    it("does not infer an authentication failure from unclassified diagnostic text", async () => {
+        const failure: readonly SessionEvent[] = [
+            {
+                type: "done",
+                state: "error",
+                kind: "unknown",
+                message:
+                    "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.",
+                providerError: {
+                    type: "unclassified",
+                    diagnostics: { code: "authentication_failed" },
+                },
+            },
+        ];
+        const accounts = {
+            first: scriptedAccount([failure, normal("same account on follow-up")]),
+            second: scriptedAccount([normal("healthy fallback")]),
+        };
+        const provider = routedProvider(accounts, 0);
+        const session = await provider.session("agent-a", sessionOptions());
+        try {
+            const first = await eventsOf(session.run(createRootContext(), request));
+            expect(first.at(-1)).toEqual(failure[0]);
+            expect(accounts.second.runs).toBe(0);
+            expect(await textOf(session.run(createRootContext(), request))).toBe(
+                "same account on follow-up",
+            );
+            expect(accounts.first.runs).toBe(2);
+            expect(accounts.second.runs).toBe(0);
+        } finally {
+            await session.destroy();
+        }
+    });
+
+    it("keeps cached authentication failures across session recreation without another human turn", async () => {
+        const accounts = {
+            first: scriptedAccount([authenticationFailure("expired"), normal("recovered")]),
+        };
+        const provider = routedProvider(accounts, 0);
+        const original = await provider.session("agent-a", sessionOptions());
+        const first = await eventsOf(original.run(createRootContext(), request));
+        await original.destroy();
+        const recreated = await provider.session("agent-a", sessionOptions());
+        const freshAgent = await provider.session("agent-b", sessionOptions());
+        try {
+            expect(await eventsOf(recreated.run(createRootContext(), request))).toEqual([
+                first.at(-1),
+            ]);
+            expect(accounts.first.runs).toBe(1);
+            expect(await textOf(freshAgent.run(createRootContext(), request))).toBe("recovered");
+            expect(accounts.first.runs).toBe(2);
+        } finally {
+            await recreated.destroy();
+            await freshAgent.destroy();
+        }
+    });
+
+    it("reevaluates failed accounts only after a newly accepted human message", async () => {
+        const root = await mkdtemp(join(tmpdir(), "router-human-recovery-"));
+        const account = scriptedAccount([
+            authenticationFailure("expired"),
+            authenticationFailure("still expired"),
+            normal("recovered"),
+        ]);
+        const source = new AgentProviders();
+        source.add("codex", account.provider, "codex");
+        const config = await testConfigRootedAt(
+            root,
+            [
+                "[providers]",
+                "default_enable = false",
+                "[providers.codex]",
+                "enabled = true",
+                "hidden = true",
+                "[providers.router]",
+                'type = "smart"',
+                'providers = ["codex"]',
+                "enabled = true",
+            ].join("\n"),
+            { inference: (real) => ({ models: real.models, providers: source }) },
+        );
+        const provider = await config.providers.resolve("router", request.model);
+        if (provider === null) throw new Error("Missing scripted router.");
+        let session = await provider.session("agent-a", sessionOptions());
+        const ctx = createRootContext();
+        const scope = {
+            agent: { id: "agent-a", provider: "router", model: request.model },
+        } as AgentModuleScope;
+        const accept = async (
+            id: string,
+            origin?: "user" | "agent",
+            role: "user" | "system" = "user",
+        ) => {
+            await config.beforeStart().messageAccepted?.(ctx, scope, {
+                id,
+                kind: "send",
+                profile: null,
+                message: { role, content: [{ type: "text", text: "Continue." }] },
+                ...(origin === undefined ? {} : { metadata: { messageOrigin: origin } }),
+            });
+        };
+        try {
+            await accept("human-first", "user");
+            await eventsOf(session.run(ctx, request));
+            expect(account.runs).toBe(1);
+            // Neither a reused SDK session, a recreated session, synthetic user role, nor
+            // duplicate delivery of the accepted human message grants another attempt.
+            await accept("human-first", "user");
+            await accept("agent-followup", "agent");
+            await accept("unstamped-followup");
+            await accept("system-notification", "user", "system");
+            await session.destroy();
+            session = await provider.session("agent-a", sessionOptions());
+            await eventsOf(session.run(ctx, request));
+            expect(account.runs).toBe(1);
+
+            await accept("human-second", "user");
+            const rejected = await eventsOf(session.run(ctx, request));
+            expect(rejected.at(-1)).toMatchObject({ state: "error", message: "still expired" });
+            expect(account.runs).toBe(2);
+            await eventsOf(session.run(ctx, request));
+            await accept("human-second", "user");
+            await eventsOf(session.run(ctx, request));
+            expect(account.runs).toBe(2);
+
+            await accept("human-third", "user");
+            expect(await textOf(session.run(ctx, request))).toBe("recovered");
+            expect(account.runs).toBe(3);
+        } finally {
+            await session.destroy();
+            await config.closeProviders();
+            await rm(root, { recursive: true, force: true });
+        }
     });
 
     it("does not fail over after visible output or for an ordinary rate limit", async () => {

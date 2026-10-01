@@ -42,6 +42,7 @@ import { parse, stringify, TomlDate, type TomlTable, type TomlValue } from "smol
 
 import { getManagedProjectsDirectory } from "../impl/managedProjectsDirectory.js";
 import { getManagedWorkspacesDirectory } from "../impl/managedWorkspacesDirectory.js";
+import { isUserOriginMetadata } from "../impl/messageOrigin.js";
 import {
     agentModelCatalog,
     agentModelContext,
@@ -1647,6 +1648,20 @@ export class ConfigModule implements AgentModule {
     }
 
     readonly #hooks: AgentModuleHooks = {
+        messageAccepted: async (_ctx, scope, accepted): Promise<void> => {
+            if (accepted.message.role !== "user" || !isUserOriginMetadata(accepted.metadata))
+                return;
+            const providerId = scope.agent.provider;
+            if (
+                this.configuration.values.providers[providerId]?.type !== "smart" ||
+                !this.isProviderEnabled(providerId)
+            )
+                return;
+            const provider = await this.providers.resolve(providerId, scope.agent.model);
+            if (provider instanceof RoundRobinRouterProvider) {
+                provider.acceptUserMessage(scope.agent.id, accepted.id);
+            }
+        },
         /** Apply configured root instructions through the normal pre-inference hook. */
         instructions: async (): Promise<string> =>
             this.configuration.values.defaults.instructions ?? "",
