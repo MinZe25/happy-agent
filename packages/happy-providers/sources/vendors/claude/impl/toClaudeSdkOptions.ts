@@ -131,7 +131,14 @@ function credentialEnvironment(credential: ClaudeCredential): NodeJS.ProcessEnv 
         return { CLAUDE_CODE_OAUTH_TOKEN: credential.credential.accessToken };
     }
     credential.name satisfies "claude-code";
-    return credential.configDir === undefined ? {} : { CLAUDE_CONFIG_DIR: credential.configDir };
+    return {
+        ...(credential.configDir === undefined ? {} : { CLAUDE_CONFIG_DIR: credential.configDir }),
+        // SDK history resume replaces CLAUDE_CONFIG_DIR with an isolated transcript directory
+        // and stages an access-only credential copy there. Keep native reads, refresh locks,
+        // and writes bound to the discovered source instead. Empty selects the default native
+        // namespace without hashing the default directory into a different macOS keychain name.
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: credential.configDir ?? "",
+    };
 }
 
 function createClaudeMcpServer(

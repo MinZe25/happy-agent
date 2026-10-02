@@ -192,6 +192,32 @@ explicit profile IDs. Both always reason, with `low`, `high`, and `max` effort (
 Kimi accepts text and images; GLM accepts text only. Compaction uses each documented harness's
 summary prompt and continuation contract. AWS determines account and regional availability.
 
+### Native Claude credentials during history resume
+
+`ClaudeCodeCredential` binds native credential storage to the source selected at discovery.
+The SDK isolates resumed transcripts by replacing `CLAUDE_CONFIG_DIR` with a temporary directory
+and staging an access-token-only credential copy. Without a separate storage binding, that child
+can use the staged token and lose access to the original refresh credential, even while the
+standalone Claude Code CLI still works. Happy sets `CLAUDE_SECURESTORAGE_CONFIG_DIR` to the selected
+directory, or the SDK's empty-string sentinel for the default native namespace. Claude Code still
+owns credential reads, refresh locks, and writes; Happy does not copy refresh tokens or replace
+the native history-resume path. Explicit API keys and OAuth tokens are unaffected.
+
+`tests/vendors/claudeNativeResumeAuth.test.ts` exercises the real pinned SDK child on Linux with
+synthetic credentials and local OAuth/inference endpoints. Run it in a network-disabled container.
+It verifies proactive expiry refresh, recovery after an unexpired token receives HTTP 401,
+rejection of an unrelated staged token, and persistence back to the original selected store.
+The native retry budget defaults to ten; a session can override it. With zero retries, the test
+expects one rejected request, no refresh, and a terminal authentication error—not an outer replay.
+
+The evidence has limits: macOS keychain namespace binding is covered by environment/staging tests
+and SDK source inspection, not a real-keychain end-to-end test. Opaque history is asserted unchanged
+at the SDK session-store boundary, while prior plaintext turns are checked on the wire. The SDK
+omits the fixture's synthetic opaque block from that wire request; its reason is not established.
+These tests do not prove live encrypted-prefix transfer, cross-account replay compatibility, or
+that this mechanism caused every reported 401. A successful CLI login alone cannot establish
+which credential an earlier resumed SDK child used.
+
 ## Configuring a session
 
 `provider.session(id, options)` takes the immutable, model-visible configuration — the things the

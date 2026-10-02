@@ -105,7 +105,7 @@ describe("Claude credentials", () => {
     });
 
     it.each([undefined, "", "   "])(
-        "omits native directory overrides entirely for a default source (%j)",
+        "binds the default native namespace without setting a config directory (%j)",
         async (configDir) => {
             const discovery = vi
                 .spyOn(claudeAuth, "readClaudeCodeOAuthToken")
@@ -126,7 +126,7 @@ describe("Claude credentials", () => {
             expect(discovery).toHaveBeenCalledWith({ env: {} });
             expect(credential.configDir).toBeUndefined();
             expect(Object.hasOwn(childEnvironment, "CLAUDE_CONFIG_DIR")).toBe(false);
-            expect(Object.hasOwn(childEnvironment, "CLAUDE_SECURESTORAGE_CONFIG_DIR")).toBe(false);
+            expect(childEnvironment.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBe("");
         },
     );
 
@@ -145,7 +145,7 @@ describe("Claude credentials", () => {
         const childEnvironment = await captureChildEnvironment(credential, env);
 
         expect(childEnvironment.CLAUDE_CONFIG_DIR).toBe("/selected/native-source");
-        expect(Object.hasOwn(childEnvironment, "CLAUDE_SECURESTORAGE_CONFIG_DIR")).toBe(false);
+        expect(childEnvironment.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBe("/selected/native-source");
         expect(env.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBe("/unrelated/session-keychain");
     });
 });
