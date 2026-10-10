@@ -40,6 +40,8 @@ export interface AgentGymOptions extends GymHomeOptions {
     readonly compaction?: GymCompactionHandler;
     /** Replaces the two models a gym serves. */
     readonly models?: readonly AgentModel[];
+    /** Build configured smart routes over the scripted accounts instead of replacing routing. */
+    readonly routeConfiguredProviders?: boolean;
     /** Test-owned environment values supplied to the daemon's configuration module. */
     readonly environment?: Readonly<NodeJS.ProcessEnv>;
     /** The default budget for every `waitFor` in this gym. */
@@ -244,6 +246,10 @@ class AgentGymInstance implements AgentGym {
     }
 
     async start(): Promise<void> {
+        const inference = {
+            models: this.#scripted.models,
+            providers: this.#scripted.providers,
+        };
         const daemon = await startHappyAgentDaemon({
             compute: createGymCompute(),
             environment: {
@@ -261,10 +267,7 @@ class AgentGymInstance implements AgentGym {
                 HAPPY_HOME_DIR: join(this.#home.root, "credentials", "happy"),
             },
             happyHome: this.#home.happyHome,
-            inference: {
-                models: this.#scripted.models,
-                providers: this.#scripted.providers,
-            },
+            inference: this.#options.routeConfiguredProviders ? () => inference : inference,
             version: this.#options.version ?? "gym",
         });
         this.#daemon = daemon;

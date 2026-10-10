@@ -88,22 +88,24 @@ interface AgentGymOptions {
     files?: Record<string, GymFixture>;
     inference?: readonly GymTurn[] | GymInferenceHandler;
     models?: readonly AgentModel[];
+    routeConfiguredProviders?: boolean;
     permissionMode?: "read_only" | "workspace_write" | "auto" | "full_access";
     timeoutMs?: number;
     version?: string;
 }
 ```
 
-| Option           | Default           | Purpose                                                                                                            |
-| ---------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `config`         | none              | Extra TOML appended to the installation's `Happy/Config/happy.toml` on macOS or `happy/config/happy.toml` on Linux |
-| `compaction`     | empty completion  | How a scripted compaction answers                                                                                  |
-| `files`          | `{}`              | Files written into the agent's working directory before it starts                                                  |
-| `inference`      | `[]`              | The scripted turns, or a handler answering each request                                                            |
-| `models`         | two gym models    | Replaces the catalog the gym serves                                                                                |
-| `permissionMode` | the agent default | Writes `[defaults] permission_mode` into the configuration                                                         |
-| `timeoutMs`      | `10_000`          | The default budget for every `waitFor` in this gym                                                                 |
-| `version`        | `"gym"`           | The version the daemon reports                                                                                     |
+| Option                     | Default           | Purpose                                                                                                            |
+| -------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `config`                   | none              | Extra TOML appended to the installation's `Happy/Config/happy.toml` on macOS or `happy/config/happy.toml` on Linux |
+| `compaction`               | empty completion  | How a scripted compaction answers                                                                                  |
+| `files`                    | `{}`              | Files written into the agent's working directory before it starts                                                  |
+| `inference`                | `[]`              | The scripted turns, or a handler answering each request                                                            |
+| `models`                   | two gym models    | Replaces the catalog the gym serves                                                                                |
+| `routeConfiguredProviders` | `false`           | Builds configured smart routes over scripted accounts instead of replacing the provider registry                   |
+| `permissionMode`           | the agent default | Writes `[defaults] permission_mode` into the configuration                                                         |
+| `timeoutMs`                | `10_000`          | The default budget for every `waitFor` in this gym                                                                 |
+| `version`                  | `"gym"`           | The version the daemon reports                                                                                     |
 
 A fixture is a string, a `Uint8Array`, or `{ content, mode }`. Paths are relative to the workspace
 and may not leave it.
