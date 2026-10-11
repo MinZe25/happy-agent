@@ -1,5 +1,6 @@
 export {
     ARTIFACT_DATA_LIMITS,
+    ARTIFACT_LOG_LIMITS,
     ArtifactDataConflictError,
     ArtifactDataCursorUnavailableError,
     ArtifactDataInputError,
@@ -17,6 +18,12 @@ export {
     artifactDataUserIdSchema,
     artifactDataVersionSchema,
     artifactDataWriteIdSchema,
+    artifactLogBatchSchema,
+    artifactLogEntrySchema,
+    artifactLogInputSchema,
+    artifactLogLevelSchema,
+    artifactLogQuerySchema,
+    artifactLogSourceSchema,
     DEFAULT_ARTIFACT_DATA_PAGE_SIZE,
     type ArtifactDataAuthor,
     type ArtifactDataChanges,
@@ -33,5 +40,12 @@ export {
     type ArtifactDataUser,
     type ArtifactDataVersion,
     type ArtifactDataWrite,
+    type ArtifactLogBatch,
+    type ArtifactLogEntry,
+    type ArtifactLogInput,
+    type ArtifactLogLevel,
+    type ArtifactLogPage,
+    type ArtifactLogQuery,
+    type ArtifactLogSource,
 } from "./ArtifactData.js";
 export { ArtifactDataModule } from "./ArtifactDataModule.js";

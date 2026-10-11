@@ -14,6 +14,7 @@ import {
     ArtifactDataTooLargeError,
     artifactDataVersionSchema,
     artifactDataWriteIdSchema,
+    artifactLogBatchSchema,
     type ArtifactDataCondition,
     type ArtifactDataEntry,
     type ArtifactDataSignal,
@@ -154,6 +155,15 @@ export class ApiArtifactData {
             }
             if (route === "kv/events" && method === "GET") {
                 return await this.#stream(ctx, request, response, artifactId, query);
+            }
+            if (route === "debug/log" && method === "POST") {
+                const body = await readJson(request, false);
+                if (!Value.Check(artifactLogBatchSchema, body)) {
+                    throw invalidRequest(
+                        "The body must be `{ entries, url? }` with 1–50 valid entries.",
+                    );
+                }
+                return sendJson(response, 200, await this.#data.appendLogs(ctx, artifactId, body));
             }
         } catch (error: unknown) {
             throw apiError(error);

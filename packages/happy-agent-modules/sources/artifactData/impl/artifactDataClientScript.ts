@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * The browser SDK an artifact page loads with `<script src="/api/v1/client.js"></script>`.
  *
@@ -5,6 +7,10 @@
  * It is plain, dependency-free ES2017 for every browser engine a client embeds, and it installs
  * one global, `window.happy`. Changes arrive over a streamed `fetch` of `/api/v1/kv/events`
  * rather than `EventSource`, so the SDK sees status codes and can resume with `since`.
+ *
+ * It also reports what goes wrong on the page to `/api/v1/debug/log`: uncaught errors, unhandled
+ * rejections, `console.error` and `console.warn`, and its own sync trouble, in small rate-limited
+ * batches that are dropped rather than retried, so reporting never adds load to a failing page.
  */
 export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK, served by Happy Agent. */
 (function (global) {
@@ -15,6 +21,12 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
     var HEARTBEAT_TIMEOUT_MS = 45000;
     var MIN_RETRY_MS = 500;
     var MAX_RETRY_MS = 30000;
+    var LOG_DELAY_MS = 2000;
+    var LOG_BATCH = 20;
+    var LOG_QUEUE = 100;
+    var LOG_PER_MINUTE = 60;
+    var LOG_MESSAGE_LENGTH = 4096;
+    var LOG_DATA_LENGTH = 8000;
 
     // ---- small helpers ----------------------------------------------------------------------
 
@@ -81,8 +93,12 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
         return error.status === 0 || error.status === 408 || error.status === 429 || error.status >= 500;
     }
 
+    function baseHeaders(accept) {
+        return { accept: accept };
+    }
+
     function request(method, path, body, headers) {
-        var init = { method: method, headers: { accept: "application/json" }, cache: "no-store" };
+        var init = { method: method, headers: baseHeaders("application/json"), cache: "no-store" };
         for (var name in headers || {}) init.headers[name] = headers[name];
         if (body !== undefined) {
             init.headers["content-type"] = "application/json";
@@ -155,6 +171,9 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
                 : (queue.length > 0 || loading > 0 ? "syncing" : "online");
         if (next !== status) {
             status = next;
+            if (status === "unavailable") {
+                report("error", "sync", "Artifact data is unavailable: the artifact is gone, or this daemon has no data API.");
+            }
             statusChanges.emit(status);
         }
         if (queue.length === 0) {
@@ -303,8 +322,9 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
         }
         var resuming = cursor !== null;
         alive();
+        var failure = null;
         global.fetch(BASE + "/kv/events" + query({ since: cursor }), {
-            headers: { accept: "text/event-stream" },
+            headers: baseHeaders("text/event-stream"),
             cache: "no-store",
             signal: controller.signal,
         }).then(function (response) {
@@ -339,6 +359,7 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
                     merge(payload, false);
                     if (id) cursor = id;
                 } else if (type === "reset") {
+                    report("warn", "sync", "The change stream could not resume, so the page reads its data again.", payload);
                     cursor = null;
                     controller.abort();
                 }
@@ -364,12 +385,21 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
                 });
             }
             return read();
-        }).catch(function () { /* every ending reconnects below */ }).then(function () {
+        }).catch(function (error) { failure = error; /* every ending reconnects below */ }).then(function () {
             if (watchdog) clearTimeout(watchdog);
+            var wasReady = streamReady;
             streamAbort = null;
             streamReady = false;
             updateStatus();
             if (unavailable) return;
+            if (wasReady) {
+                report("warn", "sync", "The change stream ended; reconnecting.", failure ? { error: String(failure.message || failure) } : undefined);
+            } else if (streamAttempt > 0) {
+                report("info", "sync", "Reconnecting the change stream failed.", {
+                    attempt: streamAttempt,
+                    status: failure && failure.status !== undefined ? failure.status : null,
+                });
+            }
             var delay = backoff(streamAttempt++);
             reconnectTimer = setTimeout(connect, delay);
         });
@@ -411,6 +441,15 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
             queue.shift();
             if (error.current) merge(error.current, true);
             notify(write.key);
+            if (error.code === "conflict") {
+                report("warn", "sync", "A write to " + JSON.stringify(write.key) + " conflicted with a newer value.", {
+                    key: write.key, op: write.op, ifVersion: write.ifVersion || null, current: error.current ? error.current.version : null,
+                });
+            } else {
+                report("error", "sync", "A write to " + JSON.stringify(write.key) + " was refused: " + error.message, {
+                    key: write.key, op: write.op, status: error.status, code: error.code,
+                });
+            }
             write.reject(error);
             pumping = false;
             updateStatus();
@@ -521,6 +560,105 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
         if (everReady) loadPrefix(prefix).then(self._loaded, function () {});
     }
 
+    // ---- debug reporting --------------------------------------------------------------------
+
+    var logQueue = [];
+    var logTimer = null;
+    var logEnabled = true;
+    var logMinute = 0;
+    var logCount = 0;
+
+    /** A message and data for anything thrown, rejected, or logged. */
+    function describe(value) {
+        if (value instanceof Error) {
+            return { message: (value.name || "Error") + ": " + value.message, data: value.stack ? { stack: String(value.stack) } : undefined };
+        }
+        if (typeof value === "string") return { message: value, data: undefined };
+        try {
+            var json = JSON.stringify(value);
+            if (json !== undefined) return { message: json, data: undefined };
+        } catch (error) { /* described below */ }
+        return { message: String(value), data: undefined };
+    }
+
+    function report(level, source, message, data) {
+        if (!logEnabled) return;
+        var now = Date.now();
+        var minute = Math.floor(now / 60000);
+        if (minute !== logMinute) { logMinute = minute; logCount = 0; }
+        if (logCount >= LOG_PER_MINUTE || logQueue.length >= LOG_QUEUE) return;
+        logCount++;
+        var entry = { level: level, source: source, message: String(message).slice(0, LOG_MESSAGE_LENGTH), at: now };
+        if (data !== undefined) {
+            try {
+                var json = JSON.stringify(data);
+                if (json !== undefined) entry.data = json.length <= LOG_DATA_LENGTH ? JSON.parse(json) : { truncated: json.slice(0, 1024) };
+            } catch (error) { /* data that is not JSON is left out */ }
+        }
+        logQueue.push(entry);
+        if (logQueue.length >= LOG_BATCH) sendLogs();
+        else if (!logTimer) logTimer = setTimeout(sendLogs, LOG_DELAY_MS);
+    }
+
+    /** Send what is queued once; a batch that cannot be sent is dropped, never retried. */
+    function sendLogs() {
+        if (logTimer) { clearTimeout(logTimer); logTimer = null; }
+        var batch = logQueue.splice(0, 50);
+        if (batch.length === 0) return;
+        if (global.navigator && global.navigator.onLine === false) return;
+        var url = null;
+        try { url = String(global.location.href).slice(0, 1024); } catch (error) { url = null; }
+        var headers = baseHeaders("application/json");
+        headers["content-type"] = "application/json";
+        try {
+            global.fetch(BASE + "/debug/log", {
+                method: "POST",
+                headers: headers,
+                cache: "no-store",
+                keepalive: true,
+                body: JSON.stringify({ entries: batch, url: url }),
+            }).catch(function () { /* dropped */ });
+        } catch (error) { /* dropped */ }
+        if (logQueue.length > 0) logTimer = setTimeout(sendLogs, LOG_DELAY_MS);
+    }
+
+    function installReporting() {
+        if (!global.addEventListener) return;
+        global.addEventListener("error", function (event) {
+            var described = event.error !== undefined && event.error !== null
+                ? describe(event.error)
+                : { message: event.message || "Script error.", data: undefined };
+            var data = described.data || {};
+            if (event.filename) {
+                data.filename = event.filename;
+                data.line = event.lineno;
+                data.column = event.colno;
+            }
+            report("error", "uncaught", described.message, data);
+        });
+        global.addEventListener("unhandledrejection", function (event) {
+            var described = describe(event.reason);
+            report("error", "rejection", described.message, described.data);
+        });
+        var console = global.console;
+        if (!console) return;
+        ["error", "warn"].forEach(function (level) {
+            var original = console[level];
+            if (typeof original !== "function") return;
+            console[level] = function () {
+                var args = Array.prototype.slice.call(arguments);
+                original.apply(console, args);
+                var stack;
+                var message = args.map(function (arg) {
+                    var described = describe(arg);
+                    if (described.data && described.data.stack && !stack) stack = described.data.stack;
+                    return described.message;
+                }).join(" ");
+                report(level, "console", message, stack ? { stack: stack } : undefined);
+            };
+        });
+    }
+
     // ---- public surface ---------------------------------------------------------------------
 
     function loadMe() {
@@ -611,9 +749,26 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
             /** Every confirmed change this page hears, from anyone, as an entry. */
             onChange: function (fn) { return changes.on(fn); },
         },
+        debug: {
+            /** Report something to the artifact's debug log; level is "info", "warn", or "error". */
+            log: function (message, data, level) {
+                var described = typeof message === "string" ? { message: message, data: undefined } : describe(message);
+                report(level === "error" || level === "warn" ? level : "info", "app", described.message,
+                    data === undefined ? described.data : data);
+            },
+            /** Stop reporting anything from this page, and drop what is queued. */
+            disable: function () {
+                logEnabled = false;
+                logQueue = [];
+                if (logTimer) { clearTimeout(logTimer); logTimer = null; }
+            },
+            /** Send what is queued now rather than after the usual short delay. */
+            flush: function () { sendLogs(); },
+        },
     };
 
     global.happy = happy;
+    installReporting();
     if (global.addEventListener) {
         global.addEventListener("online", function () {
             if (streamAbort === null) connect();
@@ -623,3 +778,6 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
     connect();
 })(typeof window !== "undefined" ? window : globalThis);
 `;
+
+/** The SDK's ETag, which changes whenever the script does. */
+export const ARTIFACT_DATA_CLIENT_ETAG = `"${createHash("sha256").update(ARTIFACT_DATA_CLIENT_SCRIPT).digest("hex").slice(0, 32)}"`;

@@ -18,6 +18,7 @@ that write.
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------ |
 | `read_artifact_data`  | One key with up to 64 KiB of its value, or a page of keys under a prefix with 4 KiB of each value, each with its version, author, and time. | Never.      | Reloadable.                                |
 | `write_artifact_data` | Sets a key from JSON text or deletes it as the calling agent, optionally only at a version (`ifVersion`) or while absent (`ifAbsent`).      | Never.      | Durable; the call ID derives the write ID. |
+| `read_artifact_logs`  | The artifact's debug log, newest first, filtered by least severe level, user, and time, with each reporter's name and the version then.     | Never.      | Reloadable.                                |
 
 An agent's writes carry `agentAuthorId(agentId)`, a stable opaque ID, as `updatedBy`. The store
 remembers which agent is behind it, so `users` resolves it within that artifact to the agent's bot
@@ -25,10 +26,14 @@ name, or "Agent", with `kind: "agent"`; the agent's own ID never reaches a page.
 
 ## Storage
 
+`impl/ArtifactDataStores` is the storage engine: it opens each artifact's files, serializes calls
+per file, delivers committed changes, and bounds the debug log. The module adds only whether an
+artifact serves data and who the callers are.
+
 Each store is its own SQLite file in WAL mode with full sync, at
 `artifacts/_data_/<artifactId>/kv.sqlite` (`ConfigModule.artifactDataPath`), outside the main
 database. A file is created by the first write; reading a store nobody wrote to creates nothing.
-A deleted artifact's file stays on disk. At most 32 stores are open at once; the least recently
+A deleted artifact's file stays on disk. At most 32 files are open at once; the least recently
 used one closes first.
 
 A store holds one row per key (a tombstone has a `NULL` value), one row per remembered write ID,
@@ -56,8 +61,20 @@ the write's time in its first 48 bits; `updatedAt` is that time.
   that wrote, the way a page may see them.
 - `clientScript()` is the browser SDK served at `/api/v1/client.js`.
 
+- `appendLogs(ctx, artifactId, batch)` keeps a page's report as the caller, with the artifact's
+  newest version; `readLogs` reads the log newest first.
+
 Limits are in `ARTIFACT_DATA_LIMITS`: 512-character keys, 256 KiB values, 1 MiB requests,
 100,000 keys and 64 MiB per store, 24 hours of write IDs, and 30 days of tombstones.
+
+## Debug log
+
+Pages report problems to `POST /api/v1/debug/log`: the SDK sends uncaught errors, unhandled
+rejections, `console.error` and `console.warn`, its own sync trouble, and `happy.debug.log` calls,
+in batches it drops rather than retries. Each artifact's log is `logs.sqlite` beside its store, in
+WAL mode with normal sync, because losing the last few reports in a crash costs nothing. It keeps
+the newest 1,000 entries of the last 7 days, pruned on every append, and accepts 120 entries per
+user per artifact per minute (`ARTIFACT_LOG_LIMITS`); the rest are counted as dropped.
 
 ## HTTP
 

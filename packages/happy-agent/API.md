@@ -6256,6 +6256,43 @@ ends when the client reads it too slowly; reconnect the same way.
 At most 64 streams may be open for one artifact and 512 in all; another is `429 too_many_streams`
 with `Retry-After`.
 
+#### `POST /v0/artifacts/:artifactId/api/v1/debug/log`
+
+Keeps what a page reports about itself in the artifact's debug log, so the agent that built the
+app can see what went wrong for the people using it. The SDK reports on its own: uncaught errors,
+unhandled rejections, `console.error` and `console.warn`, and its own sync trouble. Body:
+
+```json
+{
+    "entries": [
+        {
+            "level": "error",
+            "source": "uncaught",
+            "message": "TypeError: board is undefined",
+            "data": { "stack": "TypeError: board is undefined\n    at render (index.html:12:5)" },
+            "at": 1755400000000
+        }
+    ],
+    "url": "https://.../index.html"
+}
+```
+
+- `entries` — 1–50 entries. `level` is `error`, `warn`, or `info`. `source` is `uncaught`,
+  `rejection`, `console`, `sync` (the SDK's own reports), or `app` (what the page logs itself).
+  `message` is at most 4,096 characters. `data` is optional JSON; data over 8 KiB when serialized
+  is kept as `{ "truncated": "<its first 1,024 characters>" }`. `at` is the page's own clock in
+  milliseconds, optional.
+- `url` — the page's address, at most 1,024 characters, or `null`; optional.
+
+Response — `200`: `{ "accepted": 2, "dropped": 0 }`. Each entry is kept with the caller's user
+ID, the time the daemon received it, and the artifact's newest version number at that moment.
+One user may add 120 entries to one artifact's log per minute; entries past that are dropped and
+counted in `dropped`, and the request still succeeds. An invalid body is `400`.
+
+The log lives beside the artifact's data, in `logs.sqlite` in the same directory, and keeps the
+newest 1,000 entries of the last 7 days. It is read by agents through their `read_artifact_logs`
+tool, newest first, filtered by level, user, and time. Pages cannot read it.
+
 ## Live voice sessions
 
 GPT-Live controls the initiating desktop window through a fixed set of UI-equivalent actions.

@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-import { access } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type {
@@ -8,9 +6,8 @@ import type {
     AgentModuleScope,
     AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import { ensurePrivateDirectory } from "@slopus/happy-agent-compute";
 import { Value } from "@sinclair/typebox/value";
-import { mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
+import type { Context } from "@steve.kite/stdlib";
 
 import { ArtifactsModule } from "../artifacts/index.js";
 import { BotsModule } from "../bots/index.js";
@@ -19,18 +16,9 @@ import { ProfileModule } from "../profile/index.js";
 import { TeamModule, teamUser, type TeamUser } from "../team/index.js";
 
 import {
-    ARTIFACT_DATA_LIMITS,
-    ArtifactDataCursorUnavailableError,
     ArtifactDataInputError,
     ArtifactDataNotFoundError,
-    ArtifactDataTooLargeError,
-    artifactDataChangesQuerySchema,
-    artifactDataDeleteInputSchema,
-    artifactDataKeySchema,
-    artifactDataListQuerySchema,
-    artifactDataSetInputSchema,
     artifactDataUserIdSchema,
-    DEFAULT_ARTIFACT_DATA_PAGE_SIZE,
     type ArtifactDataAuthor,
     type ArtifactDataChanges,
     type ArtifactDataChangesQuery,
@@ -41,17 +29,24 @@ import {
     type ArtifactDataPage,
     type ArtifactDataPhoto,
     type ArtifactDataSetInput,
-    type ArtifactDataSignal,
     type ArtifactDataUser,
     type ArtifactDataWrite,
+    type ArtifactLogBatch,
+    type ArtifactLogPage,
+    type ArtifactLogQuery,
 } from "./ArtifactData.js";
-import { ArtifactDataStore, type ArtifactDataOperation } from "./impl/ArtifactDataStore.js";
-import { ARTIFACT_DATA_CLIENT_SCRIPT } from "./impl/artifactDataClientScript.js";
+import {
+    ArtifactDataStores,
+    artifactDataAuthorId,
+    opaqueArtifactDataId,
+} from "./impl/ArtifactDataStores.js";
+import {
+    ARTIFACT_DATA_CLIENT_ETAG,
+    ARTIFACT_DATA_CLIENT_SCRIPT,
+} from "./impl/artifactDataClientScript.js";
 import { readArtifactDataTool } from "./tools/read_artifact_data.js";
+import { readArtifactLogsTool } from "./tools/read_artifact_logs.js";
 import { writeArtifactDataTool } from "./tools/write_artifact_data.js";
-
-/** Stores kept open at once; the least recently used one closes when another opens. */
-const MAX_OPEN_STORES = 32;
 
 /**
  * Realtime key-value data for artifact pages, so an HTML artifact can be a small shared app.
@@ -69,17 +64,11 @@ const MAX_OPEN_STORES = 32;
 export class ArtifactDataModule implements AgentModule {
     readonly name = "artifactData";
 
-    readonly #config: ConfigModule;
     readonly #artifacts: ArtifactsModule;
     readonly #profile: ProfileModule;
     readonly #team: TeamModule;
     readonly #bots: BotsModule;
-    readonly #locks: MapAsyncLock<string> = mapAsyncLock();
-    /** Open stores, least recently used first. */
-    readonly #stores = new Map<string, ArtifactDataStore>();
-    readonly #listeners = new Map<string, Set<ArtifactDataListener>>();
-    readonly #clientEtag = `"${createHash("sha256").update(ARTIFACT_DATA_CLIENT_SCRIPT).digest("hex").slice(0, 32)}"`;
-    #closed = false;
+    readonly #stores: ArtifactDataStores;
 
     constructor(
         config: ConfigModule,
@@ -88,14 +77,16 @@ export class ArtifactDataModule implements AgentModule {
         team: TeamModule,
         bots: BotsModule,
     ) {
-        this.#config = config;
         this.#artifacts = artifacts;
         this.#profile = profile;
         this.#team = team;
         this.#bots = bots;
+        this.#stores = new ArtifactDataStores((artifactId) =>
+            dirname(config.artifactDataPath(artifactId)),
+        );
         artifacts.onEvent((_ctx, event) => {
             if (event.type === "artifact_deleted") {
-                this.#end(event.artifact.id, { type: "closed", reason: "artifact_deleted" });
+                this.#stores.end(event.artifact.id, "artifact_deleted");
             }
         });
     }
@@ -104,6 +95,7 @@ export class ArtifactDataModule implements AgentModule {
         tools: async (_ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => [
             readArtifactDataTool(this),
             writeArtifactDataTool(this, scope.agent.id),
+            readArtifactLogsTool(this),
         ],
     };
 
@@ -111,7 +103,7 @@ export class ArtifactDataModule implements AgentModule {
 
     /** The browser SDK an artifact page loads from `/api/v1/client.js`, and its ETag. */
     clientScript(): { readonly text: string; readonly etag: string } {
-        return { text: ARTIFACT_DATA_CLIENT_SCRIPT, etag: this.#clientEtag };
+        return { text: ARTIFACT_DATA_CLIENT_SCRIPT, etag: ARTIFACT_DATA_CLIENT_ETAG };
     }
 
     /**
@@ -162,12 +154,8 @@ export class ArtifactDataModule implements AgentModule {
             if (unique.includes(self.id)) found.set(self.id, self);
         }
         const rest = unique.filter((id) => !found.has(id));
-        const agents = await this.#read(
-            ctx,
-            artifactId,
-            () => new Map<string, string>(),
-            (store) => store.agents(rest),
-        );
+        await this.#requireActive(ctx, artifactId);
+        const agents = await this.#stores.agents(ctx, artifactId, rest);
         for (const [id, agentId] of agents) {
             const name = (await this.#bots.forAgent(ctx, agentId))?.name ?? "Agent";
             found.set(id, {
@@ -187,7 +175,7 @@ export class ArtifactDataModule implements AgentModule {
 
     /** The ID a page knows an author by. */
     authorId(author: ArtifactDataAuthor): string {
-        return author.kind === "user" ? author.userId : agentAuthorId(author.agentId);
+        return artifactDataAuthorId(author);
     }
 
     async userPhoto(ctx: Context, userId: string): Promise<ArtifactDataPhoto | undefined> {
@@ -204,14 +192,8 @@ export class ArtifactDataModule implements AgentModule {
         artifactId: string,
         key: string,
     ): Promise<{ readonly entry: ArtifactDataEntry | undefined; readonly cursor: string | null }> {
-        if (!Value.Check(artifactDataKeySchema, key))
-            throw new ArtifactDataInputError("The key is invalid.");
-        return await this.#read(
-            ctx,
-            artifactId,
-            () => ({ entry: undefined, cursor: null }),
-            (store) => store.get(key),
-        );
+        await this.#requireActive(ctx, artifactId);
+        return await this.#stores.get(ctx, artifactId, key);
     }
 
     async list(
@@ -219,20 +201,8 @@ export class ArtifactDataModule implements AgentModule {
         artifactId: string,
         query: ArtifactDataListQuery = {},
     ): Promise<ArtifactDataPage> {
-        if (!Value.Check(artifactDataListQuerySchema, query)) {
-            throw new ArtifactDataInputError("The list query is invalid.");
-        }
-        return await this.#read(
-            ctx,
-            artifactId,
-            () => ({ entries: [], nextAfter: undefined, cursor: null }),
-            (store) =>
-                store.list(
-                    query.prefix ?? "",
-                    query.after,
-                    query.limit ?? DEFAULT_ARTIFACT_DATA_PAGE_SIZE,
-                ),
-        );
+        await this.#requireActive(ctx, artifactId);
+        return await this.#stores.list(ctx, artifactId, query);
     }
 
     /**
@@ -244,24 +214,8 @@ export class ArtifactDataModule implements AgentModule {
         artifactId: string,
         query: ArtifactDataChangesQuery = {},
     ): Promise<ArtifactDataChanges> {
-        if (!Value.Check(artifactDataChangesQuerySchema, query)) {
-            throw new ArtifactDataInputError("The changes query is invalid.");
-        }
-        return await this.#read(
-            ctx,
-            artifactId,
-            () => {
-                // No write was ever made, so no cursor can have come from this store.
-                if (query.since !== undefined) throw new ArtifactDataCursorUnavailableError();
-                return { changes: [], cursor: null, hasMore: false };
-            },
-            (store) =>
-                store.changes(
-                    query.since,
-                    query.prefix ?? "",
-                    query.limit ?? DEFAULT_ARTIFACT_DATA_PAGE_SIZE,
-                ),
-        );
+        await this.#requireActive(ctx, artifactId);
+        return await this.#stores.changes(ctx, artifactId, query);
     }
 
     async set(
@@ -269,25 +223,8 @@ export class ArtifactDataModule implements AgentModule {
         artifactId: string,
         input: ArtifactDataSetInput,
     ): Promise<ArtifactDataWrite> {
-        if (!Value.Check(artifactDataSetInputSchema, input)) {
-            throw new ArtifactDataInputError("The write is invalid.");
-        }
-        let valueJson: string | undefined;
-        try {
-            valueJson = JSON.stringify(input.value);
-        } catch {
-            valueJson = undefined;
-        }
-        if (valueJson === undefined) throw new ArtifactDataInputError("The value must be JSON.");
-        if (Buffer.byteLength(valueJson) > ARTIFACT_DATA_LIMITS.valueBytes) {
-            throw new ArtifactDataTooLargeError("too_large", "The value is larger than 256 KiB.");
-        }
-        return await this.#write(
-            ctx,
-            artifactId,
-            { kind: "set", key: input.key, valueJson },
-            input,
-        );
+        await this.#requireActive(ctx, artifactId);
+        return await this.#stores.set(ctx, artifactId, input);
     }
 
     async delete(
@@ -295,10 +232,38 @@ export class ArtifactDataModule implements AgentModule {
         artifactId: string,
         input: ArtifactDataDeleteInput,
     ): Promise<ArtifactDataWrite> {
-        if (!Value.Check(artifactDataDeleteInputSchema, input)) {
-            throw new ArtifactDataInputError("The deletion is invalid.");
+        await this.#requireActive(ctx, artifactId);
+        return await this.#stores.delete(ctx, artifactId, input);
+    }
+
+    /**
+     * Keep what the caller's page reported in the artifact's debug log, as the caller, with the
+     * artifact's newest version. Entries past the caller's rate for this minute are dropped.
+     */
+    async appendLogs(
+        ctx: Context,
+        artifactId: string,
+        batch: ArtifactLogBatch,
+    ): Promise<{ readonly accepted: number; readonly dropped: number }> {
+        const artifact = await this.#artifacts.get(ctx, artifactId);
+        if (artifact === undefined || artifact.status !== "active") {
+            throw new ArtifactDataNotFoundError();
         }
-        return await this.#write(ctx, artifactId, { kind: "delete", key: input.key }, input);
+        return await this.#stores.appendLogs(ctx, artifactId, {
+            userId: await this.userId(ctx),
+            version: artifact.latestVersion,
+            batch,
+        });
+    }
+
+    /** The artifact's kept debug log, newest first. */
+    async readLogs(
+        ctx: Context,
+        artifactId: string,
+        query: ArtifactLogQuery = {},
+    ): Promise<ArtifactLogPage> {
+        await this.#requireActive(ctx, artifactId);
+        return await this.#stores.readLogs(ctx, artifactId, query);
     }
 
     /**
@@ -307,44 +272,16 @@ export class ArtifactDataModule implements AgentModule {
      * misses nothing; a change seen twice has the same version.
      */
     subscribe(artifactId: string, listener: ArtifactDataListener): () => void {
-        if (this.#closed) {
-            listener({ type: "closed", reason: "shutdown" });
-            return () => undefined;
-        }
-        let listeners = this.#listeners.get(artifactId);
-        if (listeners === undefined) {
-            listeners = new Set();
-            this.#listeners.set(artifactId, listeners);
-        }
-        listeners.add(listener);
-        return () => {
-            const current = this.#listeners.get(artifactId);
-            current?.delete(listener);
-            if (current?.size === 0) this.#listeners.delete(artifactId);
-        };
+        return this.#stores.subscribe(artifactId, listener);
     }
 
     /** Subscribers of every store, for bounding open change streams. */
     subscriberCount(artifactId?: string): number {
-        if (artifactId !== undefined) return this.#listeners.get(artifactId)?.size ?? 0;
-        let count = 0;
-        for (const listeners of this.#listeners.values()) count += listeners.size;
-        return count;
+        return this.#stores.subscriberCount(artifactId);
     }
 
     async close(ctx: Context): Promise<void> {
-        this.#closed = true;
-        for (const artifactId of [...this.#listeners.keys()]) {
-            this.#end(artifactId, { type: "closed", reason: "shutdown" });
-        }
-        await Promise.all(
-            [...this.#stores.keys()].map(async (artifactId) => {
-                await this.#locks.runInLock(ctx, artifactId, async () => {
-                    this.#stores.get(artifactId)?.close();
-                    this.#stores.delete(artifactId);
-                });
-            }),
-        );
+        await this.#stores.close(ctx);
     }
 
     async #standaloneUser(ctx: Context): Promise<ArtifactDataUser> {
@@ -373,91 +310,6 @@ export class ArtifactDataModule implements AgentModule {
             throw new ArtifactDataNotFoundError();
         }
     }
-
-    /** Read a store; a store never written answers `absent()` without creating its file. */
-    async #read<Result>(
-        ctx: Context,
-        artifactId: string,
-        absent: () => Result,
-        read: (store: ArtifactDataStore) => Promise<Result>,
-    ): Promise<Result> {
-        await this.#requireActive(ctx, artifactId);
-        return await this.#locks.runInLock(ctx, artifactId, async (lockCtx) => {
-            const store = await this.#store(lockCtx, artifactId, false);
-            return store === undefined ? absent() : await read(store);
-        });
-    }
-
-    async #write(
-        ctx: Context,
-        artifactId: string,
-        operation: ArtifactDataOperation,
-        input: ArtifactDataSetInput | ArtifactDataDeleteInput,
-    ): Promise<ArtifactDataWrite> {
-        await this.#requireActive(ctx, artifactId);
-        return await this.#locks.runInLock(ctx, artifactId, async (lockCtx) => {
-            const store = await this.#store(lockCtx, artifactId, true);
-            if (store === undefined) throw new Error("The artifact data store did not open.");
-            const result = await store.write(
-                operation,
-                this.authorId(input.author),
-                input.writeId,
-                input.condition,
-                Date.now(),
-                input.author.kind === "agent" ? input.author.agentId : undefined,
-            );
-            // Still inside the store's lock, so subscribers hear changes in version order.
-            if (result.changed) this.#emit(artifactId, { type: "change", entry: result.entry });
-            return { entry: result.entry, replayed: result.replayed };
-        });
-    }
-
-    /** The open store, opening it when needed; `undefined` when absent and not to be created. */
-    async #store(
-        ctx: Context,
-        artifactId: string,
-        create: boolean,
-    ): Promise<ArtifactDataStore | undefined> {
-        if (this.#closed) throw new Error("Artifact data is shutting down.");
-        const open = this.#stores.get(artifactId);
-        if (open !== undefined) {
-            this.#stores.delete(artifactId);
-            this.#stores.set(artifactId, open);
-            return open;
-        }
-        const path = this.#config.artifactDataPath(artifactId);
-        if (!create && !(await exists(path))) return undefined;
-        await ensurePrivateDirectory(dirname(path));
-        const store = await ArtifactDataStore.open(path);
-        this.#stores.set(artifactId, store);
-        const [oldest] = this.#stores.keys();
-        if (this.#stores.size > MAX_OPEN_STORES && oldest !== undefined && oldest !== artifactId) {
-            void this.#locks
-                .runInLock(ctx, oldest, async () => {
-                    const evicted = this.#stores.get(oldest);
-                    if (evicted === undefined || this.#stores.size <= MAX_OPEN_STORES) return;
-                    this.#stores.delete(oldest);
-                    evicted.close();
-                })
-                .catch(() => undefined);
-        }
-        return store;
-    }
-
-    #emit(artifactId: string, signal: ArtifactDataSignal): void {
-        for (const listener of [...(this.#listeners.get(artifactId) ?? [])]) {
-            try {
-                listener(signal);
-            } catch {
-                // One subscriber's failure is its own; the change is already committed.
-            }
-        }
-    }
-
-    #end(artifactId: string, signal: ArtifactDataSignal): void {
-        this.#emit(artifactId, signal);
-        this.#listeners.delete(artifactId);
-    }
 }
 
 function teamUserResource(user: TeamUser): ArtifactDataUser {
@@ -478,28 +330,5 @@ function photoUrl(userId: string, contentHash: string): string {
 
 /** A stable ID for the standalone person that cannot be turned back into the profile's own. */
 function standaloneUserId(profileId: string): string {
-    return opaqueId("u", `happy-artifact-user:${profileId}`);
-}
-
-/** A stable ID for an agent that cannot be turned back into the agent's own. */
-function agentAuthorId(agentId: string): string {
-    return opaqueId("a", `happy-artifact-agent:${agentId}`);
-}
-
-function opaqueId(first: string, seed: string): string {
-    const digest = createHash("sha256").update(seed).digest();
-    let id = first;
-    for (const byte of digest.subarray(0, 23)) {
-        id += "abcdefghijklmnopqrstuvwxyz0123456789"[byte % 36];
-    }
-    return id;
-}
-
-async function exists(path: string): Promise<boolean> {
-    try {
-        await access(path);
-        return true;
-    } catch {
-        return false;
-    }
+    return opaqueArtifactDataId("u", `happy-artifact-user:${profileId}`);
 }

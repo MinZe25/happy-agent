@@ -206,6 +206,50 @@ export class ArtifactDataStore {
         };
     }
 
+    /**
+     * Fill a store nobody has written to with entries copied from another one, keeping their
+     * versions and authors, so the copy resumes from the same cursors. Returns `false`, writing
+     * nothing, when the store already holds data.
+     */
+    async importEntries(entries: readonly ArtifactDataEntry[]): Promise<boolean> {
+        const tx = await this.#client.transaction("write");
+        try {
+            const meta = metaFromRows((await tx.execute(META_QUERY)).rows);
+            if (meta.highWater !== null) return false;
+            let highWater: string | null = null;
+            let liveKeys = 0;
+            let liveBytes = 0;
+            for (const entry of entries) {
+                const valueJson = entry.deleted ? null : JSON.stringify(entry.value);
+                const size =
+                    valueJson === null
+                        ? 0
+                        : Buffer.byteLength(entry.key) + Buffer.byteLength(valueJson);
+                await tx.execute({
+                    sql: `INSERT INTO entries (${ENTRY_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)`,
+                    args: [
+                        entry.key,
+                        valueJson,
+                        entry.version,
+                        entry.updatedBy,
+                        entry.writeId,
+                        size,
+                    ],
+                });
+                if (valueJson !== null) {
+                    liveKeys += 1;
+                    liveBytes += size;
+                }
+                if (highWater === null || entry.version > highWater) highWater = entry.version;
+            }
+            if (highWater !== null) await setMeta(tx, { highWater, liveKeys, liveBytes });
+            await tx.commit();
+            return true;
+        } finally {
+            tx.close();
+        }
+    }
+
     /** The agents behind the agent author IDs among `ids` that wrote to this store. */
     async agents(ids: readonly string[]): Promise<ReadonlyMap<string, string>> {
         if (ids.length === 0) return new Map();

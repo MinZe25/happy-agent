@@ -25,6 +25,30 @@ export const ARTIFACT_DATA_LIMITS = {
 
 export const DEFAULT_ARTIFACT_DATA_PAGE_SIZE = 100;
 
+/**
+ * What pages may report to an artifact's debug log, and how much of it is kept. A thousand
+ * entries cover many sessions of a misbehaving page while bounding one artifact's log to about
+ * 13 MiB; a week covers "it broke yesterday" without keeping stale noise around.
+ */
+export const ARTIFACT_LOG_LIMITS = {
+    /** Entries one request may carry. */
+    entriesPerRequest: 50,
+    /** One entry's message, in characters. */
+    messageLength: 4096,
+    /** One entry's data, serialized as JSON in UTF-8. */
+    dataBytes: 8 * 1024,
+    /** A page URL, in characters. */
+    urlLength: 1024,
+    /** Entries kept per artifact; older ones are forgotten first. */
+    keptEntries: 1_000,
+    /** How long an entry is kept. */
+    keptMs: 7 * 24 * 60 * 60 * 1000,
+    /** Entries one user may add to one artifact's log per minute; the rest are dropped. */
+    entriesPerMinute: 120,
+    /** Entries one read may return. */
+    pageSize: 200,
+} as const;
+
 export const artifactDataVersionSchema = Type.String({
     pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
 });
@@ -127,6 +151,92 @@ export const artifactDataDeleteInputSchema = Type.Object(
     exact,
 );
 export type ArtifactDataDeleteInput = Static<typeof artifactDataDeleteInputSchema>;
+
+export const artifactLogLevelSchema = Type.Union([
+    Type.Literal("error"),
+    Type.Literal("warn"),
+    Type.Literal("info"),
+]);
+export type ArtifactLogLevel = Static<typeof artifactLogLevelSchema>;
+
+/** What produced an entry: an uncaught error, a rejection, the console, the SDK, or the page. */
+export const artifactLogSourceSchema = Type.Union([
+    Type.Literal("uncaught"),
+    Type.Literal("rejection"),
+    Type.Literal("console"),
+    Type.Literal("sync"),
+    Type.Literal("app"),
+]);
+export type ArtifactLogSource = Static<typeof artifactLogSourceSchema>;
+
+/** One entry a page reports. */
+export const artifactLogInputSchema = Type.Object(
+    {
+        level: artifactLogLevelSchema,
+        source: artifactLogSourceSchema,
+        message: Type.String({ maxLength: ARTIFACT_LOG_LIMITS.messageLength }),
+        data: Type.Optional(Type.Unknown()),
+        at: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+    },
+    exact,
+);
+export type ArtifactLogInput = Static<typeof artifactLogInputSchema>;
+
+/** One batch a page reports, with the URL it was loaded from. */
+export const artifactLogBatchSchema = Type.Object(
+    {
+        entries: Type.Array(artifactLogInputSchema, {
+            minItems: 1,
+            maxItems: ARTIFACT_LOG_LIMITS.entriesPerRequest,
+        }),
+        url: Type.Optional(
+            Type.Union([Type.String({ maxLength: ARTIFACT_LOG_LIMITS.urlLength }), Type.Null()]),
+        ),
+    },
+    exact,
+);
+export type ArtifactLogBatch = Static<typeof artifactLogBatchSchema>;
+
+/**
+ * One kept entry. `at` is when the daemon received it and `clientAt` the page's own clock;
+ * `version` is the artifact's newest version then, which is the one a freshly opened page shows.
+ */
+export const artifactLogEntrySchema = Type.Object(
+    {
+        id: Type.String(),
+        at: Type.Integer({ minimum: 0 }),
+        clientAt: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+        level: artifactLogLevelSchema,
+        source: artifactLogSourceSchema,
+        message: Type.String(),
+        data: Type.Unknown(),
+        userId: artifactDataUserIdSchema,
+        version: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
+        url: Type.Union([Type.String(), Type.Null()]),
+    },
+    exact,
+);
+export type ArtifactLogEntry = Static<typeof artifactLogEntrySchema>;
+
+export const artifactLogQuerySchema = Type.Object(
+    {
+        /** The least severe level returned: `info` returns everything. */
+        level: Type.Optional(artifactLogLevelSchema),
+        userId: Type.Optional(artifactDataUserIdSchema),
+        since: Type.Optional(Type.Integer({ minimum: 0 })),
+        until: Type.Optional(Type.Integer({ minimum: 0 })),
+        before: Type.Optional(Type.String({ pattern: "^[1-9][0-9]{0,15}$" })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: ARTIFACT_LOG_LIMITS.pageSize })),
+    },
+    exact,
+);
+export type ArtifactLogQuery = Static<typeof artifactLogQuerySchema>;
+
+/** Entries newest first, and the cursor of the next older page. */
+export interface ArtifactLogPage {
+    readonly entries: readonly ArtifactLogEntry[];
+    readonly nextBefore: string | undefined;
+}
 
 /** One page of live entries in key order, read in one snapshot with the store's cursor. */
 export interface ArtifactDataPage {

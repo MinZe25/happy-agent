@@ -67,3 +67,13 @@ No test paged, so it went unseen. The SDK now sends `pageCursor`, a gym test pag
 through the served `client.js` and counts its requests, and an audit of every request the SDK
 builds (query names, headers, and body fields) against the routes and API.md found no other
 mismatch. Any new SDK call needs a test that drives it through the served script.
+
+## Pages report their own problems
+
+Steve asked for tools to debug artifact apps without cutting scope. Pages report their own
+trouble to a debug log the agent reads with `read_artifact_logs`, because agents cannot see the
+person's browser console and people rarely describe failures precisely. Reporting is automatic,
+batched, rate-limited on both ends, and dropped rather than retried, so a failing page never adds
+load or loops. Each entry records the reporting user, the receive time, and the artifact's newest
+version then; the page's own idea of its version is not trusted. The log is a bounded ring in its
+own file beside the store, not in the main database.
