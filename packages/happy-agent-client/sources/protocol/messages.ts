@@ -17,6 +17,7 @@ import {
     type MessageMode,
     type Timestamp,
 } from "./common.js";
+import { artifactTitleSchema, artifactTypeSchema } from "./artifacts.js";
 import type { UsageBreakdown } from "./usage.js";
 import { userIdSchema } from "./users.js";
 
@@ -157,6 +158,84 @@ export const agentSpawnPresentationSchema = Type.Object({
 /** Sub-agent creation; the enclosing tool status owns its lifecycle. */
 export type AgentSpawnPresentation = Static<typeof agentSpawnPresentationSchema>;
 
+const mediaItemNameSchema = Type.String({ minLength: 1, maxLength: 255 });
+const mediaItemMimeTypeSchema = Type.String({ minLength: 1, maxLength: 255 });
+const mediaItemSizeSchema = Type.Integer({ minimum: 0 });
+const mediaItemDimensionSchema = Type.Integer({ minimum: 1 });
+const mediaItemThumbhashSchema = Type.String({ minLength: 1, maxLength: 128 });
+
+/** A decoded picture: always measured, with a ThumbHash to show until its bytes load. */
+export const mediaImageItemSchema = Type.Object({
+    kind: Type.Literal("image"),
+    /** The file's base name, for display and downloads only. */
+    name: mediaItemNameSchema,
+    /** The decoded format's media type. */
+    mimeType: mediaItemMimeTypeSchema,
+    size: mediaItemSizeSchema,
+    /** Displayed width in pixels, after EXIF orientation. */
+    width: mediaItemDimensionSchema,
+    /** Displayed height in pixels, after EXIF orientation. */
+    height: mediaItemDimensionSchema,
+    /** Standard base64 encoding of a ThumbHash placeholder. */
+    thumbhash: mediaItemThumbhashSchema,
+});
+
+/** A decoded picture: always measured, with a ThumbHash to show until its bytes load. */
+export type MediaImageItem = Static<typeof mediaImageItemSchema>;
+
+/** A video, a PDF document, or any other file; clients render an unknown kind as a file. */
+export const mediaFileItemSchema = Type.Object({
+    kind: Type.Union([Type.Literal("video"), Type.Literal("document"), Type.Literal("file")]),
+    /** The file's base name, for display and downloads only. */
+    name: mediaItemNameSchema,
+    /** From the file extension; `application/octet-stream` when unknown. */
+    mimeType: mediaItemMimeTypeSchema,
+    size: mediaItemSizeSchema,
+    /** Not currently supplied for these kinds; tolerated when present. */
+    width: Type.Optional(mediaItemDimensionSchema),
+    /** Not currently supplied for these kinds; tolerated when present. */
+    height: Type.Optional(mediaItemDimensionSchema),
+    /** Not currently supplied for these kinds; tolerated when present. */
+    thumbhash: Type.Optional(mediaItemThumbhashSchema),
+});
+
+/** A video, a PDF document, or any other file; clients render an unknown kind as a file. */
+export type MediaFileItem = Static<typeof mediaFileItemSchema>;
+
+/** One item a call showed inline; its bytes are served by its index. */
+export const mediaItemSchema = Type.Union([mediaImageItemSchema, mediaFileItemSchema]);
+
+/** One item a call showed inline; its bytes are served by its index. */
+export type MediaItem = Static<typeof mediaItemSchema>;
+
+/**
+ * Images, videos, documents, and files a completed call showed the person inline: a generated
+ * image or files presented with `present_files`. Each item's bytes are
+ * `GET /v0/agents/:agentId/tool-calls/:toolCallId/media/:index`.
+ */
+export const mediaPresentationSchema = Type.Object({
+    type: Type.Literal("media"),
+    /** One to ten items, in the order presented; the position is the item's media index. */
+    items: Type.Array(mediaItemSchema, { minItems: 1, maxItems: 10 }),
+});
+
+/** Images, videos, documents, and files a completed call showed the person inline. */
+export type MediaPresentation = Static<typeof mediaPresentationSchema>;
+
+/** An artifact a completed call created or versioned, shown as a card that opens it. */
+export const artifactPresentationSchema = Type.Object({
+    type: Type.Literal("artifact"),
+    artifactId: cuid2Schema,
+    /** The version number this call produced. */
+    version: Type.Integer({ minimum: 1 }),
+    artifactType: artifactTypeSchema,
+    /** The artifact's title at that version. */
+    title: artifactTitleSchema,
+});
+
+/** An artifact a completed call created or versioned, shown as a card that opens it. */
+export type ArtifactPresentation = Static<typeof artifactPresentationSchema>;
+
 /** Every display-ready tool-call presentation the client understands. */
 export const toolPresentationSchema = Type.Union([
     explorationPresentationSchema,
@@ -165,6 +244,8 @@ export const toolPresentationSchema = Type.Union([
     fileDiffPresentationSchema,
     searchPresentationSchema,
     agentSpawnPresentationSchema,
+    mediaPresentationSchema,
+    artifactPresentationSchema,
 ]);
 
 /** Every display-ready tool-call presentation the client understands. */

@@ -302,8 +302,8 @@ remain unchanged. Existing stored agents are not deleted or rewritten.
 - Request and response bodies are JSON, `content-type: application/json; charset=utf-8`.
 - Responses carry `Cache-Control: no-store` unless an endpoint explicitly documents a cacheable
   response. Avatar, profile-photo, and slash-command image responses are private-cacheable as
-  described below; JSON and error responses remain non-cacheable. Remote API proxies preserve the
-  upstream caching headers.
+  described below, and artifact files and tool-call media document their own caching; JSON and
+  error responses remain non-cacheable. Remote API proxies preserve the upstream caching headers.
 - Timestamps are Unix epoch milliseconds unless stated otherwise.
 
 ### Image caching
@@ -4149,6 +4149,8 @@ expected arguments are present:
 | `file_diff`    | `Edit`, `Write`, `apply_patch`, `search_replace`, `write`                                                              |
 | `search`       | `bedrock_web_search`, `claude_web_search`, `codex_web_search`, `gemini_web_search`, `grok_web_search`, `grok_x_search` |
 | `agent_spawn`  | `create_agent`                                                                                                         |
+| `media`        | `codex_imagegen`, `gemini_imagegen`, `present_files`                                                                   |
+| `artifact`     | `create_artifact`, `update_artifact`                                                                                   |
 
 **`exploration`** — one normalized directory listing, file read, or code search. The daemon
 currently emits one operation per mapped tool call.
@@ -4256,6 +4258,86 @@ This presentation is additive and does not increment the protocol version. Older
 it. To preserve unknown-presentation fallback in older clients, `agent_spawn` blocks retain their
 raw `arguments` and `result` even when `omitToolData=true`; other presentations keep their existing
 omission behavior. Clients never need to parse these raw fields to render a recognized spawn.
+
+**`media`** — images, videos, documents, and other files the call showed the person inline in
+the chat: an image a generation tool made, or files an agent presented with `present_files`. This
+presentation is outcome-derived, so it is absent while the call is running and appears only when
+the call completes successfully.
+
+```json
+{
+    "type": "media",
+    "items": [
+        {
+            "kind": "image",
+            "name": "tz4a98xxat96iws9zmbrgj3b.png",
+            "mimeType": "image/png",
+            "size": 1843200,
+            "width": 1024,
+            "height": 1024,
+            "thumbhash": "3OcRJYB4d3h/iIeHeEh3eIhw+j3A"
+        },
+        { "kind": "document", "name": "report.pdf", "mimeType": "application/pdf", "size": 482113 }
+    ]
+}
+```
+
+`items` holds one to ten items in the order they were presented; an item's zero-based position
+is its `index` in `GET /v0/agents/:agentId/tool-calls/:toolCallId/media/:index`, which serves its
+bytes. Every item carries `kind`, `name` (the file's base name, at most 255 characters, for
+display and downloads only), `mimeType`, and `size` in bytes. `kind` is:
+
+- `"image"` — a picture the daemon decoded: PNG, JPEG, GIF, WebP, or AVIF. It always carries
+  `width` and `height`, the positive pixel dimensions as displayed (after EXIF orientation), and
+  `thumbhash`, the standard base64 encoding of a [ThumbHash](https://evanw.github.io/thumbhash/)
+  placeholder of at most 128 characters. `mimeType` names the decoded format rather than the file
+  extension. Clients show the ThumbHash at the given aspect ratio until the bytes load.
+- `"video"` — a file with a `video/*` media type, such as MP4, WebM, QuickTime, or Ogg video.
+- `"document"` — a PDF.
+- `"file"` — anything else, including an image the daemon could not decode.
+
+Videos, documents, and files currently carry no `width`, `height`, or `thumbhash`; clients must
+tolerate their presence on any kind. Media types of non-images come from the file extension, and
+`application/octet-stream` when it is unknown. The set of kinds may grow; a client renders an
+unknown kind as a `"file"`.
+
+The daemon never stores the bytes in history. It keeps a private, content-addressed copy taken
+when the call ran, so later edits to or deletion of the source file never change what the chat
+shows. The presentation is recorded in the conversation of the agent that ran the call only;
+the parent or child conversations of that agent show nothing for it.
+
+`present_files` is a tool every agent has, whichever model it runs. It takes
+`{ "filepaths": ["…"] }` — one to ten paths on the agent's machine, absolute or relative to its
+working directory — and presents those files exactly as above. A path outside the agent's
+workspace follows the ordinary permission boundary for reading files. An image may be at most
+32 MiB, a video 256 MiB, and a document or other file 64 MiB, with at most 256 MiB per call; a
+directory, an empty file, or a file over its limit fails the call.
+
+**`artifact`** — an artifact the call created, or a new version it made, for a client to show as a
+card that opens it. This presentation is outcome-derived: it appears only when the call completes
+successfully.
+
+```json
+{
+    "type": "artifact",
+    "artifactId": "r7k2m9q4w1e5t8y3u6i0o2p5",
+    "version": 3,
+    "artifactType": "markdown",
+    "title": "Q3 revenue report"
+}
+```
+
+`artifactId` and `artifactType` are the artifact's `id` and `type`, `version` is the version
+number the call produced, and `title` is the artifact's title at that version. The card needs
+nothing else: a client opens the artifact through the artifact routes, preferably at `version`,
+and may show the artifact's current title in place of the recorded one. A later deletion leaves
+the presentation unchanged; the artifact routes then answer `404`.
+
+Media and artifact presentations are additive and do not increment the protocol version. Older
+daemons omit them and answer the media route with `404`. As with `agent_spawn`, these blocks
+retain their raw `arguments` and `result` even when `omitToolData=true`, so older clients keep
+rendering these calls through their unknown-presentation fallback. Clients never need to parse
+the raw fields to render a recognized media or artifact presentation.
 
 Other calls, including background-terminal-input calls, currently carry no presentation and keep
 their raw data. The presentation set may grow; a client that meets an unknown presentation type
@@ -4512,8 +4594,8 @@ Query parameters:
   `presentation` come back without `arguments` and `result` — the client renders the
   presentation, and the page stays small even when runs carried large tool output. Blocks
   without a `presentation` keep their raw data regardless, since there would be nothing else to
-  render. `agent_spawn` presentations also keep their raw data so older clients can render this
-  additive variant through their unknown-presentation fallback.
+  render. `agent_spawn`, `media`, and `artifact` presentations also keep their raw data so older
+  clients can render these additive variants through their unknown-presentation fallback.
 
 With no cursor, the newest runs are returned.
 
@@ -4604,6 +4686,35 @@ Pending queue and steering messages are deliberately absent here: they are curre
 not pageable accepted history. The agent bootstrap endpoint returns their complete oldest-first
 snapshot. When one is accepted it appears in its run, announced atomically by `run.started` or
 `run.boundary` with its assigned `runId`.
+
+### `GET /v0/agents/:agentId/tool-calls/:toolCallId/media/:index`
+
+The bytes of one item of a completed tool call's `media` presentation. `toolCallId` is the
+tool-call block's `id`, and `index` is the item's zero-based position in `items`, written in
+decimal without leading zeros. The daemon serves the private copy it took when the call ran, so
+the response never changes for the same URL.
+
+The response is the file itself, not JSON: `Content-Type` is the item's `mimeType`, with
+`; charset=utf-8` added for `text/*` types, and `Content-Length` its size. `ETag` is a quoted
+content digest, and a matching `If-None-Match` answers `304`. Because the content of a URL never
+changes, successful and `304` responses carry
+`Cache-Control: private, max-age=31536000, immutable` and `Vary: Authorization`, for images and
+every other kind alike. `Content-Disposition: inline` carries the item's `name` as the file name.
+Every response carries `X-Content-Type-Options: nosniff` and the same sandboxing
+`Content-Security-Policy` as artifact files, so a presented HTML or SVG file cannot act with the
+daemon's origin.
+
+`Accept-Ranges: bytes` advertises ranges, so a video player can stream and seek. A single
+`Range: bytes=start-end`, `bytes=start-`, or `bytes=-suffix` answers `206` with `Content-Range`; a
+range outside the file answers `416` with `code: "range_not_satisfiable"` and
+`Content-Range: bytes */size`. Multiple ranges are ignored and answer the whole file with `200`.
+
+`404` when the agent, the tool call, or the item does not exist, when the call has no `media`
+presentation, or when the daemon no longer holds the copy. Errors are JSON and
+`Cache-Control: no-store` as everywhere else. The route takes the bearer token like every route,
+including through `/v0/connections/:id/api/*`. A client that renders media through an element
+rather than `fetch` points it at this URL through a transport that adds the token, as with
+artifact files.
 
 ### Questions
 

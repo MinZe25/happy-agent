@@ -1,12 +1,15 @@
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
+import { HappyAgentClient } from "../sources/HappyAgentClient.js";
 import {
     agentSpawnPresentationSchema,
+    artifactPresentationSchema,
     backgroundTerminalInteractionPresentationSchema,
     execCommandPresentationSchema,
     explorationPresentationSchema,
     fileDiffPresentationSchema,
+    mediaPresentationSchema,
     searchPresentationSchema,
     toolPresentationSchema,
     type ToolPresentation,
@@ -77,6 +80,30 @@ const presentations = [
         },
         agentId: "tz4a98xxat96iws9zmbrgj3b",
     },
+    {
+        type: "media",
+        items: [
+            {
+                kind: "image",
+                name: "tz4a98xxat96iws9zmbrgj3b.png",
+                mimeType: "image/png",
+                size: 1_843_200,
+                width: 1024,
+                height: 1024,
+                thumbhash: "3OcRJYB4d3h/iIeHeEh3eIhw+j3A",
+            },
+            { kind: "video", name: "demo.mp4", mimeType: "video/mp4", size: 52_428_800 },
+            { kind: "document", name: "report.pdf", mimeType: "application/pdf", size: 482_113 },
+            { kind: "file", name: "data", mimeType: "application/octet-stream", size: 0 },
+        ],
+    },
+    {
+        type: "artifact",
+        artifactId: "r7k2m9q4w1e5t8y3u6i0o2p5",
+        version: 3,
+        artifactType: "markdown",
+        title: "Q3 revenue report",
+    },
 ] satisfies ToolPresentation[];
 
 describe("tool presentation schemas", () => {
@@ -88,14 +115,96 @@ describe("tool presentation schemas", () => {
             fileDiffPresentationSchema,
             searchPresentationSchema,
             agentSpawnPresentationSchema,
+            mediaPresentationSchema,
+            artifactPresentationSchema,
         ];
 
         expect(
             presentations.map((presentation) => Value.Check(toolPresentationSchema, presentation)),
-        ).toEqual([true, true, true, true, true, true]);
+        ).toEqual(presentations.map(() => true));
         expect(
             presentations.map((presentation, index) => Value.Check(schemas[index]!, presentation)),
-        ).toEqual([true, true, true, true, true, true]);
+        ).toEqual(presentations.map(() => true));
+    });
+
+    it("requires measured images and bounds media items", () => {
+        const image = {
+            kind: "image",
+            name: "chart.png",
+            mimeType: "image/png",
+            size: 10,
+            width: 4,
+            height: 3,
+            thumbhash: "AAAA",
+        };
+        const media = (items: unknown[]) => ({ type: "media", items });
+        expect(Value.Check(mediaPresentationSchema, media([image]))).toBe(true);
+        for (const missing of ["width", "height", "thumbhash"]) {
+            const { [missing]: _omitted, ...partial } = image as Record<string, unknown>;
+            expect(Value.Check(mediaPresentationSchema, media([partial]))).toBe(false);
+        }
+        expect(Value.Check(mediaPresentationSchema, media([{ ...image, width: 0 }]))).toBe(false);
+        expect(Value.Check(mediaPresentationSchema, media([]))).toBe(false);
+        expect(Value.Check(mediaPresentationSchema, media(Array(11).fill(image)))).toBe(false);
+        expect(
+            Value.Check(
+                mediaPresentationSchema,
+                media([{ kind: "file", name: "", mimeType: "text/plain", size: 1 }]),
+            ),
+        ).toBe(false);
+        expect(
+            Value.Check(artifactPresentationSchema, {
+                type: "artifact",
+                artifactId: "r7k2m9q4w1e5t8y3u6i0o2p5",
+                version: 0,
+                artifactType: "markdown",
+                title: "Q3",
+            }),
+        ).toBe(false);
+    });
+
+    it("reads one media item's bytes and ranges by index", async () => {
+        const requests: Request[] = [];
+        const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+            const request = new Request(input, init);
+            requests.push(request);
+            if (request.headers.get("if-none-match") === '"digest"') {
+                return new Response(null, { status: 304 });
+            }
+            if (request.headers.get("range") !== null) {
+                return new Response(new Uint8Array([2, 3]), {
+                    headers: { "content-range": "bytes 1-2/3", "content-type": "video/mp4" },
+                    status: 206,
+                });
+            }
+            return new Response(new Uint8Array([1, 2, 3]), {
+                headers: { "content-type": "video/mp4", etag: '"digest"' },
+                status: 200,
+            });
+        };
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+        const url = "http://agent.local/v0/agents/agent1/tool-calls/call1/media/2";
+
+        const whole = await client.getToolCallMedia("agent1", "call1", 2);
+        expect(whole).toMatchObject({
+            contentRange: null,
+            contentType: "video/mp4",
+            etag: '"digest"',
+        });
+        expect([...new Uint8Array(whole?.data ?? new ArrayBuffer(0))]).toEqual([1, 2, 3]);
+        expect(requests[0]?.url).toBe(url);
+        expect(requests[0]?.headers.get("accept")).toBe("*/*");
+        const range = await client.getToolCallMedia("agent1", "call1", 2, {
+            range: { start: 1, end: 2 },
+        });
+        expect(range?.contentRange).toBe("bytes 1-2/3");
+        expect(requests[1]?.headers.get("range")).toBe("bytes=1-2");
+        await expect(
+            client.getToolCallMedia("agent1", "call1", 2, { ifNoneMatch: '"digest"' }),
+        ).resolves.toBeNull();
+        expect(client.toolCallMediaUrl("agent1", "call1", 2)).toBe(url);
+        expect(() => client.toolCallMediaUrl("agent1", "call1", -1)).toThrow(TypeError);
+        expect(() => client.toolCallMediaUrl("agent1", "call1", 1.5)).toThrow(TypeError);
     });
 
     it("accepts unresolved and running spawns but rejects partial or malformed model identity", () => {

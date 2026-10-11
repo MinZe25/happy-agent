@@ -74,3 +74,15 @@ export interface ArtifactFileContent extends BinaryContent {
     /** The served `Content-Range` when a range was requested and answered, otherwise `null`. */
     contentRange: string | null;
 }
+
+/** Options for reading one tool call's media item. */
+export interface ToolCallMediaRequestOptions extends ConditionalRequestOptions {
+    /** Read only these bytes, as a video player does to seek. */
+    range?: ByteRange | undefined;
+}
+
+/** A tool call's media item bytes, whole or one range of them. */
+export interface ToolCallMediaContent extends BinaryContent {
+    /** The served `Content-Range` when a range was requested and answered, otherwise `null`. */
+    contentRange: string | null;
+}

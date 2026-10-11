@@ -18,6 +18,8 @@ import type {
     ImageUpload,
     OptionallyVersionedRequestOptions,
     RequestOptions,
+    ToolCallMediaContent,
+    ToolCallMediaRequestOptions,
     VersionedRequestOptions,
 } from "./requestOptions.js";
 import type {
@@ -1974,6 +1976,43 @@ export class HappyAgentClient {
         });
     }
 
+    /**
+     * `GET /v0/agents/:agentId/tool-calls/:toolCallId/media/:index` — the bytes of one item of a
+     * completed call's `media` presentation, or one range of them; `null` when `ifNoneMatch`
+     * still matches.
+     */
+    async getToolCallMedia(
+        agentId: Cuid2,
+        toolCallId: Cuid2,
+        index: number,
+        options: ToolCallMediaRequestOptions = {},
+    ): Promise<ToolCallMediaContent | null> {
+        const response = await this.#send({
+            method: "GET",
+            path: toolCallMediaPath(agentId, toolCallId, index),
+            accept: "*/*",
+            ifNoneMatch: options.ifNoneMatch,
+            range: options.range === undefined ? undefined : rangeHeader(options.range),
+            signal: options.signal,
+            allowNotModified: true,
+        });
+        if (response.status === 304) return null;
+        return {
+            contentRange: response.status === 206 ? response.headers.get("content-range") : null,
+            contentType: response.headers.get("content-type") ?? "application/octet-stream",
+            data: await response.arrayBuffer(),
+            etag: response.headers.get("etag"),
+        };
+    }
+
+    /**
+     * The URL of `GET /v0/agents/:agentId/tool-calls/:toolCallId/media/:index`, for an image,
+     * video, or document element that loads the bytes through a transport adding the bearer token.
+     */
+    toolCallMediaUrl(agentId: Cuid2, toolCallId: Cuid2, index: number): string {
+        return endpointUrl(this.#endpoint, toolCallMediaPath(agentId, toolCallId, index));
+    }
+
     /** `GET /v0/agents/:agentId/question` — the open question, or `null`. */
     async getPendingQuestion(
         agentId: Cuid2,
@@ -2360,6 +2399,13 @@ function artifactFilePath(
 }
 
 /** The `Range` header for one byte range. */
+function toolCallMediaPath(agentId: Cuid2, toolCallId: Cuid2, index: number): string {
+    if (!Number.isSafeInteger(index) || index < 0) {
+        throw new TypeError("A media index must be a non-negative integer.");
+    }
+    return `v0/agents/${encodeURIComponent(agentId)}/tool-calls/${encodeURIComponent(toolCallId)}/media/${String(index)}`;
+}
+
 function rangeHeader(range: ByteRange): string {
     if (range.suffix !== undefined) return `bytes=-${String(range.suffix)}`;
     return `bytes=${String(range.start)}-${range.end === undefined ? "" : String(range.end)}`;

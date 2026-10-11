@@ -277,8 +277,20 @@ The client exposes the feed without automatically caching skills in `HappyReduce
 missing endpoints mean this feature is unavailable, not that no skills are installed.
 
 Tool calls expose the complete `ToolPresentation` discriminated union — exploration, command,
-background-terminal interaction, file diff, web/X search, and sub-agent creation — together with
-an exported TypeBox schema for each variant and `toolPresentationSchema` for the whole set.
+background-terminal interaction, file diff, web/X search, sub-agent creation, media, and
+artifact — together with an exported TypeBox schema for each variant and `toolPresentationSchema`
+for the whole set.
+
+`MediaPresentation` lists the images, videos, PDF documents, and other files a completed call
+showed inline: generated images and files presented with `present_files`. Image items always carry
+displayed `width`, `height`, and a base64 `thumbhash` to show until the bytes load; render an
+unknown item kind as a file. Read an item's bytes with
+`getToolCallMedia(agentId, toolCallId, index)`, ranges and `ifNoneMatch` included, or hand
+`toolCallMediaUrl(agentId, toolCallId, index)` to an image, video, or document element through a
+transport that adds the bearer token. The URL's content never changes. `ArtifactPresentation`
+carries the `artifactId`, produced `version`, `artifactType`, and `title` a card needs to open an
+artifact a call created or updated. Both are additive; older daemons omit them, and their blocks
+keep raw tool data even with `omitToolData: true`.
 
 `AgentSpawnPresentation` carries an optional complete `model: { modelId, providerId, name }`
 identity resolved before child creation, and an optional `agentId` after creation and initial-task
