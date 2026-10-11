@@ -1,5 +1,6 @@
 import { cuid2Schema, defineAgentTool } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
+import { formatHappyReferenceTag } from "@slopus/happy-agent-client";
 
 import type { ComputeModule } from "../../compute/index.js";
 import {
@@ -11,7 +12,6 @@ import {
     MAX_ARTIFACT_FILES,
 } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
-import { artifactReferenceTag } from "../impl/artifactReferenceTag.js";
 import {
     describeArtifactSources,
     shouldReviewArtifactSources,
@@ -101,7 +101,7 @@ export function updateArtifactTool(
                 type: "text",
                 text: [
                     `Artifact ${artifact.id} is now at version ${String(artifact.latestVersion)}: ${JSON.stringify(artifact.title)}, ${String(artifact.fileCount)} ${artifact.fileCount === 1 ? "file" : "files"}, opening ${JSON.stringify(artifact.entry.path)}.`,
-                    `Reference it in chat as ${artifactReferenceTag(artifact.id)}, or as ${artifactReferenceTag(artifact.id, artifact.latestVersion)} for this version only.`,
+                    `Reference it in chat as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id })}, or as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id, version: artifact.latestVersion })} for this version only.`,
                 ].join(" "),
             },
         ],

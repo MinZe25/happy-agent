@@ -57,6 +57,9 @@ describe("tasks over the API", () => {
         const { tasks, memberships } = await gym.client.listTasks();
         expect(tasks).toHaveLength(1);
         const task = tasks[0]!;
+        expect(result.text).toContain(
+            `Mention it in chat as <happy-agent id="${task.agent.id}"/>.`,
+        );
         expect(task).toMatchObject({
             name: "Fix login redirect",
             folderName: "fix_login_redirect",

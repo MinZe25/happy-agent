@@ -91,6 +91,9 @@ class BotAgents {
     }
 }
 
+const BOT_REFERENCE_INSTRUCTIONS =
+    'When you mention a bot in a reply, write <happy-agent id="…"/> with the bot\'s agent ID, not its bot ID; people see its live name as a link. The bot tools give you the exact tag.';
+
 describe("BotsModule", () => {
     it.each(["Release Steward", "New Bot"])(
         "keeps a manual rename to %s when inference finishes later",
@@ -633,6 +636,14 @@ describe("BotsModule", () => {
             expect(tool.toLLM(all)).toEqual([
                 { type: "text", text: expect.stringContaining("has avatar") },
             ]);
+            expect(tool.toLLM(all)).toEqual([
+                {
+                    type: "text",
+                    text: expect.stringContaining(
+                        `mention it as <happy-agent id="${pictured.agentId}"/>`,
+                    ),
+                },
+            ]);
             expect(
                 (await tool.execute(ctx, { hasAvatar: false }, {} as never)).bots.map(
                     (bot) => bot.id,
@@ -685,9 +696,19 @@ describe("BotsModule", () => {
             });
             // A person's own agent runs the roster but has no picture of its own to set.
             await expect(fixture.tools("someoneelsesagent")).resolves.toEqual(roster);
-            await expect(
-                fixture.executeCreate("someoneelsesagent", "Human Child"),
-            ).resolves.toMatchObject({ isAdmin: false, name: "Human Child" });
+            const child = await fixture.executeCreate("someoneelsesagent", "Human Child");
+            expect(child).toMatchObject({ isAdmin: false, name: "Human Child" });
+            const create = (await fixture.toolsFor("someoneelsesagent")).find(
+                (candidate) => candidate.name === "create_bot",
+            );
+            expect(create?.toLLM(child)).toEqual([
+                {
+                    type: "text",
+                    text: expect.stringContaining(
+                        `Mention it in chat as <happy-agent id="${child.agentId}"/>.`,
+                    ),
+                },
+            ]);
         } finally {
             await fixture.close();
         }
@@ -702,7 +723,10 @@ describe("BotsModule", () => {
                 username: "research_assistant",
             });
 
-            await expect(fixture.instructions("someoneelsesagent")).resolves.toBe("");
+            // Every agent offered the bot tools learns how to mention a bot, and nothing else.
+            await expect(fixture.instructions("someoneelsesagent")).resolves.toBe(
+                BOT_REFERENCE_INSTRUCTIONS,
+            );
             await expect(fixture.instructions(created.agentId)).resolves.toBe(
                 [
                     "# Bot identity",
@@ -720,6 +744,8 @@ describe("BotsModule", () => {
                     'When the user says "make a task" or "create a task", use create_task. A task is a persistent, user-visible conversation with its own folder, owned by the person who asked; it has no avatar and creates its own subtasks for project work. Give it a short name, put the work in its opening text, and follow up with send_task_message and list_tasks. Use create_subtask only when the user asks for a subtask or the work is a delegated part of your own conversation.',
                     "",
                     "For other work, prefer create_subtask for substantial, distinct workstreams; handle small steps inline. Usually create second-level subtasks only on explicit user request. If the user explicitly asks for a subtask, use create_subtask. Use create_agent for internal research. Coordinate via send_agent_message and archive_subtask; do not wait for subtasks.",
+                    "",
+                    BOT_REFERENCE_INSTRUCTIONS,
                 ].join("\n"),
             );
 
@@ -846,6 +872,7 @@ async function started(name: string, workspacesEnabled: boolean, script: Scripte
         start: async (): Promise<void> => {
             await hooks.afterStart?.(database.context, agents.asRef());
         },
+        toolsFor,
         tools: async (agentId: string): Promise<readonly string[]> => {
             return (await toolsFor(agentId)).map((tool) => tool.name);
         },

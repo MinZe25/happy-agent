@@ -1,6 +1,7 @@
 import { createId } from "@paralleldrive/cuid2";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
+import { formatHappyReferenceTag } from "@slopus/happy-agent-client";
 
 import type { ComputeModule } from "../../compute/index.js";
 import { quoteVisibleExact } from "../../impl/quoteVisibleExact.js";
@@ -11,7 +12,6 @@ import {
     MAX_ARTIFACT_FILES,
 } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
-import { artifactReferenceTag } from "../impl/artifactReferenceTag.js";
 import { formatArtifactSource } from "../impl/formatArtifact.js";
 import {
     describeArtifactSources,
@@ -100,7 +100,7 @@ export function createArtifactTool(
                     ...(artifact.source === undefined
                         ? []
                         : [`Made in ${formatArtifactSource(artifact.source)}.`]),
-                    `Reference it in chat as ${artifactReferenceTag(artifact.id)}.`,
+                    `Reference it in chat as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id })}.`,
                     "Change it with update_artifact.",
                 ].join(" "),
             },

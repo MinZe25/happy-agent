@@ -87,3 +87,11 @@ roots. Task agents are roots too, so a non-admin bot could have created bots thr
 created. `BotsModule` takes this module and gives task agents only `list_bots` and
 `send_bot_message`. The dependency points that way so the tasks module never needs to know bots;
 it records the creating agent's ID, and the bots module names the creating bot to the task.
+
+## A task is mentioned by its agent ID
+
+Kirill asked for tasks to be clickable in chat. A reference tag names the conversation a client
+opens, so a task is mentioned as `<happy-agent id="…"/>` with its agent ID, never its task ID,
+which no route opens as a conversation. `create_task` and `list_tasks` hand back the exact tag,
+and the agents offered the task tools are told to use it, so a model never has to work out
+which of the two IDs goes in it.

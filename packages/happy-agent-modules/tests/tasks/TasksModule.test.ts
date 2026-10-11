@@ -142,6 +142,11 @@ class TaskAgents {
     }
 }
 
+const TASK_REFERENCE_INSTRUCTIONS =
+    'When you mention a task in a reply, write <happy-agent id="…"/> with the task\'s agent ID, not its task ID; people see its live name as a link. The task tools give you the exact tag.';
+const BOT_REFERENCE_INSTRUCTIONS =
+    'When you mention a bot in a reply, write <happy-agent id="…"/> with the bot\'s agent ID, not its bot ID; people see its live name as a link. The bot tools give you the exact tag.';
+
 describe("TasksModule", () => {
     it("lets a bot create a task owned by its current team sender, in a dedicated folder", async () => {
         const fixture = await started("tasks-bot-creates");
@@ -254,9 +259,14 @@ describe("TasksModule", () => {
                     "Keep this task's own notes and files in its folder. Strongly prefer doing repository work in workspace-bound subtasks: use create_subtask with the relevant project so the work gets its own project workspace, instead of changing directories into a repository from this folder.",
                     "",
                     `This task was created by the bot named "Planner" (bot ID \`${bot.id}\`). Its messages arrive as agent messages. Report progress, results, and blockers to it with send_bot_message.`,
+                    "",
+                    BOT_REFERENCE_INSTRUCTIONS,
                 ].join("\n"),
             );
-            await expect(fixture.instructions("someoneelsesagent")).resolves.toBe("");
+            // An agent offered the task and bot tools learns how to mention each.
+            await expect(fixture.instructions("someoneelsesagent")).resolves.toBe(
+                `${TASK_REFERENCE_INSTRUCTIONS}\n\n${BOT_REFERENCE_INSTRUCTIONS}`,
+            );
         } finally {
             await fixture.close();
         }
@@ -379,6 +389,7 @@ describe("TasksModule", () => {
             expect(page.tasks[0]?.owner).toBe(`user ID \`${OWNER}\``);
             const text = JSON.stringify(list.toLLM(page as never));
             expect(text).toContain(`First — id ${first.id}, owner user ID`);
+            expect(text).toContain(`mention it as <happy-agent id=\\"${first.agentId}\\"/>`);
             expect(text).toContain("continue with offset 1");
 
             const archived = (await list.execute(

@@ -164,6 +164,9 @@ export type ProjectCompute =
 
 /** The product manages its own folders; the agent sandbox does not apply to that work. */
 const PRODUCT = computePermissions("full_access");
+/** How an agent offered the project tools mentions one, so people see its live name as a link. */
+const PROJECT_REFERENCE_INSTRUCTIONS =
+    'When you mention a project in a reply, write <happy-project id="…"/> with its project ID; people see its live name as a link.';
 
 /** How many projects one page may carry, and how much text a page may spend on them. */
 export const PROJECT_PAGE_SIZE = 50;
@@ -323,17 +326,25 @@ export class ProjectsModule implements AgentModule {
         };
     }
 
+    /**
+     * The catalog spans every project on the machine, which is exactly what looking outside the
+     * current one means, so the user's setting decides whether it exists at all. A subagent works
+     * inside the task it was handed and never gets it.
+     */
+    async #offersTools(ctx: Context, agentId: string): Promise<boolean> {
+        if (!this.#crossWorkspace) return false;
+        const agents = this.#agents;
+        if (agents === undefined) {
+            throw new Error("The projects module was asked for tools before it started.");
+        }
+        return (await agents.parentOf(ctx, agentId)) === null;
+    }
+
     readonly #hooks: AgentModuleHooks = {
+        instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> =>
+            (await this.#offersTools(ctx, scope.agent.id)) ? PROJECT_REFERENCE_INSTRUCTIONS : "",
         tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
-            // The catalog spans every project on the machine, which is exactly what looking
-            // outside the current one means, so the user's setting decides whether it exists at
-            // all. A subagent works inside the task it was handed and never gets it.
-            if (!this.#crossWorkspace) return [];
-            const agents = this.#agents;
-            if (agents === undefined) {
-                throw new Error("The projects module was asked for tools before it started.");
-            }
-            if ((await agents.parentOf(ctx, scope.agent.id)) !== null) return [];
+            if (!(await this.#offersTools(ctx, scope.agent.id))) return [];
             return [
                 listProjectsTool(this, scope.agent.id),
                 setProjectAvatarTool(this),

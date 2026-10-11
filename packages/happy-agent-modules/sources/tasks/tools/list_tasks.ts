@@ -1,6 +1,7 @@
 import { defineAgentTool, type AgentKV } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 import type { Context } from "@steve.kite/stdlib";
+import { formatHappyReferenceTag } from "@slopus/happy-agent-client";
 
 import { taskRecordSchema, taskStatusSchema, type TaskRecord } from "../Task.js";
 import type { TasksModule } from "../TasksModule.js";
@@ -109,6 +110,7 @@ function formatTaskLine({ task, owner }: ListedTask): string {
         ...(owner === null ? [] : [`owner ${owner}`]),
         ...(task.creatorAgentId === undefined ? [] : [`created by agent ${task.creatorAgentId}`]),
         `folder ${task.path}`,
+        `mention it as ${formatHappyReferenceTag({ kind: "agent", id: task.agentId })}`,
     ];
     return `- ${task.name}${status} — ${facts.join(", ")}`;
 }

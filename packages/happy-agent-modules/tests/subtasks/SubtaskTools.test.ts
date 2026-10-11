@@ -67,8 +67,27 @@ describe("subtask instructions", () => {
             expect(instructions).toContain(
                 "Usually create second-level subtasks only on explicit user request.",
             );
+            expect(instructions).toContain(
+                'When you mention a subtask in a reply, write <happy-agent id="…"/> with its agent ID',
+            );
         },
     );
+});
+
+describe("subtask creation result", () => {
+    it("gives the coordinator the exact tag to mention the new subtask", () => {
+        const tool = createSubtaskTool(
+            { modelDescription: () => "" } as unknown as SubtasksModule,
+            "parent",
+            "codex",
+        );
+        expect(tool.toLLM({ agentId: "subtaskagent1" })).toEqual([
+            {
+                type: "text",
+                text: 'Created subtask subtaskagent1 sharing your filesystem. It runs independently; use send_agent_message to coordinate with it. Mention it in chat as <happy-agent id="subtaskagent1"/>.',
+            },
+        ]);
+    });
 });
 
 describe("subtask archival tool", () => {

@@ -1,6 +1,7 @@
 import { createId } from "@paralleldrive/cuid2";
 import { defineAgentTool, type AgentKV } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
+import { formatHappyReferenceTag } from "@slopus/happy-agent-client";
 
 import { taskNameSchema, taskRecordSchema } from "../Task.js";
 import type { TasksModule } from "../TasksModule.js";
@@ -47,7 +48,7 @@ export function createTaskTool(tasks: TasksModule, actingAgentId: string, kv: Ag
         toLLM: (task) => [
             {
                 type: "text",
-                text: `Task created: ${task.name} — id ${task.id}, folder ${task.path}. Send it messages with send_task_message.`,
+                text: `Task created: ${task.name} — id ${task.id}, folder ${task.path}. Send it messages with send_task_message. Mention it in chat as ${formatHappyReferenceTag({ kind: "agent", id: task.agentId })}.`,
             },
         ],
     });

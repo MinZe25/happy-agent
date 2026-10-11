@@ -10,6 +10,7 @@ import type { HappyIntegration } from "@slopus/happy-agent-client";
 import { detach, type Context } from "@steve.kite/stdlib";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
 
+import type { ArtifactsModule } from "../artifacts/index.js";
 import type { BotsModule } from "../bots/index.js";
 import type { ComputeModule } from "../compute/index.js";
 import type { ConfigModule } from "../config/index.js";
@@ -20,6 +21,7 @@ import type { HistoryModule } from "../history/index.js";
 import type { ProjectsModule } from "../projects/index.js";
 import type { ProviderUsageModule } from "../providerUsage/index.js";
 import type { SchedulingModule } from "../scheduling/index.js";
+import type { TasksModule } from "../tasks/index.js";
 import { TeamAuthenticationError, type TeamModule, type TeamUser } from "../team/index.js";
 import type { UserInputModule } from "../userInput/index.js";
 import type { WorkspacesModule } from "../workspaces/index.js";
@@ -64,6 +66,8 @@ export class HappyModule extends HappyConnection implements AgentModule<AnyAgent
         bots: BotsModule,
         team: TeamModule,
         files: ProjectFilesModule,
+        artifacts: ArtifactsModule,
+        tasks: TasksModule,
     ) {
         super(
             config,
@@ -78,6 +82,8 @@ export class HappyModule extends HappyConnection implements AgentModule<AnyAgent
             workspaces,
             bots,
             files,
+            artifacts,
+            tasks,
         );
         this.#team = team;
         this.#createConnection = (user) =>
@@ -94,6 +100,8 @@ export class HappyModule extends HappyConnection implements AgentModule<AnyAgent
                 workspaces,
                 bots,
                 files,
+                artifacts,
+                tasks,
                 team,
                 user,
             );

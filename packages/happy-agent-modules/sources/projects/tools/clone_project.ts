@@ -1,6 +1,7 @@
 import { createId } from "@paralleldrive/cuid2";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
+import { formatHappyReferenceTag } from "@slopus/happy-agent-client";
 
 import { quoteVisibleExact } from "../../impl/quoteVisibleExact.js";
 import { projectNameSchema, projectRemoteSourceSchema, projectSchema } from "../Project.js";
@@ -48,7 +49,13 @@ export function cloneProjectTool(projects: ProjectsModule) {
                 projectId: await call.kv.getOrCreate(ctx, "projectId", () => createId()),
             }),
         toLLM: (project) => [
-            { type: "text", text: projects.formatProjectForModel("Project import:", project) },
+            {
+                type: "text",
+                text: projects.formatProjectForModel(
+                    `Project import. Mention it in chat as ${formatHappyReferenceTag({ kind: "project", id: project.id })}.`,
+                    project,
+                ),
+            },
         ],
     });
 }

@@ -19,6 +19,7 @@ import {
     type AgentModuleHooks,
     type AgentSystemRef,
 } from "@slopus/happy-agent-base";
+import { ArtifactsModule } from "../artifacts/index.js";
 import type { AgentEvent, EventsModuleListener } from "../events/index.js";
 import { ComputeModule } from "../compute/index.js";
 import { BotsModule } from "../bots/index.js";
@@ -42,6 +43,7 @@ import {
     type WorkspaceAgentPlacement,
     type WorkspaceEvent,
 } from "../workspaces/index.js";
+import { TasksModule } from "../tasks/index.js";
 import { TeamModule, type TeamUser } from "../team/index.js";
 import { ConfigModule } from "../config/index.js";
 import type { SessionInputBlock, SessionUserMessage } from "@slopus/happy-providers";
@@ -99,8 +101,14 @@ import {
 import { createHappySyncDatabase } from "./HappySyncDatabase.js";
 import { createHappyProjectSyncDatabase } from "./HappyProjectSyncDatabase.js";
 import { HappyMessageMapper } from "./mapHappyMessages.js";
-import { happyAuthorOf, type HappyAuthor } from "./HappyProtocol.js";
+import {
+    happyAuthorOf,
+    type HappyAuthor,
+    type HappySessionProtocolMessage,
+} from "./HappyProtocol.js";
 import { removeHappyComputer, type HappyComputerRemoval } from "./removeHappyComputer.js";
+import { renderHappyMessageReferences } from "./renderHappyMessageReferences.js";
+import { resolveHappyReferenceLabel } from "./resolveHappyReferenceLabel.js";
 import { resolveHappyUserInputAnswers } from "./resolveHappyUserInputAnswers.js";
 import {
     HAPPY_READ_MAX_BYTES,
@@ -221,6 +229,7 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
     readonly #unsubscribedMappers = new Map<string, HappyMessageMapper>();
     readonly #transactionAttachments = new WeakMap<object, AttachmentState>();
     readonly #config: ConfigModule;
+    readonly #artifacts: ArtifactsModule;
     readonly #bots: BotsModule;
     readonly #botUpdates = mapAsyncLock<string>();
     readonly #compute: ComputeModule;
@@ -233,6 +242,7 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
     readonly #providerUsage: ProviderUsageModule;
     readonly #userInput: UserInputModule;
     readonly #workspaces: WorkspacesModule;
+    readonly #taskCatalog: TasksModule;
     readonly #sync: ReturnType<typeof createHappySyncDatabase>;
     readonly #projectSync: ReturnType<typeof createHappyProjectSyncDatabase>;
     readonly #integrationDatabase: ReturnType<typeof createHappyIntegrationDatabase>;
@@ -282,6 +292,8 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         workspaces: WorkspacesModule,
         bots: BotsModule,
         files: ProjectFilesModule,
+        artifacts: ArtifactsModule,
+        tasks: TasksModule,
         team?: TeamModule,
         owner?: TeamUser,
     ) {
@@ -302,6 +314,8 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         this.#userInput = userInput;
         this.#workspaces = workspaces;
         this.#bots = bots;
+        this.#artifacts = artifacts;
+        this.#taskCatalog = tasks;
         const now = Date.now();
         this.#integration = {
             authorization: null,
@@ -332,10 +346,14 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
                     ? undefined
                     : await this.#history.message(ctx, event.agentId, event.payload.id);
             const author = accepted === undefined ? undefined : await this.#authorOf(ctx, accepted);
+            const messages = await this.#renderReferences(
+                ctx,
+                attached.mapper.map(event, accepted, author),
+            );
             await this.#sync.projectEvent(ctx, {
                 agentId: event.agentId,
                 eventId: event.id,
-                messages: attached.mapper.map(event, accepted, author).map((message) => ({
+                messages: messages.map((message) => ({
                     localId: message.localId,
                     payload: message,
                 })),
@@ -343,6 +361,32 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
             });
         },
     };
+
+    /**
+     * Turns the agent's reference tags into plain names, since the phone shows text, not links.
+     * A reference that cannot be read becomes the placeholder; it never holds up the sync.
+     */
+    async #renderReferences(
+        ctx: Context,
+        messages: readonly HappySessionProtocolMessage[],
+    ): Promise<HappySessionProtocolMessage[]> {
+        const catalogs = {
+            agents: this.#system(),
+            artifacts: this.#artifacts,
+            bots: this.#bots,
+            projects: this.#projects,
+            tasks: this.#taskCatalog,
+            workspaces: this.#workspaces,
+        };
+        return await renderHappyMessageReferences(messages, async (reference) => {
+            try {
+                return await resolveHappyReferenceLabel(ctx, catalogs, reference);
+            } catch (error) {
+                ctx.log.debug("Happy could not name a referenced item.", { reference }, error);
+                return undefined;
+            }
+        });
+    }
 
     /**
      * Names who wrote a user message, for the phone to attribute it.
@@ -2264,10 +2308,13 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
             // One archived record may contain several structured tool events. The phone's initial
             // payload is still bounded to 50 protocol messages, keeping the newest visible context
             // while preserving chronological order within that window.
-            const history = mapper.mapHistory(
-                messages,
-                HAPPY_BACKFILL_MESSAGES,
-                await this.#historyAuthors(ctx, messages),
+            const history = await this.#renderReferences(
+                ctx,
+                mapper.mapHistory(
+                    messages,
+                    HAPPY_BACKFILL_MESSAGES,
+                    await this.#historyAuthors(ctx, messages),
+                ),
             );
             await this.#sync.backfillHistory(
                 ctx,

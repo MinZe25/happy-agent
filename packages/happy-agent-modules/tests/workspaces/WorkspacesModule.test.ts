@@ -95,6 +95,11 @@ describe("WorkspacesModule", () => {
                 "get_workspace",
                 "get_workspace_branch_metadata",
             ]);
+            expect(
+                await hooks.instructions?.(database.context, { agent: { id: "agent-1" } } as never),
+            ).toBe(
+                'When you mention a workspace in a reply, write <happy-workspace id="…"/> with its workspace ID; people see its live name as a link.',
+            );
         } finally {
             database.close();
         }

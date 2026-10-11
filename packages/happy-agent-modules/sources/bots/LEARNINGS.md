@@ -206,3 +206,10 @@ The generic agent prompt still identifies the underlying runtime as Happy Agent.
 adds the current bot display name, immutable username, and stable bot ID only for the bot's own
 agent, making the bot identity explicit without affecting ordinary agents. The contribution reads
 the catalog on each inference so renaming a bot reaches its next turn immediately.
+
+## A bot is mentioned by its agent ID
+
+Like tasks, a bot is mentioned in chat as `<happy-agent id="…"/>` with the bot's agent ID, not
+its bot ID, because the tag names the conversation a client opens. `create_bot` and `list_bots`
+give the exact tag, and every agent offered the bot tools, task agents included, is told to use
+it.

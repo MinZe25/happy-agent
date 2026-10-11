@@ -139,6 +139,17 @@ The queue is bounded, and reaching a bound is a decision rather than a failure:
   because sending what came after it would show the phone a conversation that
   never happened.
 
+Agents mention artifacts, conversations, workspaces, and projects with reference
+tags such as `<happy-artifact id="…"/>`, which the phone cannot render as links.
+Before the agent's text and service notices are queued, live and backfilled
+alike, each tag becomes its entity's current name, read from the artifacts,
+bots, tasks, projects, and workspaces modules and the agent's own title. A tag
+whose entity is gone, deleted, or archived, or whose kind is unknown or a
+service, becomes the shared placeholder, such as "an unavailable artifact". A
+lookup that fails falls back to the placeholder and never holds up the sync.
+History keeps the tags exactly as the agent wrote them. Tags in code, user
+messages, and tool output are left as they are.
+
 ## Acting on a conversation
 
 The socket, the encryption and the queue are this module's own. The conversation

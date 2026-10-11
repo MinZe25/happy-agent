@@ -71,7 +71,11 @@ describe("project creation tools", () => {
         });
         expect((await projects.list(ctx)).projects).toHaveLength(1);
         expect(createProjectTool(projects).toLLM!(first)).toEqual([
-            expect.objectContaining({ text: expect.stringContaining(first.id) }),
+            expect.objectContaining({
+                text: expect.stringContaining(
+                    `Project registered. Mention it in chat as <happy-project id="${first.id}"/>.`,
+                ),
+            }),
         ]);
     });
 
@@ -106,6 +110,11 @@ describe("project creation tools", () => {
         );
         expect(cloneProjectTool(projects).toLLM!(first)).toEqual([
             expect.objectContaining({ text: expect.stringContaining("Still being set up") }),
+        ]);
+        expect(cloneProjectTool(projects).toLLM!(first)).toEqual([
+            expect.objectContaining({
+                text: expect.stringContaining(`<happy-project id="${first.id}"/>`),
+            }),
         ]);
     });
 

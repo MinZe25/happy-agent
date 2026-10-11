@@ -58,6 +58,10 @@ const SELECTION = {
     providerId: "codex",
 };
 
+/** Catalogs only reference tags are named from; these tests never mention anything. */
+const referenceArtifacts = { get: async () => undefined };
+const referenceTasks = { forAgent: async () => undefined };
+
 const databases: ReturnType<typeof moduleDatabase>[] = [];
 const temporaryDirectories: string[] = [];
 const modules: HappyModule[] = [];
@@ -402,6 +406,8 @@ async function fixture() {
                 hash: "a".repeat(64),
             }),
         } as never,
+        referenceArtifacts as never,
+        referenceTasks as never,
     );
     modules.push(module);
     module.beforeStart(database.context, agents as never);
@@ -1287,6 +1293,8 @@ describe("archiving a Happy session", () => {
             } as never,
             { enabled: false } as never,
             {} as never,
+            referenceArtifacts as never,
+            referenceTasks as never,
         );
         modules.push(module);
         const hooks = module.beforeStart(database.context, agents as never);
@@ -1528,6 +1536,8 @@ describe("archiving a Happy session", () => {
             } as never,
             { enabled: false } as never,
             {} as never,
+            referenceArtifacts as never,
+            referenceTasks as never,
         );
         modules.push(module);
 

@@ -85,6 +85,9 @@ const ownerSchema = Type.Union([cuid2Schema, Type.Null()]);
 
 /** The catalog manages its tasks' folders; the agent sandbox does not apply to that work. */
 const PRODUCT = computePermissions("full_access");
+/** How an agent that manages tasks mentions one, so people see its live name as a link. */
+const TASK_REFERENCE_INSTRUCTIONS =
+    'When you mention a task in a reply, write <happy-agent id="…"/> with the task\'s agent ID, not its task ID; people see its live name as a link. The task tools give you the exact tag.';
 
 /**
  * Persistent task conversations, each with a dedicated folder and an owner.
@@ -153,8 +156,10 @@ export class TasksModule implements AgentModule {
     readonly #hooks: AgentModuleHooks = {
         instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
             const task = await readTaskByAgent(ctx, scope.agent.id);
-            if (task === undefined) return "";
-            return formatTaskIdentityPrompt(task, this.ownerLabel(task));
+            if (task !== undefined) return formatTaskIdentityPrompt(task, this.ownerLabel(task));
+            // Only the agents offered the task tools hear how to mention a task.
+            if ((await this.#requireAgents().parentOf(ctx, scope.agent.id)) !== null) return "";
+            return TASK_REFERENCE_INSTRUCTIONS;
         },
         tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
             // A task delegates through subtasks, not through more tasks, and a subagent or

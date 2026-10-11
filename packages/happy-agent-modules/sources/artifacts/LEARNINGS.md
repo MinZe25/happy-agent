@@ -69,6 +69,5 @@ components. An agent writes `<happy-artifact id="…"/>` inline and never the ti
 title the model wrote goes stale when the artifact is renamed. Clients look up the live title and
 render a link. Surfaces that cannot do that get the title as plain text. The tools return the exact
 tag, and the module adds a short instruction, because the artifact tools are deferred and an agent
-may mention an artifact without loading them. The tag is built locally from the CUID2. The
-grammar's one parser lives in `@slopus/happy-agent-client`, which modules can use only once a
-release ships it.
+may mention an artifact without loading them. Tags are written with the client's
+`formatHappyReferenceTag`, so this module never repeats the grammar.

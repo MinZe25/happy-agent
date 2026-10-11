@@ -73,6 +73,9 @@ const BOT_NAME_ATTEMPTED_KEY = "bot-name-attempted";
 /** Persistent single-conversation assistants and the dedicated folders they own. */
 /** The catalog manages its bots' folders; the agent sandbox does not apply to that work. */
 const PRODUCT = computePermissions("full_access");
+/** How an agent offered the bot tools mentions a bot, so people see its live name as a link. */
+const BOT_REFERENCE_INSTRUCTIONS =
+    'When you mention a bot in a reply, write <happy-agent id="…"/> with the bot\'s agent ID, not its bot ID; people see its live name as a link. The bot tools give you the exact tag.';
 
 export class BotsModule implements AgentModule {
     readonly name = "bots";
@@ -117,15 +120,26 @@ export class BotsModule implements AgentModule {
         instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
             const bot = await readBotByAgent(ctx, scope.agent.id);
             if (bot !== undefined) {
-                return bot.systemKey === CHIEF_OF_STAFF_SYSTEM_KEY
-                    ? formatChiefOfStaffInstructions(bot)
-                    : formatBotIdentityPrompt(bot);
+                const identity =
+                    bot.systemKey === CHIEF_OF_STAFF_SYSTEM_KEY
+                        ? formatChiefOfStaffInstructions(bot)
+                        : formatBotIdentityPrompt(bot);
+                return `${identity}\n\n${BOT_REFERENCE_INSTRUCTIONS}`;
             }
             // A task a bot created reports back to that bot, which it reaches by bot ID.
             const task = await this.#tasks.forAgent(ctx, scope.agent.id);
-            if (task?.creatorAgentId === undefined) return "";
-            const creator = await readBotByAgent(ctx, task.creatorAgentId);
-            return creator === undefined ? "" : formatTaskCreatorPrompt(creator);
+            if (task !== undefined) {
+                const creator =
+                    task.creatorAgentId === undefined
+                        ? undefined
+                        : await readBotByAgent(ctx, task.creatorAgentId);
+                return creator === undefined
+                    ? BOT_REFERENCE_INSTRUCTIONS
+                    : `${formatTaskCreatorPrompt(creator)}\n\n${BOT_REFERENCE_INSTRUCTIONS}`;
+            }
+            // A subagent is offered no bot tools, so it has no bots to mention.
+            if ((await this.#requireAgents().parentOf(ctx, scope.agent.id)) !== null) return "";
+            return BOT_REFERENCE_INSTRUCTIONS;
         },
         tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
             const roster = [

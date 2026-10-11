@@ -178,6 +178,31 @@ describe("ProjectsModule", () => {
         expect(await projectToolNames(await projectsModule(), "subagent-a")).toEqual([]);
     });
 
+    it("tells exactly the agents offered the catalog how to mention a project", async () => {
+        const instructions = async (projects: ProjectsModule, agentId: string) => {
+            const hooks = projects.beforeStart(
+                undefined as never,
+                {
+                    parentOf: (_ctx: unknown, id: string) =>
+                        Promise.resolve(id === "subagent-a" ? "agent-a" : null),
+                } as never,
+            );
+            return await hooks.instructions!(
+                undefined as never,
+                {
+                    agent: { id: agentId },
+                } as never,
+            );
+        };
+        expect(await instructions(await projectsModule(), "agent-a")).toBe(
+            'When you mention a project in a reply, write <happy-project id="…"/> with its project ID; people see its live name as a link.',
+        );
+        expect(await instructions(await projectsModule(), "subagent-a")).toBe("");
+        expect(await instructions(await projectsModule(NO_CROSS_WORKSPACE_TOML), "agent-a")).toBe(
+            "",
+        );
+    });
+
     it("sets a generated project avatar from an image inside that project's folder", async () => {
         const database = await migratedProjectDatabase("projects-avatar-tool-test");
         const config = await temporaryTestConfig();

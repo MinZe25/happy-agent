@@ -75,6 +75,10 @@ subagents receive none: a task delegates through subtasks.
 - `archive_task` — `{ taskId }`. Only the creating agent may archive through the tool. Reviewed
   in Auto, never elevated.
 
+The same agents are told to mention a task as `<happy-agent id="…"/>` with the task's agent ID,
+never its task ID; `create_task` and `list_tasks` give that exact tag. Clients show the task's live
+name as a link in its place.
+
 A task's own agent receives its identity prompt from this module. `BotsModule` gives it
 `list_bots` and `send_bot_message` (never `create_bot`) and, when a bot created it, names that bot
 so the task reports back to it. `SubtasksModule` gives it the same coordinator guidance and

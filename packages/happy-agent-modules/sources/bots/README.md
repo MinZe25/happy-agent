@@ -51,6 +51,10 @@ On every inference, the module adds the owning bot's current display name, immut
 and stable bot ID to that bot agent's system instructions. It contributes nothing to ordinary
 agents, and a rename reaches the bot on its next turn without changing its agent identity.
 
+Every agent offered the bot tools is told to mention a bot as `<happy-agent id="…"/>` with the
+bot's agent ID, never its bot ID, and `create_bot` and `list_bots` give that exact tag. Clients show
+the bot's live name as a link in its place.
+
 Bot routes are available regardless of `features.workspaces`. That flag continues to gate the
 shared `/v0/workspaces` HTTP and model-tool surfaces, while bot creation, listing, lifecycle, and
 agent messaging remain usable. When workspace routes are enabled, a bot's unlisted dedicated

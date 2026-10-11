@@ -66,7 +66,7 @@ describe("workspace creation through the agent tool", () => {
             .find((result) => result.callId === "call_workspace_agent_tool");
         if (toolResult === undefined)
             throw new Error("The child-workspace tool returned no result.");
-        expect(toolResult.text).toContain("Child workspace created:");
+        expect(toolResult.text).toContain("Child workspace created.");
 
         const workspace = await gym.waitUntil(async () => {
             const candidate = (
@@ -90,6 +90,9 @@ describe("workspace creation through the agent tool", () => {
             parentId: project.id,
             projectId: project.id,
         });
+        expect(toolResult.text).toContain(
+            `Mention it in chat as <happy-workspace id="${workspace.id}"/>.`,
+        );
         expect(workspace.compute.type).toBe("host");
         if (workspace.compute.type !== "host") {
             throw new Error("The agent-tool workspace did not receive a host folder.");

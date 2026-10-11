@@ -137,6 +137,10 @@ disarms the project watch when its last ready workspace disappears.
 
 ## Tools it provides to the model
 
+Every agent offered these tools is also told to mention a workspace as
+`<happy-workspace id="…"/>`, and the two creation tools return that exact tag. Clients show the
+workspace's live name as a link in its place.
+
 - **`create_child_workspace`** — `{ name, baseRef? }`. Creates a named workspace directly below the
   workspace that owns the calling agent. An agent attached to a project creates below that
   project's root workspace; an agent attached to a nested workspace creates below that exact

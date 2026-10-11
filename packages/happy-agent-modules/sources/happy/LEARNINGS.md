@@ -43,6 +43,18 @@ failure notice under the same identity. The full content remains in local Histor
 events keep syncing. An optional relay projection must not permanently stall a session behind
 one message it cannot carry.
 
+## Reference tags become names on the phone
+
+Agents now mention artifacts, conversations, workspaces, and projects as `<happy-KIND id="…"/>`
+tags. The phone cannot render them, and API.md requires every integration to get plain Markdown,
+never a raw tag. The mapper stays synchronous and knows nothing of catalogs. After it runs, the
+connection rewrites only agent-role text and service notices with the client package's own
+fallback renderer, resolving each distinct reference once and in order, inside the event's
+transaction. The module takes the artifacts and tasks modules for this; bots, projects,
+workspaces, and the agent collection were already at hand. An inert reference, or a lookup
+that throws, becomes the placeholder, because naming optional context must never stall the
+outbox. History keeps the tags, so a later client still renders them as links.
+
 ## Mobile tool wire normalization
 
 - Native Windows PowerShell calls retain their real name, command purpose, and background-shell

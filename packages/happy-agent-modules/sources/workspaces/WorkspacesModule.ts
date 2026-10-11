@@ -204,6 +204,9 @@ export interface WorkspaceAgentPlacement {
 
 /** The catalog manages its own folders; the agent sandbox does not apply to that work. */
 const PRODUCT = computePermissions("full_access");
+/** How an agent offered the workspace tools mentions one, so people see its live name as a link. */
+const WORKSPACE_REFERENCE_INSTRUCTIONS =
+    'When you mention a workspace in a reply, write <happy-workspace id="…"/> with its workspace ID; people see its live name as a link.';
 
 export class WorkspacesModule implements AgentModule {
     readonly name = "workspaces";
@@ -359,15 +362,10 @@ export class WorkspacesModule implements AgentModule {
     }
 
     readonly #hooks: AgentModuleHooks = {
+        instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> =>
+            (await this.#offersTools(ctx, scope.agent.id)) ? WORKSPACE_REFERENCE_INSTRUCTIONS : "",
         tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
-            if (!this.#enabled) return [];
-            const agents = this.#agents;
-            if (agents === undefined) {
-                throw new Error("The workspaces module was asked for tools before it started.");
-            }
-            // Workspaces belong to the conversation a person is having. A subagent is one pair of
-            // hands inside the task it was given, and stays in the workspace it was started in.
-            if ((await agents.parentOf(ctx, scope.agent.id)) !== null) return [];
+            if (!(await this.#offersTools(ctx, scope.agent.id))) return [];
             return [
                 createChildWorkspaceTool(this, scope.agent.id),
                 createWorkspaceTool(this, scope.agent.id),
@@ -379,6 +377,19 @@ export class WorkspacesModule implements AgentModule {
             ];
         },
     };
+
+    /**
+     * Workspaces belong to the conversation a person is having. A subagent is one pair of hands
+     * inside the task it was given, and stays in the workspace it was started in.
+     */
+    async #offersTools(ctx: Context, agentId: string): Promise<boolean> {
+        if (!this.#enabled) return false;
+        const agents = this.#agents;
+        if (agents === undefined) {
+            throw new Error("The workspaces module was asked for tools before it started.");
+        }
+        return (await agents.parentOf(ctx, agentId)) === null;
+    }
 
     readonly beforeStart = (ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
         this.#agents = agents;

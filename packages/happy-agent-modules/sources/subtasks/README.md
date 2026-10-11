@@ -23,3 +23,5 @@ history. A workspace-bound subtask and its workspace archive together in one tra
 either side; a shared-filesystem subtask never archives the folder it shares.
 Archival is final: a subtask is never restored. Durable Functions owns post-commit compute
 cleanup. Agent Base remains unchanged.
+Coordinators are told to mention a subtask as `<happy-agent id="…"/>` with its agent ID, and
+`create_subtask` returns that exact tag; clients show the subtask's live title as a link.
