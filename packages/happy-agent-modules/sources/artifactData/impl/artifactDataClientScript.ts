@@ -244,7 +244,7 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
         var entries = [];
         var firstCursor;
         function page(after) {
-            return request("GET", "/kv" + query({ prefix: prefix, after: after, limit: 1000 })).then(function (body) {
+            return request("GET", "/kv" + query({ prefix: prefix, pageCursor: after, limit: 1000 })).then(function (body) {
                 if (firstCursor === undefined) firstCursor = body.cursor;
                 entries = entries.concat(body.entries);
                 return body.nextPageCursor ? page(body.nextPageCursor) : { entries: entries, cursor: firstCursor };

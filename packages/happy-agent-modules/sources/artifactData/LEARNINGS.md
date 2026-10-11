@@ -57,3 +57,13 @@ unguessable addresses and pages are untrusted code; the store keeps the mapping 
 resolves it to a name with `kind: "agent"`. The write tool takes the value as JSON text so every
 provider's schema can carry it, and derives its write ID from the call ID so a call repeated after
 an interruption is not applied twice.
+
+## The SDK must send exactly the parameters the routes read
+
+The released SDK asked for each next listing page with `after`, while `GET kv` reads only
+`pageCursor`, as API.md specifies. Every request answered page one again, so a prefix of more
+than 1,000 keys made `list` and `trackPrefix` request forever, grow memory, and stay "syncing".
+No test paged, so it went unseen. The SDK now sends `pageCursor`, a gym test pages 1,005 keys
+through the served `client.js` and counts its requests, and an audit of every request the SDK
+builds (query names, headers, and body fields) against the routes and API.md found no other
+mismatch. Any new SDK call needs a test that drives it through the served script.
