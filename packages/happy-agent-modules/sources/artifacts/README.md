@@ -59,6 +59,11 @@ the place it works in, found by `actorFor`.
 | `read_artifact_file` | One file by path: text 64 KiB at a time from an offset, ending on whole characters; raster images shown to the model scaled to 2,048 pixels; other binary files described only.                      | Never.                                                 | Reloadable.                                         |
 | `delete_artifact`    | Leaves a tombstone for everyone.                                                                                                                                                                     | Always, because deletion is final.                     | Durable and transactional.                          |
 
+Agents mention an artifact in their replies by its reference tag, `<happy-artifact id="…"/>`, with
+`version="N"` to point at one version. The module's instructions tell every agent so, and
+`create_artifact`, `update_artifact`, `read_artifact`, and `list_artifacts` hand back the exact tag.
+Clients show the artifact's live title as a link in its place (API.md, "Reference tags").
+
 A path that leaves the workspace or resolves through a symlink outside it is reviewed and, when
 allowed, read with temporary Full access, through Compute's shared `shouldReviewPath`. Files are
 read one at a time through the agent's own machine, so an artifact made on a runner or in a

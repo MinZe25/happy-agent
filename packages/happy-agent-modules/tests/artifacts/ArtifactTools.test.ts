@@ -75,6 +75,13 @@ describe("the artifact tools", () => {
         ]);
     });
 
+    it("tells every agent to mention artifacts by their reference tags", async () => {
+        const w = await world("artifact-tools-references");
+        const instructions = await w.instructions(AGENT);
+        expect(instructions).toContain('<happy-artifact id="…"/>');
+        expect(instructions).toContain('version="N"');
+    });
+
     it("publishes inline text beside files copied from the agent's machine", async () => {
         const w = await world("artifact-tools-create");
         const chart = await png();
@@ -109,6 +116,9 @@ describe("the artifact tools", () => {
             ["style.css", "text/css", sha256("body { color: teal; }")],
         ]);
         expect(textOf(create, artifact)).toContain('opening "index.html"');
+        expect(textOf(create, artifact)).toContain(
+            `Reference it in chat as <happy-artifact id="${artifact.id}"/>.`,
+        );
 
         // A call repeated after an interruption returns what it made, staging nothing again.
         const uploadsBefore = await w.uploadRows();
@@ -180,6 +190,9 @@ describe("the artifact tools", () => {
         ]);
         expect(version.files[1]?.sha256).toBe(sha256(generated));
         expect(textOf(update, updated)).toContain("version 2");
+        expect(textOf(update, updated)).toContain(
+            `Reference it in chat as <happy-artifact id="${artifact.id}"/>, or as <happy-artifact id="${artifact.id}" version="2"/> for this version only.`,
+        );
         // The call's own ID keys the version, so repeating it makes no other.
         await expect(call(w.ctx, update, args, { id: "updatecall" })).resolves.toEqual(updated);
         expect((await w.artifacts.get(w.ctx, artifact.id))?.latestVersion).toBe(2);
@@ -208,6 +221,9 @@ describe("the artifact tools", () => {
         const read = await w.tool(AGENT, "read_artifact");
         const overview = textOf(read, await call(w.ctx, read, { artifactId: artifact.id }));
         expect(overview).toContain('6 files, opening "index.md"');
+        expect(overview).toContain(
+            `Reference it in chat as <happy-artifact id="${artifact.id}"/>.`,
+        );
         expect(overview).toContain('- "images/chart.png" · image/png');
         expect(overview).toContain("![Chart](images/chart.png)");
 
@@ -273,6 +289,9 @@ describe("the artifact tools", () => {
             mine.id,
         ]);
         expect(textOf(list, here)).toContain(`Artifacts made in bot ${BOT}:`);
+        expect(textOf(list, here)).toContain(
+            'Reference an artifact in chat by putting its ID in <happy-artifact id="..."/>.',
+        );
     });
 
     it("always has Auto review a deletion, and reviews and elevates only reads leaving the workspace", async () => {

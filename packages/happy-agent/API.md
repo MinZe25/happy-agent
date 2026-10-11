@@ -266,6 +266,10 @@ daemons. Task agents and their workspaces appear in no project or workspace list
 workspace `kind` value `"task"` and the workspace `taskId` field appear only on a task's
 workspace, which a client reaches only through a task.
 
+Reference tags in agent text, described under "Message content", are additive and do not
+increment the protocol version. Request and response schemas are unchanged; a client that does not
+render them shows the tag text as written.
+
 Artifacts are additive and do not increment the protocol version. Clients detect them through
 `GET /v0/artifacts`: `404` means the daemon has no artifacts, not that the catalog is empty. The
 `artifact.*` events are absent on older compatible daemons, which also serve none of the artifact
@@ -4257,6 +4261,103 @@ Other calls, including background-terminal-input calls, currently carry no prese
 their raw data. The presentation set may grow; a client that meets an unknown presentation type
 falls back to rendering the block's raw data, exactly as if the presentation were absent.
 
+#### Reference tags
+
+An agent's `text` blocks are Markdown. Inside them an agent may mention a Happy entity by its
+**reference tag**, written inline where the entity's name belongs:
+
+```markdown
+I published <happy-artifact id="r7k2m9q4w1e5t8y3u6i0o2p5"/> with the full breakdown.
+```
+
+The tag carries only identity. The agent never writes the entity's title; a client looks up the
+live entity through the routes below and shows its current title in the tag's place. The daemon
+stores and returns message text exactly as written: tags are part of `text`, not a block of their
+own, and no route rewrites them.
+
+**Grammar.** In ABNF, with `DIGIT`, `DQUOTE`, `SP`, and `HTAB` as in RFC 5234:
+
+```text
+tag        = "<happy-" kind 1*(1*ws attribute) *ws "/>"
+kind       = lower *(lower / DIGIT) *("-" 1*(lower / DIGIT))
+attribute  = name "=" DQUOTE value DQUOTE
+name       = lower *(lower / DIGIT / "-")
+value      = *256(%x00-09 / %x0B-0C / %x0E-21 / %x23-3B / %x3D / %x3F-10FFFF)
+             ; any character but DQUOTE, "<", ">", CR, and LF
+ws         = SP / HTAB
+lower      = %x61-7A
+```
+
+- A tag is at most 512 characters and never spans lines.
+- Values are double-quoted and taken literally; there are no character references.
+- The self-closing `/>` is required. A paired `<happy-artifact …></happy-artifact>` is not a tag.
+- `id` is required and matches `[A-Za-z0-9_-]{1,128}`.
+- `version`, when present, is a positive decimal integer without leading zeros, at most nine
+  digits.
+- `workspace`, when present, has the same form as `id`.
+- Attributes may appear in any order. A repeated attribute, or a missing or malformed `id`,
+  `version`, or `workspace`, makes the text not a tag. Clients ignore other attributes, so new
+  optional attributes may be added.
+
+Anything that does not match the grammar is ordinary text. Reference tags are never Markdown HTML.
+A tag on a line of its own is a paragraph holding just that reference. It is not an HTML block,
+and the lines after it stay ordinary Markdown. A tag inside an inline code span or a fenced code
+block stays literal text. A tag whose `<` is backslash-escaped stays literal text. That is how an
+agent shows the syntax itself.
+
+**Kinds.** Each kind resolves through routes that already exist:
+
+| Kind        | `id` names                                                    | Resolved through                                                        | Label                                                            | Busy while                                                                |
+| ----------- | ------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `artifact`  | an artifact; `version` optionally names one version           | `GET /v0/artifacts/:artifactId`, and `…/versions/:number` for a version | `title`, or that version's `title`                               | never                                                                     |
+| `agent`     | an agent: a task's, a bot's, a subtask, or another root agent | `GET /v0/agents/:agentId`                                               | the agent's `title`, or the owning bot's `name` or task's `name` | `status` is not `"idle"`                                                  |
+| `workspace` | a workspace                                                   | `GET /v0/workspaces/:workspaceId`                                       | `name`                                                           | `initialization.status` is `"initializing"`, or `status` is `"archiving"` |
+| `project`   | a project                                                     | `GET /v0/projects/:projectId`                                           | `name`                                                           | `initialization.status` is `"initializing"`                               |
+| `service`   | a service; `workspace` optionally names its workspace         | `GET /v0/workspaces/:workspaceId/services/:serviceId`                   | `name`                                                           | `status` is `"starting"`, `"running"`, or `"stopping"`                    |
+
+A service is addressed only under its workspace. Without a `workspace` attribute, the workspace is
+the one the message's agent works in. Other attributes have no meaning for kinds that do not list
+them and are ignored. Files have no tag: agents keep referring to them as `path:line`. The kind set
+may grow.
+
+**Rendering.** A client that renders reference tags shows each resolvable reference as a link
+whose text is the entity's live label and which opens the entity in the client. It looks the same
+whether the tag sits inside a sentence or alone on its line. The label follows the entity's update
+events, so a rename shows without reloading the message. While the entity is busy as defined
+above, the client SHOULD show its usual progress treatment on the link. A reference is inert,
+shown as plain non-interactive text such as "an unavailable artifact", when:
+
+- the kind is not one the client knows;
+- the entity does not exist or cannot be resolved;
+- the caller cannot see it;
+- an artifact is deleted, a project, workspace, or agent is archived, or the named artifact
+  version does not exist.
+
+A client never shows the raw tag or the bare ID in place of a reference.
+
+**Streaming.** While a text block is still growing through `message.delta`, its end may be a tag
+that is not complete yet, such as `<happy-arti`. A client must never show such a trailing partial
+tag as text. It hides the shortest tail that could still become a tag. That can be anything from a
+lone `<` to `<happy-artifact id="r7k2`. The tail is shown once the tag completes, or once the text
+proves it is not a tag. The tail is never hidden inside code. Once the message is final, an
+incomplete tag is ordinary text.
+
+**Fallback.** A surface that cannot render live references gets plain Markdown with each tag
+replaced by the entity's label, escaped as literal text, or by the inert placeholder when the
+label cannot be resolved. The daemon applies this fallback to text it relays to integrations that
+cannot render tags, including the Happy mobile app.
+
+**One implementation.** `@slopus/happy-agent-client` exports the grammar, parser, streaming rule,
+and fallback renderer: `parseHappyReferences`, `parseHappyReferenceTag`,
+`happyReferencePartialTagLength`, `replaceHappyReferences`, `renderHappyReferencesAsMarkdown`,
+`happyReferencePlaceholder`, `formatHappyReferenceTag`, and `HAPPY_REFERENCE_KINDS`. Clients and
+the daemon use these rather than their own parsers, so every surface agrees on exactly what is a
+tag.
+
+Reference tags are additive and do not increment the protocol version. Request and response
+schemas are unchanged. A client that does not know about reference tags shows the tag text as
+written.
+
 ### `POST /v0/agents/:agentId/send`
 
 Sends a message. One endpoint covers both queuing and steering; `delivery` says which.
@@ -5586,6 +5687,10 @@ Almost any agent publishes artifacts through its artifact tools: `create_artifac
 The daemon records the acting agent as the author and the place the agent works in as the source.
 People publish through the routes below. Either way, creating an artifact and every later update
 each make a new immutable version; nothing is overwritten. Deleting an artifact leaves a tombstone.
+
+An agent mentions an artifact in its replies with the reference tag
+`<happy-artifact id="…"/>`, which clients show as a link labeled with the artifact's live title;
+see "Reference tags". The writing and reading tools give the agent the exact tag.
 
 Artifact content lives on the daemon's machine, in its private data directory
 (`.happy/agent/artifacts`), never in a project or workspace folder. It is stored once per distinct

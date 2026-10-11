@@ -147,6 +147,10 @@ export async function artifactsWorld(
     return {
         agents,
         artifacts,
+        instructions: async (agentId: string): Promise<string> =>
+            (await hooks.instructions?.(ctx, {
+                agent: { id: agentId, provider: "scripted" },
+            } as AgentModuleScope)) ?? "",
         config,
         ctx,
         database,

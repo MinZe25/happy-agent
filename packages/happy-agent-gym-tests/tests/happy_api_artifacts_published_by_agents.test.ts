@@ -94,6 +94,10 @@ describe("artifacts published by agents", () => {
             files: [{ path: "notes.md", content: "Checked against the ledger.\n" }],
         });
         expect(updated.text).toContain(`Artifact ${artifact.id} is now at version 3`);
+        expect(created.text).toContain(
+            `Reference it in chat as <happy-artifact id="${artifact.id}"/>.`,
+        );
+        expect(updated.text).toContain(`<happy-artifact id="${artifact.id}" version="3"/>`);
         const { artifact: latest } = await gym.client.getArtifact(artifact.id);
         expect(latest).toMatchObject({
             latestVersion: 3,

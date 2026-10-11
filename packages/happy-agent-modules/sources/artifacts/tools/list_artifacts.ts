@@ -5,6 +5,7 @@ import type { Context } from "@steve.kite/stdlib";
 import { artifactRecordSchema, artifactTypeSchema, type ArtifactListQuery } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
 import { artifactSourceId } from "../impl/artifactIdentities.js";
+import { artifactReferenceTag } from "../impl/artifactReferenceTag.js";
 import { formatArtifactLine, formatArtifactSource } from "../impl/formatArtifact.js";
 import { ARTIFACT_TOOL_CAPABILITY } from "./common.js";
 
@@ -85,6 +86,7 @@ export function listArtifactsTool(artifacts: ArtifactsModule, agentId: string) {
                         : [
                               ...(here === undefined ? [] : [`Artifacts made in ${here}:`]),
                               ...listed.map(formatArtifactLine),
+                              `Reference an artifact in chat by putting its ID in ${artifactReferenceTag("...")}.`,
                               ...(nextCursor === undefined
                                   ? []
                                   : [`More artifacts follow; pass cursor "${nextCursor}".`]),

@@ -11,6 +11,7 @@ import {
     MAX_ARTIFACT_FILES,
 } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
+import { artifactReferenceTag } from "../impl/artifactReferenceTag.js";
 import { formatArtifactSource } from "../impl/formatArtifact.js";
 import {
     describeArtifactSources,
@@ -99,6 +100,7 @@ export function createArtifactTool(
                     ...(artifact.source === undefined
                         ? []
                         : [`Made in ${formatArtifactSource(artifact.source)}.`]),
+                    `Reference it in chat as ${artifactReferenceTag(artifact.id)}.`,
                     "Change it with update_artifact.",
                 ].join(" "),
             },

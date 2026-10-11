@@ -93,6 +93,7 @@ import {
     storeArtifactContent,
     type ArtifactContentSource,
 } from "./impl/artifactContentFiles.js";
+import { ARTIFACT_REFERENCE_INSTRUCTIONS } from "./tools/common.js";
 import { createArtifactTool } from "./tools/create_artifact.js";
 import { deleteArtifactTool } from "./tools/delete_artifact.js";
 import { listArtifactsTool } from "./tools/list_artifacts.js";
@@ -167,6 +168,7 @@ export class ArtifactsModule implements AgentModule {
     }
 
     readonly #hooks: AgentModuleHooks = {
+        instructions: () => ARTIFACT_REFERENCE_INSTRUCTIONS,
         tools: async (_ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => [
             createArtifactTool(this, this.#compute, scope.agent.id),
             updateArtifactTool(this, this.#compute, scope.agent.id),

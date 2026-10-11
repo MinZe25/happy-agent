@@ -299,3 +299,27 @@ the connected user's organizations. Desktop bootstrap includes the Cloud snapsho
 Focused agent responses and agent bootstrap include the current module-contributed slash-command
 catalog. `invokeSlashCommand` executes one through its owning module, while
 `agent.slash_commands.updated` carries complete catalog replacements discovered at turn time.
+
+## Reference tags
+
+Agent text may mention Happy entities as `<happy-artifact id="…"/>`, `<happy-agent id="…"/>`,
+`<happy-workspace id="…"/>`, `<happy-project id="…"/>`, or `<happy-service id="…"/>`, as API.md
+specifies under "Reference tags". This package holds the one shared parser, so every client and
+the daemon agree on what is a tag:
+
+- `parseHappyReferences(markdown, { streaming? })` splits text into `text` and `reference`
+  segments. Tags in code spans, fenced code, or after a backslash stay text.
+- `replaceHappyReferences(markdown, replace, { streaming? })` substitutes each tag in the Markdown
+  source before a Markdown parser sees it. Tags are never Markdown HTML, so substitute them instead
+  of reading HTML nodes.
+- With `streaming: true`, both functions drop a trailing incomplete tag such as `<happy-arti`.
+  `happyReferencePartialTagLength(markdown)` reports how many characters that is.
+- `renderHappyReferencesAsMarkdown(markdown, resolve)` is the plain-Markdown fallback. Each tag
+  becomes its escaped label, or `happyReferencePlaceholder(reference)` when `resolve` returns
+  nothing.
+- `parseHappyReferenceTag(tag)` parses exactly one tag. `formatHappyReferenceTag(reference)` writes
+  the canonical one. `isKnownHappyReferenceKind(kind)` tells which kinds to resolve.
+- `escapeMarkdownText(text)` is the escaping the fallback uses for labels.
+
+Show a resolved reference as a link whose text is the live title. Indicate a busy entity on the
+link. Show unknown kinds and unresolvable references as inert placeholder text.

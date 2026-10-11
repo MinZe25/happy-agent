@@ -6,6 +6,13 @@ import { artifactPathSchema, MAX_ARTIFACT_FILES } from "../Artifact.js";
 export const ARTIFACT_TOOL_CAPABILITY =
     "Publish Markdown documents and HTML pages with their images and other files, images, image series, videos, and documents as versioned artifacts, and list, read, update, and delete them.";
 
+/**
+ * How a model mentions an artifact in a reply. Clients replace the tag with the artifact's live
+ * title as a link, and surfaces that cannot show links get the title as plain text.
+ */
+export const ARTIFACT_REFERENCE_INSTRUCTIONS =
+    'When you mention an artifact in a reply, write its reference tag inline, such as <happy-artifact id="…"/> with the artifact\'s ID; add version="N" to point at one version. The artifact tools give you the exact tag. People see the artifact\'s current title as a link in its place, so do not repeat the title beside the tag or link the artifact yourself. A tag inside code stays literal.';
+
 /** One file a call writes into an artifact. */
 export const artifactToolFileSchema = Type.Object(
     {

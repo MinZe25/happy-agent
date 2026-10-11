@@ -11,6 +11,7 @@ import {
     MAX_ARTIFACT_FILES,
 } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
+import { artifactReferenceTag } from "../impl/artifactReferenceTag.js";
 import {
     describeArtifactSources,
     shouldReviewArtifactSources,
@@ -98,7 +99,10 @@ export function updateArtifactTool(
         toLLM: (artifact) => [
             {
                 type: "text",
-                text: `Artifact ${artifact.id} is now at version ${String(artifact.latestVersion)}: ${JSON.stringify(artifact.title)}, ${String(artifact.fileCount)} ${artifact.fileCount === 1 ? "file" : "files"}, opening ${JSON.stringify(artifact.entry.path)}.`,
+                text: [
+                    `Artifact ${artifact.id} is now at version ${String(artifact.latestVersion)}: ${JSON.stringify(artifact.title)}, ${String(artifact.fileCount)} ${artifact.fileCount === 1 ? "file" : "files"}, opening ${JSON.stringify(artifact.entry.path)}.`,
+                    `Reference it in chat as ${artifactReferenceTag(artifact.id)}, or as ${artifactReferenceTag(artifact.id, artifact.latestVersion)} for this version only.`,
+                ].join(" "),
             },
         ],
     });
