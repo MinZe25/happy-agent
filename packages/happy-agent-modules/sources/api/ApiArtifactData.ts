@@ -8,6 +8,7 @@ import {
     ARTIFACT_DATA_LIMITS,
     ArtifactDataConflictError,
     ArtifactDataCursorUnavailableError,
+    ArtifactDataDevelopment,
     ArtifactDataInputError,
     ArtifactDataModule,
     ArtifactDataNotFoundError,
@@ -46,15 +47,16 @@ const integerPattern = /^[1-9][0-9]{0,5}$/;
 /**
  * The data API every HTML artifact page reaches at `/api/*` of its own origin, which a client
  * forwards here unchanged. The caller's identity always comes from authentication, never from
- * what the page sends.
+ * what the page sends. `happy-agent artifact dev` serves the same routes over development data,
+ * whose callers are made-up people.
  */
 export class ApiArtifactData {
-    readonly #data: ArtifactDataModule;
+    readonly #data: ArtifactDataModule | ArtifactDataDevelopment;
     readonly #streams: Set<SseWriter>;
     #open = 0;
 
-    /** `streams` is the API's own set of open event streams, which shutdown closes. */
-    constructor(data: ArtifactDataModule, streams: Set<SseWriter>) {
+    /** `streams` is the server's own set of open event streams, which shutdown closes. */
+    constructor(data: ArtifactDataModule | ArtifactDataDevelopment, streams: Set<SseWriter>) {
         this.#data = data;
         this.#streams = streams;
     }

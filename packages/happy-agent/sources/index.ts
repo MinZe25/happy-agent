@@ -25,3 +25,13 @@ export {
     type RunAgentDaemonCommandOptions,
 } from "./lifecycle/runAgentDaemonCommand.js";
 export { stopLocalProtocolServer } from "./lifecycle/stopLocalProtocolServer.js";
+export {
+    readArtifactDataSnapshot,
+    type ArtifactDataSnapshotSource,
+} from "./artifact/readArtifactDataSnapshot.js";
+export {
+    startArtifactDevServer,
+    type ArtifactDevRequest,
+    type ArtifactDevServer,
+    type ArtifactDevServerOptions,
+} from "./artifact/startArtifactDevServer.js";

@@ -126,4 +126,6 @@ An `html` artifact can keep live, shared data through the Artifact Data module
 using the daemon, in `artifacts/_data_/<artifactId>/kv.sqlite`, served to the page at `/api/*` of
 its own origin. That module listens to `onEvent` to close a deleted artifact's change streams and
 asks `get` whether an artifact still serves data. The writing tools' guidance points agents at
-`docs/recipe/artifact-apps.md` and tells them to put no files under `api/`.
+`docs/recipe/artifact-apps.md` and tells them to put no files under `api/`, to try an app with
+`happy-agent artifact dev` before publishing, and to read `read_artifact_logs` after. Its debug
+log, `logs.sqlite`, sits beside the store and records each report with `latestVersion` at the time.

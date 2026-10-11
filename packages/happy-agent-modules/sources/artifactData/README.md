@@ -26,9 +26,9 @@ name, or "Agent", with `kind: "agent"`; the agent's own ID never reaches a page.
 
 ## Storage
 
-`impl/ArtifactDataStores` is the storage engine: it opens each artifact's files, serializes calls
-per file, delivers committed changes, and bounds the debug log. The module adds only whether an
-artifact serves data and who the callers are.
+`impl/ArtifactDataStores` is the one engine behind both the daemon and the development server: it
+opens each artifact's files, serializes calls per file, delivers committed changes, and bounds the
+debug log. The module adds only whether an artifact serves data and who the callers are.
 
 Each store is its own SQLite file in WAL mode with full sync, at
 `artifacts/_data_/<artifactId>/kv.sqlite` (`ConfigModule.artifactDataPath`), outside the main
@@ -75,6 +75,14 @@ in batches it drops rather than retries. Each artifact's log is `logs.sqlite` be
 WAL mode with normal sync, because losing the last few reports in a crash costs nothing. It keeps
 the newest 1,000 entries of the last 7 days, pruned on every append, and accepts 120 entries per
 user per artifact per minute (`ARTIFACT_LOG_LIMITS`); the rest are counted as dropped.
+
+## Development server
+
+`ArtifactDataDevelopment` serves one artifact's data from any folder over the same
+`ArtifactDataStores`, for `happy-agent artifact dev`. Its callers are made-up people named by the
+request (`as` in the context), each with a stable ID derived from the name and a generated SVG
+photo. It also dumps, loads, and resets data and clears the log, which the daemon never does.
+`ApiArtifactData` serves either one, so the development server answers with the daemon's routes.
 
 ## HTTP
 

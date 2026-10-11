@@ -31,7 +31,11 @@ Commands:
                                  HAPPY_RUNNER_TOKEN.
            --home <directory>    Where the home project and bot folders live (default: home).
   sandbox setup [--retry]  Set up the Windows sandbox, or explicitly retry setup.
-  sandbox status          Report Windows sandbox configuration without changing it.`;
+  sandbox status          Report Windows sandbox configuration without changing it.
+  artifact dev <folder>   Serve an HTML artifact's folder with a local artifact data API,
+                          made-up people, and network faults, for building artifact apps.
+  artifact snapshot <id>  Print a dump of an artifact's data, for artifact dev --seed.
+                          Run happy-agent artifact --help for their options.`;
 
 installFailureReporting();
 
@@ -55,6 +59,12 @@ async function main(): Promise<void> {
         // Only the runner's own pieces load; a runner never opens the daemon runtime.
         const { runRunner } = await import("./runner/runRunner.js");
         await runRunner(rest);
+        return;
+    }
+    if (command === "artifact") {
+        // Only the artifact tools load; they never start or need the daemon runtime.
+        const { runArtifactCommand } = await import("./artifact/runArtifactCommand.js");
+        await runArtifactCommand(rest);
         return;
     }
     if (command === "sandbox") {

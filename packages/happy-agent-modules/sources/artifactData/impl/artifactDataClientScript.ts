@@ -11,6 +11,8 @@ import { createHash } from "node:crypto";
  * It also reports what goes wrong on the page to `/api/v1/debug/log`: uncaught errors, unhandled
  * rejections, `console.error` and `console.warn`, and its own sync trouble, in small rate-limited
  * batches that are dropped rather than retried, so reporting never adds load to a failing page.
+ * A page opened with `?as=<name>` sends that name as `X-Happy-Dev-User`, which only the
+ * development server reads; clients forwarding to a daemon do not pass the header.
  */
 export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK, served by Happy Agent. */
 (function (global) {
@@ -27,6 +29,14 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
     var LOG_PER_MINUTE = 60;
     var LOG_MESSAGE_LENGTH = 4096;
     var LOG_DATA_LENGTH = 8000;
+
+    /** The made-up person a development page acts as, from '?as=<name>'. */
+    var DEV_USER = (function () {
+        try {
+            var match = /[?&]as=([^&#]*)/.exec(global.location.search);
+            return match ? decodeURIComponent(match[1].replace(/\+/g, " ")) || null : null;
+        } catch (error) { return null; }
+    })();
 
     // ---- small helpers ----------------------------------------------------------------------
 
@@ -94,7 +104,9 @@ export const ARTIFACT_DATA_CLIENT_SCRIPT = String.raw`/* Happy artifact data SDK
     }
 
     function baseHeaders(accept) {
-        return { accept: accept };
+        var headers = { accept: accept };
+        if (DEV_USER) headers["x-happy-dev-user"] = DEV_USER;
+        return headers;
     }
 
     function request(method, path, body, headers) {

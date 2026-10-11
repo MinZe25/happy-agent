@@ -27,6 +27,7 @@ export {
     type PreparedWorkspaceProxySocket,
     socketRejectionBody,
 } from "./ApiModule.js";
+export { ApiArtifactData } from "./ApiArtifactData.js";
 export { messageResource } from "./ApiMessageProjection.js";
 export { type MessageResourceOptions } from "./ApiToolPresentation.js";
 export {

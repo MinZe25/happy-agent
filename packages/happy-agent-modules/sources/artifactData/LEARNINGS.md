@@ -68,7 +68,7 @@ through the served `client.js` and counts its requests, and an audit of every re
 builds (query names, headers, and body fields) against the routes and API.md found no other
 mismatch. Any new SDK call needs a test that drives it through the served script.
 
-## Pages report their own problems
+## Debugging is built in, and the development server is the daemon's code
 
 Steve asked for tools to debug artifact apps without cutting scope. Pages report their own
 trouble to a debug log the agent reads with `read_artifact_logs`, because agents cannot see the
@@ -77,3 +77,13 @@ batched, rate-limited on both ends, and dropped rather than retried, so a failin
 load or loops. Each entry records the reporting user, the receive time, and the artifact's newest
 version then; the page's own idea of its version is not trusted. The log is a bounded ring in its
 own file beside the store, not in the main database.
+
+`happy-agent artifact dev` must behave like the daemon, so it runs the same `ArtifactDataStores`
+and `ApiArtifactData`, never a second implementation; only identity differs. Fake people come from
+the SDK's `X-Happy-Dev-User` header (taken from `?as=`), then the requesting page's `as` for
+scripts and images, then a cookie. Faults are applied outside the routes: offline destroys the
+socket, `failNext` answers `503` unapplied, and `dropNext` applies the request and destroys the
+socket before any byte is sent, which is the "applied but response lost" case idempotent writes
+exist for. The debug log route is never faulted so the log covers outages. `--from` reads a
+published artifact's data once through the daemon's own routes and never writes back; a workspace
+service cannot reach the daemon, so `artifact snapshot` writes a dump for `--seed`.

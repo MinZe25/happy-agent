@@ -48,4 +48,10 @@ export {
     type ArtifactLogQuery,
     type ArtifactLogSource,
 } from "./ArtifactData.js";
+export {
+    ARTIFACT_DATA_DEVELOPMENT_DEFAULT_USER,
+    ArtifactDataDevelopment,
+    artifactDataDumpSchema,
+    type ArtifactDataDump,
+} from "./ArtifactDataDevelopment.js";
 export { ArtifactDataModule } from "./ArtifactDataModule.js";

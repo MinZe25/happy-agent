@@ -46,8 +46,9 @@ const MAX_RATE_BUCKETS = 4_096;
 type OpenFile = ArtifactDataStore | ArtifactLogStore;
 
 /**
- * Every artifact's data and debug log, each a SQLite file in the artifact's own directory. It
- * knows nothing of who the callers are or where the directories live; its owner decides both.
+ * Every artifact's data and debug log, each a SQLite file in the artifact's own directory. This
+ * is the one implementation behind both the daemon and the development server, which differ
+ * only in where the directories live and who the callers are.
  *
  * Calls to one artifact's data are serialized, and committed changes reach subscribers in
  * version order. Nothing here knows whether an artifact exists; the caller decides that.

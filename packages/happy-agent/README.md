@@ -29,6 +29,8 @@ happy-agent reload   # stop the running daemon, then start a fresh one
 happy-agent reload --detach  # return at once; reload after this command exits (for agents)
 happy-agent run      # run the daemon in the foreground of this process
 happy-agent --version
+happy-agent artifact dev ./app      # serve an HTML artifact app with a local data API to debug it
+happy-agent artifact snapshot <id>  # print a dump of an artifact's data for artifact dev --seed
 # Windows only:
 happy-agent sandbox status          # inspect configuration without provisioning
 happy-agent sandbox setup           # explicitly initialize the sandbox

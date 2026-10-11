@@ -29,6 +29,9 @@ that contract and is the right choice for almost every page.
   daemon is unreachable. They retry with backoff, and each carries an idempotency ID, so a retry
   after a lost response never applies twice. The change stream reconnects by itself and resumes
   from the last version it saw.
+- **Problems are reported to you.** The SDK sends uncaught errors, unhandled rejections,
+  `console.error`, `console.warn`, and its own sync trouble to the artifact's debug log, which
+  `read_artifact_logs` shows you with who hit them and on which version.
 
 ## Rules that are easy to get wrong
 
@@ -67,6 +70,8 @@ that contract and is the right choice for almost every page.
 | `happy.kv.update(key, change)`                      | Read, change, and compare-and-set, retried on conflict up to 8 times. `change(current)` receives the current value, or `undefined`, and returns the next one; returning `undefined` deletes the key.                                       |
 | `happy.kv.get(key)`, `.entry(key)`, `.list(prefix)` | One-off reads: a value as this page sees it, a confirmed entry or `null`, and every confirmed entry under a prefix.                                                                                                                        |
 | `happy.kv.onChange(fn)`                             | Every confirmed change this page hears, from anyone, as an entry. A deletion has `deleted: true`.                                                                                                                                          |
+| `happy.debug.log(message, data, level)`             | Adds an entry to the artifact's debug log with source `app`. `data` is optional JSON; `level` is `"info"` (the default), `"warn"`, or `"error"`. Use it for the events you will want when someone reports a problem.                       |
+| `happy.debug.disable()`, `happy.debug.flush()`      | Stop all reporting from this page, or send what is queued now instead of within two seconds.                                                                                                                                               |
 
 An entry is `{ key, value, deleted, version, updatedBy, updatedAt, writeId }`. A tracked view adds
 `exists` and `pending`. In a view, `updatedBy` is the viewer's ID while a write is pending.
@@ -317,6 +322,99 @@ cursor.
 - Prefer changing the page when the data's shape must change. Old and new versions share one
   store, so a new version must still understand the data the old one wrote.
 
+## Debugging your app
+
+Reporting is automatic. Each page batches what goes wrong and sends it to
+`/api/v1/debug/log` every two seconds, at most 60 entries a minute; while the browser is offline,
+and when a send fails, the batch is dropped rather than retried. The SDK's own `sync` entries say
+when the change stream ended and reconnected, when a write conflicted or was refused, when the
+page had to read its data again, and when the data became unavailable. The daemon keeps the newest
+1,000 entries of the last 7 days per artifact, beside its data.
+
+### Develop with `happy-agent artifact dev`
+
+Build and test the app before publishing it, against a local copy of the data API:
+
+```sh
+happy-agent artifact dev ./my-app --scratch .context/my-app-data
+```
+
+It serves the folder at `http://127.0.0.1:4173/`, answers `/api/*` with the same code, limits, and
+SDK as the daemon, and keeps data and the debug log in the `--scratch` folder (without it, in a
+temporary folder removed on exit). It never touches the daemon's data. Run it as a workspace
+service, with the folder as an input and the scratch folder as scratch, so the person can open the
+preview beside you:
+
+```text
+service_start  name: "my-app"  port: 4173
+               cmd: "happy-agent artifact dev my-app --scratch .context/my-app-data"
+               sandbox: { inputs: ["my-app"], scratch: [".context/my-app-data"] }
+```
+
+Everything the server can do is under `/__happy/`: an HTML panel at `/__happy/`, and JSON routes
+for scripts and for you:
+
+| Route                                       | What it does                                                                                                                                                        |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/?as=Alice`                                | Opens the app as a made-up person, with a name and a generated photo. Each tab can be someone else; without `as`, the page is "You".                                |
+| `GET /__happy/state`                        | The folder, the faults in force, open change streams, and everyone known.                                                                                           |
+| `POST /__happy/faults`                      | Any of `{ "offline": true }`, `{ "latencyMs": 800 }`, `{ "failNext": 3 }` (answer `503` without applying), and `{ "dropNext": 1 }` (apply, then lose the response). |
+| `POST /__happy/streams/cut`                 | Cuts every open change stream, as a dropped connection does.                                                                                                        |
+| `POST /__happy/data/write`                  | `{ "as": "Bob", "key": "todos/1", "value": {…} }`, or `"delete": true`: a write by someone else, live to every page.                                                |
+| `POST /__happy/data/seed`                   | `{ "values": { "key": value, … }, "as": "Bob" }` writes several keys.                                                                                               |
+| `GET` / `PUT /__happy/data`                 | Dumps every entry, tombstones and authors included, or replaces the data with such a dump.                                                                          |
+| `POST /__happy/data/reset`                  | Forgets every entry; open pages read their data again.                                                                                                              |
+| `GET /__happy/logs`, `DELETE /__happy/logs` | The debug log, newest first, with `level`, `user` (a name), `limit`, and `pageCursor`; or clears it.                                                                |
+| `GET /__happy/requests`, `DELETE`           | The last 500 data requests, newest first: who made them, status, time taken, and any fault applied.                                                                 |
+
+The debug log route itself is never faulted, so the log shows what pages reported during an
+outage. The loop that finds most bugs:
+
+1. Start `artifact dev` as a service and open the app; open it again with `?as=Bob`.
+2. Make changes as both people, then make the network bad: go offline, add latency, fail or drop a
+   few writes, cut the streams. Check that both pages end up showing the same thing and that
+   `GET /__happy/data` holds what you expect, with no doubled items.
+3. Read `GET /__happy/logs?level=warn` and `GET /__happy/requests` for anything surprising.
+4. Publish with `create_artifact` or `update_artifact`. After people use it, read
+   `read_artifact_logs`, filtered by `level`, `userId`, or `since`, to see what broke for whom.
+
+### Reproduce a bug with real data
+
+Start the server from a copy of a published artifact's data:
+
+```sh
+happy-agent artifact dev ./my-app --from <artifactId>
+```
+
+It reads the artifact's data through the daemon, once, with its versions and authors' names, and
+never writes back. A workspace service cannot reach the daemon, so for a service save the copy
+first and start from the file:
+
+```sh
+happy-agent artifact snapshot <artifactId> --out .context/my-app-data.json
+happy-agent artifact dev my-app --seed .context/my-app-data.json --scratch .context/my-app-data
+```
+
+`--seed` also takes a plain JSON object of keys and values.
+
+### Drive it with a browser
+
+For a repeatable check, script real browsers against the dev server with Playwright and headless
+Chromium. Nothing is bundled: install `playwright-core` (or `playwright`) in a scratch folder with
+the project's package manager, and use a Chromium already on the machine
+(its `playwright install chromium` command otherwise). A useful script:
+
+- opens one page per person, `page.goto(base + "/?as=Alice")`, and waits for
+  `window.happy.status === "online"`;
+- records `page.on("console")` errors and warnings, `page.on("pageerror")`, and
+  `page.on("requestfailed")`;
+- plays a scenario, calling `POST /__happy/faults` between steps, and waits for each page's text to
+  converge with `page.waitForFunction`;
+- ends with screenshots, each page's visible text, `GET /__happy/data`, and
+  `GET /__happy/logs`, so you can tell what each person saw and what the store holds.
+
+Failed requests and console errors during injected faults are expected; anything else is a bug.
+
 ## Checks before you publish
 
 - The page loads `/api/v1/client.js` with an absolute path, and the artifact holds no files under
@@ -324,3 +422,5 @@ cursor.
 - Item keys are per item or per person, and shared values use `update` or `ifVersion`.
 - The page shows `happy.status` and pending items.
 - Everything read from the store is validated, and text is rendered with `textContent`.
+- You ran it in `happy-agent artifact dev` as two people, offline and with lost responses, and
+  both pages converged with no doubled items and nothing unexpected in the debug log.
