@@ -415,7 +415,9 @@ async function main() {
             new Promise((resolveTimeout) => setTimeout(resolveTimeout, 2_000)),
         ]);
         if (daemon.exitCode === null) daemon.kill("SIGKILL");
-        await rm(root, { force: true, recursive: true });
+        // Windows keeps a folder busy for a moment after the process using it exits, so removal
+        // retries EBUSY and EPERM with a growing delay instead of failing a passing smoke.
+        await rm(root, { force: true, recursive: true, maxRetries: 10, retryDelay: 200 });
     }
 }
 
