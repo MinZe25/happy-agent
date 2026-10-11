@@ -231,3 +231,14 @@ specified `404`. The file route recognizes itself on the parsed pathname but tak
 version, and path from the raw target, decoding each segment separately. Sandbox, caching, and
 range headers are written only with a served file, so `404`, `416`, and every other error keep the
 ordinary `no-store` JSON response.
+
+## Tool-call media is served by call and position, never from history bytes
+
+Generated images and presented files reach the desktop through a `media` presentation and
+`GET /v0/agents/:agentId/tool-calls/:toolCallId/media/:index`. History stores each item's digest
+for the private snapshot; the projection removes that digest, and the route asks Chat Media for
+the snapshot of the recorded item. Because one call's item never changes, responses are cached
+as immutable rather than with the shorter image policy. Range, ETag, `nosniff`, and the sandboxing
+CSP come from the same stored-file sender as artifact files. `media` and `artifact` blocks keep
+their raw data under `omitToolData`, as `agent_spawn` does, so released desktops that render
+these calls from raw data do not regress to an empty block.

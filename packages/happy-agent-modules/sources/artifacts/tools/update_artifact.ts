@@ -7,7 +7,6 @@ import {
     ArtifactConflictError,
     ArtifactNotFoundError,
     artifactPathSchema,
-    artifactRecordSchema,
     artifactTitleSchema,
     MAX_ARTIFACT_FILES,
 } from "../Artifact.js";
@@ -19,7 +18,10 @@ import {
 } from "../impl/stageArtifactToolFiles.js";
 import {
     ARTIFACT_FILES_GUIDANCE,
+    ARTIFACT_PRESENTED_NOTICE,
     ARTIFACT_TOOL_CAPABILITY,
+    artifactToolResultSchema,
+    presentedArtifact,
     artifactToolFilesSchema,
 } from "./common.js";
 
@@ -57,7 +59,7 @@ export function updateArtifactTool(
             ARTIFACT_FILES_GUIDANCE,
         ].join("\n\n"),
         parameters: updateArtifactToolInputSchema,
-        returnType: artifactRecordSchema,
+        returnType: artifactToolResultSchema,
         durable: true,
         shouldReviewInAutoMode: ({ files }, ctx) =>
             shouldReviewArtifactSources(ctx, compute, agentId, files),
@@ -85,7 +87,7 @@ export function updateArtifactTool(
                           current.type,
                           input.files,
                       );
-            return await artifacts.update(ctx, {
+            const updated = await artifacts.update(ctx, {
                 artifactId: input.artifactId,
                 operationId: call.id,
                 ...(input.title === undefined ? {} : { title: input.title }),
@@ -95,12 +97,14 @@ export function updateArtifactTool(
                 author: actor.author,
                 source: actor.source,
             });
+            return presentedArtifact(updated);
         },
         toLLM: (artifact) => [
             {
                 type: "text",
                 text: [
                     `Artifact ${artifact.id} is now at version ${String(artifact.latestVersion)}: ${JSON.stringify(artifact.title)}, ${String(artifact.fileCount)} ${artifact.fileCount === 1 ? "file" : "files"}, opening ${JSON.stringify(artifact.entry.path)}.`,
+                    ARTIFACT_PRESENTED_NOTICE,
                     `Reference it in chat as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id })}, or as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id, version: artifact.latestVersion })} for this version only.`,
                 ].join(" "),
             },

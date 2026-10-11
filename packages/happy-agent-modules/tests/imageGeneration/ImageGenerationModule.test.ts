@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,8 +9,11 @@ import { createRootContext } from "@steve.kite/stdlib";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ChatMediaModule } from "../../sources/chatMedia/index.js";
 import { ConfigModule } from "../../sources/config/index.js";
+import { HistoryModule } from "../../sources/history/index.js";
 import { ImageGenerationModule } from "../../sources/imageGeneration/ImageGenerationModule.js";
+import { scriptedComputeModule } from "../support/computeModule.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const ctx = createRootContext().named("happy-agent-modules-image-generation");
@@ -59,10 +63,16 @@ async function moduleWith(
 ): Promise<ImageGenerationModule> {
     const providers = new AgentProviders();
     for (const [id, provider] of Object.entries(accounts)) providers.add(id, provider, type);
+    const config = await ConfigModule.load(join(happyRoot, ".happy"), {
+        inference: { models: [], providers },
+    });
     return new ImageGenerationModule(
-        await ConfigModule.load(join(happyRoot, ".happy"), {
-            inference: { models: [], providers },
-        }),
+        config,
+        new ChatMediaModule(
+            config,
+            scriptedComputeModule(async () => undefined),
+            new HistoryModule(),
+        ),
     );
 }
 
@@ -110,13 +120,33 @@ describe("ImageGenerationModule", () => {
         expect(result.path).toBe(join(outputDirectory, "call-1.png"));
         expect(await readFile(result.path)).toEqual(bytes);
         expect(requests[0]?.url).toBe("https://images.test/v1/images/generations");
+        // The chat shows a private snapshot measured with a placeholder, never history bytes.
+        const sha256 = createHash("sha256").update(bytes).digest("hex");
+        expect(result.presentation).toEqual({
+            type: "media",
+            items: [
+                {
+                    kind: "image",
+                    name: "call-1.png",
+                    mimeType: "image/png",
+                    size: bytes.byteLength,
+                    sha256,
+                    width: 8,
+                    height: 8,
+                    thumbhash: expect.any(String),
+                },
+            ],
+        });
+        expect(
+            await readFile(join(happyRoot, ".happy", "agent", "media", sha256.slice(0, 2), sha256)),
+        ).toEqual(bytes);
 
         const hooks = await resolveModuleHooks(ctx, module);
         const [tool] = await hooks.tools!(ctx, scope("anthropic/opus-5"));
         expect(tool!.toLLM(result)).toEqual([
             {
                 type: "text",
-                text: `Generated image at ${result.path} (${String(bytes.byteLength)} bytes).`,
+                text: `Generated image at ${result.path} (${String(bytes.byteLength)} bytes). The image is now shown to the user in this chat, so do not repeat its path or describe it as if they cannot see it. It appears only in this chat's history, not in any parent or child chat; if a user should see it in another chat, the agent in that chat must present it there.`,
             },
             { type: "image", mimeType: "image/png", data: result.image_base64 },
         ]);

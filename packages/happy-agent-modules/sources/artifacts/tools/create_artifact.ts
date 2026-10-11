@@ -5,12 +5,7 @@ import { formatHappyReferenceTag } from "@slopus/happy-agent-client";
 
 import type { ComputeModule } from "../../compute/index.js";
 import { quoteVisibleExact } from "../../impl/quoteVisibleExact.js";
-import {
-    artifactRecordSchema,
-    artifactTitleSchema,
-    artifactTypeSchema,
-    MAX_ARTIFACT_FILES,
-} from "../Artifact.js";
+import { artifactTitleSchema, artifactTypeSchema, MAX_ARTIFACT_FILES } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
 import { formatArtifactSource } from "../impl/formatArtifact.js";
 import {
@@ -20,7 +15,10 @@ import {
 } from "../impl/stageArtifactToolFiles.js";
 import {
     ARTIFACT_FILES_GUIDANCE,
+    ARTIFACT_PRESENTED_NOTICE,
     ARTIFACT_TOOL_CAPABILITY,
+    artifactToolResultSchema,
+    presentedArtifact,
     artifactToolFileSchema,
 } from "./common.js";
 
@@ -59,7 +57,7 @@ export function createArtifactTool(
             "Change it later with update_artifact, which keeps every earlier version and carries over the files you do not change.",
         ].join("\n\n"),
         parameters: createArtifactToolInputSchema,
-        returnType: artifactRecordSchema,
+        returnType: artifactToolResultSchema,
         durable: true,
         shouldReviewInAutoMode: ({ files }, ctx) =>
             shouldReviewArtifactSources(ctx, compute, agentId, files),
@@ -72,7 +70,7 @@ export function createArtifactTool(
         execute: async (ctx, input: CreateArtifactToolInput, call) => {
             const id = await call.kv.getOrCreate(ctx, "artifactId", () => createId());
             const existing = await artifacts.get(ctx, id);
-            if (existing !== undefined) return existing;
+            if (existing !== undefined) return presentedArtifact(existing);
             const actor = await artifacts.actorFor(ctx, agentId);
             const files = await stageArtifactToolFiles(
                 ctx,
@@ -90,7 +88,7 @@ export function createArtifactTool(
                 author: actor.author,
                 source: actor.source,
             });
-            return creation.artifact;
+            return presentedArtifact(creation.artifact);
         },
         toLLM: (artifact) => [
             {
@@ -100,6 +98,7 @@ export function createArtifactTool(
                     ...(artifact.source === undefined
                         ? []
                         : [`Made in ${formatArtifactSource(artifact.source)}.`]),
+                    ARTIFACT_PRESENTED_NOTICE,
                     `Reference it in chat as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id })}.`,
                     "Change it with update_artifact.",
                 ].join(" "),

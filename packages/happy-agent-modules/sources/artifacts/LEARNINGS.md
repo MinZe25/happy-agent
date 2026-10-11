@@ -71,3 +71,13 @@ render a link. Surfaces that cannot do that get the title as plain text. The too
 tag, and the module adds a short instruction, because the artifact tools are deferred and an agent
 may mention an artifact without loading them. Tags are written with the client's
 `formatHappyReferenceTag`, so this module never repeats the grammar.
+
+## Writing calls show a card in the chat
+
+The user asked for an artifact an agent creates or updates to appear in the chat as a card that
+opens it, without depending on the artifact's content. `create_artifact` and `update_artifact` now
+return an `artifact` presentation with the ID, type, title, and the version the call made; History
+records it with the call, so live and reloaded history agree. The reply tells the model the user
+already sees the card, and only in this chat, so a sub-agent's artifact must be mentioned again
+by the agent the user talks to. A repeated update after an interruption reports the artifact's
+latest version, which differs only if someone changed it in between.

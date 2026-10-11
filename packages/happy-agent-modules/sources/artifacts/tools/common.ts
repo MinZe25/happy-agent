@@ -1,6 +1,13 @@
-import { Type } from "@sinclair/typebox";
+import { Type, type Static } from "@sinclair/typebox";
 
-import { artifactPathSchema, MAX_ARTIFACT_FILES } from "../Artifact.js";
+import {
+    artifactPathSchema,
+    artifactRecordSchema,
+    artifactTitleSchema,
+    artifactTypeSchema,
+    MAX_ARTIFACT_FILES,
+    type ArtifactRecord,
+} from "../Artifact.js";
 
 /** The one capability every artifact tool contributes to the model's instructions. */
 export const ARTIFACT_TOOL_CAPABILITY =
@@ -53,3 +60,41 @@ export const ARTIFACT_FILES_GUIDANCE = [
     'An html artifact can also be a live app: <script src="/api/v1/client.js"></script> gives it a key-value store shared by all its versions and everyone using it, with realtime changes, writes that survive network failures, and who the viewer is. Before building one, read recipe/artifact-apps.md beside the Happy Agent documentation README. Call the API only at absolute /api/... paths, and put no files under api/. Read and change the data of an app yourself with read_artifact_data and write_artifact_data. Before publishing, try the app with happy-agent artifact dev as a workspace service, as two people and with network faults; after publishing, read_artifact_logs shows the errors and sync problems its pages reported.',
     'Types: "markdown" and "html" (the entry plus up to 255 other files; entry up to 4 MiB and 16 MiB), "image" (one PNG, JPEG, GIF, WebP, AVIF, or SVG up to 32 MiB), "image_series" (1–64 images shown in path order, so number them like 01-intro.png), "video" (one MP4, WebM, QuickTime, or Ogg up to 256 MiB), and "document" (one PDF, Word, Excel, PowerPoint, OpenDocument, RTF, text, CSV, or EPUB file up to 64 MiB). A version holds at most 256 MiB in all.',
 ].join("\n\n");
+
+/** The card a chat shows for the version a writing call made, recorded with its result. */
+const artifactToolPresentationSchema = Type.Object(
+    {
+        type: Type.Literal("artifact"),
+        artifactId: artifactRecordSchema.properties.id,
+        version: Type.Integer({ minimum: 1 }),
+        artifactType: artifactTypeSchema,
+        title: artifactTitleSchema,
+    },
+    { additionalProperties: false },
+);
+
+/** What a writing tool returns: the artifact, and the card the chat shows for it. */
+export const artifactToolResultSchema = Type.Composite(
+    [artifactRecordSchema, Type.Object({ presentation: artifactToolPresentationSchema })],
+    { additionalProperties: false },
+);
+
+export type ArtifactToolResult = Static<typeof artifactToolResultSchema>;
+
+/** The artifact as a writing call left it, with the card for its latest version. */
+export function presentedArtifact(artifact: ArtifactRecord): ArtifactToolResult {
+    return {
+        ...artifact,
+        presentation: {
+            type: "artifact",
+            artifactId: artifact.id,
+            version: artifact.latestVersion,
+            artifactType: artifact.type,
+            title: artifact.title,
+        },
+    };
+}
+
+/** What a writing tool tells the model about the card the user now sees. */
+export const ARTIFACT_PRESENTED_NOTICE =
+    "The user now sees it in this chat as a card that opens it, so do not describe it as if they cannot see it. The card appears only in this chat's history, not in any parent or child chat; if a user should see it in another chat, the agent in that chat must mention or present it there.";

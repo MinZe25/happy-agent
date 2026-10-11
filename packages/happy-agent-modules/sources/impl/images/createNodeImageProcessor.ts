@@ -23,7 +23,9 @@ export function createNodeImageProcessor(): ImageProcessor {
             ) {
                 throw new Error("Image metadata is incomplete.");
             }
-            return { format: metadata.format, height: metadata.height, width: metadata.width };
+            // Sharp reports stored dimensions; an oriented read promises the displayed ones.
+            const size = options.autoOrient ? (metadata.autoOrient ?? metadata) : metadata;
+            return { format: metadata.format, height: size.height, width: size.width };
         },
         async validate(input, options) {
             const sharp = await loadSharp();

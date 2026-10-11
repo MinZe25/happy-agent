@@ -419,6 +419,9 @@ export * from "./compactions/index.js";
 // Context windows: automatic compaction from exact provider measurements.
 export * from "./contextWindow/index.js";
 
+// Chat media: generated images and presented files shown inline, snapshotted outside history.
+export * from "./chatMedia/index.js";
+
 // Image generation: one prompt becomes one PNG on a configured Codex account, written to disk.
 export * from "./imageGeneration/index.js";
 

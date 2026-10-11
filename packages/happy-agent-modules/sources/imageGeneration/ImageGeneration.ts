@@ -1,5 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
+import { ChatMediaModule } from "../chatMedia/index.js";
+
 /** How many images one edit may be built from, in either selector. */
 export const MAX_EDIT_IMAGES = 5;
 
@@ -25,13 +27,17 @@ export const imageGenerationArgumentsSchema = Type.Object(
 /** The TypeScript type inferred from {@link imageGenerationArgumentsSchema}. */
 export type ImageGenerationArguments = Static<typeof imageGenerationArgumentsSchema>;
 
-/** One finished image: where it was saved, and the bytes the model is shown. */
+/**
+ * One finished image: where it was saved, the bytes the model is shown, and, when it could be
+ * snapshotted, how the chat shows it to the person.
+ */
 export const imageGenerationResultSchema = Type.Object(
     {
         bytes: Type.Number(),
         media_type: Type.Literal("image/png"),
         path: Type.String(),
         image_base64: Type.String(),
+        presentation: Type.Optional(ChatMediaModule.presentationSchema),
     },
     { additionalProperties: false },
 );

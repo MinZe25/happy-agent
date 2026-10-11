@@ -1,6 +1,7 @@
 import { defineAgentTool } from "@slopus/happy-agent-base";
 import { Type } from "@sinclair/typebox";
 
+import { ChatMediaModule } from "../../chatMedia/index.js";
 import type { ConfigModule } from "../../config/index.js";
 import { decodeAndValidateImage } from "../../impl/images/decodeAndValidateImage.js";
 import { readReferenceImages } from "../../impl/images/readReferenceImages.js";
@@ -27,6 +28,7 @@ const generatedImageSchema = Type.Object({
     media_type: Type.Union([Type.Literal("image/png"), Type.Literal("image/jpeg")]),
     model: Type.String(),
     path: Type.String(),
+    presentation: Type.Optional(ChatMediaModule.presentationSchema),
 });
 
 /** The file extension each format this tool publishes is saved under. */
@@ -46,7 +48,11 @@ const MODEL_GUIDE = GEMINI_IMAGE_MODELS.map(
  * stay Gemini's own — its model catalog, its aspect ratios, its resolutions — because the two
  * vendor tools are separate definitions, not one shared surface.
  */
-export function geminiGenerateImageTool(connection: GeminiConnection, config: ConfigModule) {
+export function geminiGenerateImageTool(
+    connection: GeminiConnection,
+    config: ConfigModule,
+    chatMedia: ChatMediaModule,
+) {
     return defineAgentTool({
         name: "gemini_imagegen",
         defer: true,
@@ -69,7 +75,7 @@ Guidelines:
 - Use reference images for character consistency, object fidelity, and style matching. Omit them to create something entirely new.
 - \`aspect_ratio\` and \`image_size\` must be ones the chosen model supports, and are refused before a generation is spent if they are not. Omit them to let the model match the reference image, or default to a square.
 - When generating an image containing text, write the text out in the prompt first, then describe the image around it.
-- The finished image is saved in the shared generated-files folder named in your environment instructions and returned to you.`,
+- The finished image is saved in the shared generated-files folder named in your environment instructions, shown to the user in this chat, and returned to you.`,
         parameters: Type.Object({
             prompt: Type.String({ minLength: 2, description: "Detailed image generation prompt" }),
             model: Type.Optional(
@@ -151,6 +157,15 @@ Guidelines:
                 fileName,
                 image.bytes,
             );
+            // Showing the image in the chat is not worth losing an image that was already paid
+            // for, so a snapshot that fails leaves the result without a presentation.
+            const presentation = await chatMedia
+                .snapshot(image.bytes, fileName)
+                .then((item) => chatMedia.presentation([item]))
+                .catch((error: unknown) => {
+                    ctx.log.warn("A generated image could not be shown in the chat.", {}, error);
+                    return undefined;
+                });
             return {
                 bytes: image.bytes.byteLength,
                 ...(generated.text === undefined ? {} : { description: generated.text }),
@@ -158,12 +173,17 @@ Guidelines:
                 media_type: image.mediaType,
                 model: args.model ?? DEFAULT_GEMINI_IMAGE_MODEL,
                 path,
+                ...(presentation === undefined ? {} : { presentation }),
             };
         },
         toLLM: (result) => [
             {
                 type: "text",
-                text: `Generated image at ${result.path} (${String(result.bytes)} bytes).${result.description === undefined ? "" : `\n\n${result.description}`}`,
+                text: `Generated image at ${result.path} (${String(result.bytes)} bytes). ${
+                    result.presentation === undefined
+                        ? "The image could not be shown to the user in this chat; use present_files with its path if they should see it."
+                        : "The image is now shown to the user in this chat, so do not repeat its path or describe it as if they cannot see it. It appears only in this chat's history, not in any parent or child chat; if a user should see it in another chat, the agent in that chat must present it there."
+                }${result.description === undefined ? "" : `\n\n${result.description}`}`,
             },
             { type: "image", mimeType: result.media_type, data: result.image_base64 },
         ],

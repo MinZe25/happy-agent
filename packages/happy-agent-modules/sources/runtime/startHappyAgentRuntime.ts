@@ -49,6 +49,7 @@ import { ContextWindowModule } from "../contextWindow/index.js";
 import { DurableFunctionsModule } from "../durableFunctions/index.js";
 import { EventsModule } from "../events/index.js";
 import { ProjectFilesModule } from "../files/index.js";
+import { ChatMediaModule } from "../chatMedia/index.js";
 import { GeminiModule } from "../gemini/index.js";
 import { GitModule } from "../git/index.js";
 import { GoalModule } from "../goal/index.js";
@@ -138,6 +139,7 @@ export interface HappyAgentRuntimeModules {
     readonly artifactData: ArtifactDataModule;
     readonly auto: AutoModule;
     readonly bots: BotsModule;
+    readonly chatMedia: ChatMediaModule;
     readonly collaboration: CollaborationModule;
     readonly subtasks: SubtasksModule;
     readonly cloud: CloudModule;
@@ -561,8 +563,9 @@ export async function startHappyAgentRuntime(
             tasks,
         );
         const goal = new GoalModule();
-        const gemini = new GeminiModule(config, compute.computeModule);
-        const imageGeneration = new ImageGenerationModule(config);
+        const chatMedia = new ChatMediaModule(config, compute.computeModule, history);
+        const gemini = new GeminiModule(config, compute.computeModule, chatMedia);
+        const imageGeneration = new ImageGenerationModule(config, chatMedia);
         menuBar = new MenuBarModule(config);
         const statusApp = menuBar;
         registerShutdown("menu-bar", async () => await statusApp.beginShutdown());
@@ -614,6 +617,7 @@ export async function startHappyAgentRuntime(
             tasks,
             artifacts,
             artifactData,
+            chatMedia,
         );
         api = apiModule;
 
@@ -625,6 +629,7 @@ export async function startHappyAgentRuntime(
             artifactData,
             auto: autoModule,
             bots,
+            chatMedia,
             collaboration,
             subtasks,
             cloud,
@@ -726,6 +731,7 @@ export async function startHappyAgentRuntime(
             userInput,
             mcp,
             search,
+            chatMedia,
             gemini,
             imageGeneration,
             compute.skillsModule,

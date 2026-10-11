@@ -7,6 +7,7 @@ import {
 import { mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
 
 import type { ComputeModule } from "../compute/index.js";
+import type { ChatMediaModule } from "../chatMedia/index.js";
 import type { ConfigModule } from "../config/index.js";
 import { FileReadLog } from "../impl/FileReadLog.js";
 import type { GeminiConnection } from "./Gemini.js";
@@ -29,11 +30,13 @@ export class GeminiModule implements AgentModule {
     readonly name = "gemini";
     readonly #config: ConfigModule;
     readonly #compute: ComputeModule;
+    readonly #chatMedia: ChatMediaModule;
     /** One lock per agent, so two generations in the same turn cannot interleave their reads. */
     readonly #readLocks: MapAsyncLock<string> = mapAsyncLock<string>();
 
-    constructor(config: ConfigModule, compute: ComputeModule) {
+    constructor(config: ConfigModule, compute: ComputeModule, chatMedia: ChatMediaModule) {
         this.#config = config;
+        this.#chatMedia = chatMedia;
         this.#compute = compute;
     }
 
@@ -64,7 +67,7 @@ export class GeminiModule implements AgentModule {
             // Image generation publishes into the shared generated-files folder, so the key alone
             // backs it. The other tools write or read the agent's own files, so an agent without a
             // machine to work on is not offered them.
-            const image = geminiGenerateImageTool(connection, this.#config);
+            const image = geminiGenerateImageTool(connection, this.#config, this.#chatMedia);
             const compute = await this.#compute.resolve(ctx, scope.agent.id);
             if (compute === undefined) return [image];
             const reads = new FileReadLog(scope.kv, this.#readLocks, scope.agent.id);

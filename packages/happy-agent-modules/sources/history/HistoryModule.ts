@@ -36,10 +36,8 @@ import {
 import { isUserOriginMetadata, senderAgentIdOf } from "../impl/messageOrigin.js";
 import { decodeRequestProfile } from "../impl/requestProfile.js";
 import type { EventsModule } from "../events/index.js";
-import {
-    queryRecordToolSpawnPresentation,
-    queryToolSpawnMessage,
-} from "./persistence/queryToolSpawnPresentation.js";
+import { queryToolCallMessage } from "./persistence/queryToolCallMessage.js";
+import { queryRecordToolSpawnPresentation } from "./persistence/queryToolSpawnPresentation.js";
 import {
     toolPermissionReviewSchema,
     type ToolPermissionReview,
@@ -668,11 +666,31 @@ export class HistoryModule implements AgentModule {
         callId: string,
     ): Promise<AgentSpawnPresentation | undefined> {
         return await this.#direct(ctx, async (txCtx) => {
-            const message = await queryToolSpawnMessage(txCtx, agentId, callId);
+            const message = await queryToolCallMessage(txCtx, agentId, callId);
             const call = message?.blocks.find(
                 (block) => block.type === "tool_call" && block.callId === callId,
             );
             return call?.type === "tool_call" ? call.spawnPresentation : undefined;
+        });
+    }
+
+    /**
+     * The presentation a successful result recorded for one call, read through the original
+     * call's durable index. A running, failed, or unpresented call has none.
+     */
+    async toolResultPresentation(
+        ctx: Context,
+        agentId: string,
+        callId: string,
+    ): Promise<HistoryToolPresentation | undefined> {
+        return await this.#direct(ctx, async (txCtx) => {
+            const message = await queryToolCallMessage(txCtx, agentId, callId);
+            const result = message?.blocks.find(
+                (block) => block.type === "tool_result" && block.callId === callId,
+            );
+            return result?.type === "tool_result" && result.isError !== true
+                ? result.presentation
+                : undefined;
         });
     }
 

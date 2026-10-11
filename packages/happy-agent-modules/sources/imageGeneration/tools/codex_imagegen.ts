@@ -44,7 +44,7 @@ Guidelines:
 - If neither mechanism can include every target image, ask the user to attach the missing images again.
 - Directly generate the image without reconfirmation or clarification unless required images must be attached again.
 - Always use this tool for image editing unless the user explicitly requests otherwise.
-- The finished image is saved in the shared generated-files folder named in your environment instructions and returned to you.`,
+- The finished image is saved in the shared generated-files folder named in your environment instructions, shown to the user in this chat, and returned to you.`,
         parameters: imageGenerationArgumentsSchema,
         returnType: imageGenerationResultSchema,
         // Generating an image is billed work that cannot be safely repeated, so an interrupted
@@ -64,7 +64,7 @@ Guidelines:
         toLLM: (result) => [
             {
                 type: "text",
-                text: `Generated image at ${result.path} (${String(result.bytes)} bytes).`,
+                text: `Generated image at ${result.path} (${String(result.bytes)} bytes). ${generatedImageNotice(result.presentation !== undefined)}`,
             },
             { type: "image", mimeType: result.media_type, data: result.image_base64 },
         ],
@@ -87,4 +87,11 @@ function describeImageGenerationAction(
     }${
         recent === undefined ? "" : ` and ${String(recent)} recent conversation image(s)`
     } to Codex image generation. If an account definitively refuses the request, Happy Agent may send the same data to another of ${String(module.accountCount)} configured Codex cloud account(s), including accounts with custom endpoints. Access: conversation data, local filesystem read/write, and external Codex APIs`;
+}
+
+/** What the model is told about who can see the image it made. */
+function generatedImageNotice(presented: boolean): string {
+    return presented
+        ? "The image is now shown to the user in this chat, so do not repeat its path or describe it as if they cannot see it. It appears only in this chat's history, not in any parent or child chat; if a user should see it in another chat, the agent in that chat must present it there."
+        : "The image could not be shown to the user in this chat; use present_files with its path if they should see it.";
 }

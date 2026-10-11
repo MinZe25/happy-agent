@@ -8,6 +8,7 @@ import type {
 import { Value } from "@sinclair/typebox/value";
 import { mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
 
+import type { ChatMediaModule } from "../chatMedia/index.js";
 import type { ConfigModule } from "../config/index.js";
 import {
     imageGenerationArgumentsSchema,
@@ -47,13 +48,15 @@ export class ImageGenerationModule implements AgentModule {
     readonly name = "image-generation";
 
     readonly #config: ConfigModule;
+    readonly #chatMedia: ChatMediaModule;
     readonly #recentImages = new RecentImages();
     /** One image at a time per agent: each generation is billed, and each picks an account. */
     readonly #locks: MapAsyncLock<string> = mapAsyncLock<string>();
     #roundRobinOffset = 0;
 
-    constructor(config: ConfigModule) {
+    constructor(config: ConfigModule, chatMedia: ChatMediaModule) {
         this.#config = config;
+        this.#chatMedia = chatMedia;
     }
 
     /** How many accounts this agent's request could be sent to, for an approval to disclose. */
@@ -117,11 +120,21 @@ export class ImageGenerationModule implements AgentModule {
         );
         // The model may want to edit what it just made, and nothing else will remember it.
         this.#recentImages.record(agentId, generated.mediaType, generated.base64);
+        // Showing the image in the chat is not worth losing an image that was already paid for,
+        // so a snapshot that fails leaves the result without a presentation.
+        const presentation = await this.#chatMedia
+            .snapshot(bytes, fileName)
+            .then((item) => this.#chatMedia.presentation([item]))
+            .catch((error: unknown) => {
+                ctx.log.warn("A generated image could not be shown in the chat.", {}, error);
+                return undefined;
+            });
         return {
             bytes: bytes.byteLength,
             image_base64: generated.base64,
             media_type: generated.mediaType,
             path,
+            ...(presentation === undefined ? {} : { presentation }),
         };
     }
 

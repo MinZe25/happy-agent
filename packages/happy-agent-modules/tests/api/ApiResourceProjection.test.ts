@@ -511,6 +511,143 @@ describe("messageResource", () => {
         ]);
     });
 
+    it("serves media and artifact presentations without snapshot digests and keeps raw data", () => {
+        const sha256 = "a".repeat(64);
+        const historyMessage = {
+            at: 100,
+            blocks: [
+                {
+                    type: "tool_call" as const,
+                    callId: "callmedia",
+                    name: "present_files",
+                    arguments: { filepaths: ["chart.png", "report.pdf"] },
+                },
+                {
+                    type: "tool_result" as const,
+                    callId: "callmedia",
+                    toolName: "present_files",
+                    output: "Presented 2 files to the user in this chat.",
+                    presentation: {
+                        type: "media" as const,
+                        items: [
+                            {
+                                kind: "image" as const,
+                                name: "chart.png",
+                                mimeType: "image/png",
+                                size: 120,
+                                sha256,
+                                width: 4,
+                                height: 3,
+                                thumbhash: "AAAA",
+                            },
+                            {
+                                kind: "document" as const,
+                                name: "report.pdf",
+                                mimeType: "application/pdf",
+                                size: 99,
+                                sha256,
+                            },
+                        ],
+                    },
+                },
+                {
+                    type: "tool_call" as const,
+                    callId: "callcard",
+                    name: "create_artifact",
+                    arguments: { type: "markdown", title: "Notes", files: [{ content: "# N" }] },
+                },
+                {
+                    type: "tool_result" as const,
+                    callId: "callcard",
+                    toolName: "create_artifact",
+                    output: "Artifact created.",
+                    presentation: {
+                        type: "artifact" as const,
+                        artifactId: "r7k2m9q4w1e5t8y3u6i0o2p5",
+                        version: 1,
+                        artifactType: "markdown" as const,
+                        title: "Notes",
+                    },
+                },
+            ],
+            recordId: "message-media",
+            role: "assistant" as const,
+        };
+        const media = {
+            type: "media",
+            items: [
+                {
+                    kind: "image",
+                    name: "chart.png",
+                    mimeType: "image/png",
+                    size: 120,
+                    width: 4,
+                    height: 3,
+                    thumbhash: "AAAA",
+                },
+                { kind: "document", name: "report.pdf", mimeType: "application/pdf", size: 99 },
+            ],
+        };
+        const card = historyMessage.blocks[3]!.presentation;
+        const historical = messageResource(historyMessage);
+        const live = providerMessageContent(
+            [
+                {
+                    type: "toolCall",
+                    id: "callmedia",
+                    name: "present_files",
+                    arguments: { filepaths: ["chart.png", "report.pdf"] },
+                },
+                {
+                    type: "tool_result",
+                    toolCallId: "callmedia",
+                    rendered: [
+                        { type: "text", text: "Presented 2 files to the user in this chat." },
+                    ],
+                },
+                {
+                    type: "toolCall",
+                    id: "callcard",
+                    name: "create_artifact",
+                    arguments: { type: "markdown", title: "Notes", files: [{ content: "# N" }] },
+                },
+                {
+                    type: "tool_result",
+                    toolCallId: "callcard",
+                    rendered: [{ type: "text", text: "Artifact created." }],
+                },
+            ],
+            reviewedToolCalls(historyMessage),
+            toolResultPresentations(historyMessage),
+        );
+
+        expect(live).toEqual(historical.content);
+        expect(JSON.stringify(historical.content)).not.toContain(sha256);
+        // The published client's schemas accept exactly what the daemon serves.
+        expect(Value.Check(toolPresentationSchema, media)).toBe(true);
+        expect(Value.Check(toolPresentationSchema, card)).toBe(true);
+        expect(messageResource(historyMessage, { omitToolData: true }).content).toEqual([
+            {
+                type: "tool_call",
+                id: "callmedia",
+                name: "present_files",
+                status: "completed",
+                arguments: { filepaths: ["chart.png", "report.pdf"] },
+                result: { output: "Presented 2 files to the user in this chat." },
+                presentation: media,
+            },
+            {
+                type: "tool_call",
+                id: "callcard",
+                name: "create_artifact",
+                status: "completed",
+                arguments: { type: "markdown", title: "Notes", files: [{ content: "# N" }] },
+                result: { output: "Artifact created." },
+                presentation: card,
+            },
+        ]);
+    });
+
     it("omits raw data only after projecting a presentation", () => {
         const message = messageResource(
             {

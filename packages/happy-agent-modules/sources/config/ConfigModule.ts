@@ -1519,6 +1519,17 @@ export class ConfigModule implements AgentModule {
         return join(this.artifactsHome, "content", sha256.slice(0, 2), sha256);
     }
 
+    /**
+     * One snapshot of media shown in a chat, named by the SHA-256 of its bytes and never
+     * rewritten, in the private root beside the database rather than in history.
+     */
+    chatMediaContentPath(sha256: string): string {
+        if (!/^[0-9a-f]{64}$/.test(sha256)) {
+            throw new Error("The chat media digest cannot name a file.");
+        }
+        return join(this.configuration.paths.agentHome, "media", sha256.slice(0, 2), sha256);
+    }
+
     /** Where one artifact upload's bytes arrive before they are stored by their digest. */
     artifactUploadPath(uploadId: string): string {
         if (!Value.Check(cuid2Schema, uploadId)) {

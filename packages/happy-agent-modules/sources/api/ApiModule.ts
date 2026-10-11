@@ -90,6 +90,7 @@ import {
     type ArtifactSourceInput,
 } from "../artifacts/index.js";
 import { ArtifactDataModule } from "../artifactData/index.js";
+import { ChatMediaModule } from "../chatMedia/index.js";
 import { ServicesModule, ServiceError, ServiceAccessError } from "../services/index.js";
 import { ServiceHttpTunnel } from "./ServiceHttpTunnel.js";
 import {
@@ -217,6 +218,7 @@ import {
 } from "../workspaces/index.js";
 import { ApiArtifactData, ARTIFACT_DATA_ROUTE } from "./ApiArtifactData.js";
 import { ARTIFACT_FILE_ROUTE, artifactFileRequest, sendArtifactFile } from "./ApiArtifactFiles.js";
+import { sendStoredFile } from "./sendStoredFile.js";
 import { ApiError, invalidRequest, notFound, unsupported, type ApiErrorCode } from "./ApiError.js";
 import { ApiEventJournal, type ApiEvent } from "./ApiEventJournal.js";
 import {
@@ -435,6 +437,7 @@ export class ApiModule implements AgentModule {
     readonly #tasks: TasksModule | undefined;
     readonly #artifacts: ArtifactsModule | undefined;
     readonly #artifactData: ApiArtifactData | undefined;
+    readonly #chatMedia: ChatMediaModule | undefined;
     readonly #live: LiveModule | undefined;
     readonly #runners: RunnersModule | undefined;
     readonly #projects: ProjectsModule;
@@ -560,6 +563,7 @@ export class ApiModule implements AgentModule {
         tasks?: TasksModule,
         artifacts?: ArtifactsModule,
         artifactData?: ArtifactDataModule,
+        chatMedia?: ChatMediaModule,
     ) {
         this.#abort = abort;
         this.#config = config;
@@ -597,6 +601,7 @@ export class ApiModule implements AgentModule {
             artifactData === undefined
                 ? undefined
                 : new ApiArtifactData(artifactData, this.#streams);
+        this.#chatMedia = chatMedia;
     }
 
     readonly beforeStart = async (
@@ -3714,6 +3719,31 @@ export class ApiModule implements AgentModule {
                 return true;
             }
             return false;
+        }
+        const toolCallMedia =
+            /^\/v0\/agents\/([a-z][a-z0-9]*)\/tool-calls\/([a-z][a-z0-9]*)\/media\/(0|[1-9][0-9]{0,8})$/.exec(
+                url.pathname,
+            );
+        if (toolCallMedia !== null && request.method === "GET") {
+            const agentId = toolCallMedia[1] as string;
+            await this.#requireAgentResource(ctx, agentId);
+            const stored = await this.#chatMedia?.storedItem(
+                ctx,
+                agentId,
+                toolCallMedia[2] as string,
+                Number(toolCallMedia[3]),
+            );
+            if (stored === undefined) throw notFound("The tool call has no such media.");
+            await sendStoredFile(request, response, {
+                contentPath: stored.contentPath,
+                sha256: stored.item.sha256,
+                size: stored.item.size,
+                mimeType: stored.item.mimeType,
+                name: stored.item.name,
+                // An item's snapshot is taken once, so the same URL never names other bytes.
+                cacheControl: "private, max-age=31536000, immutable",
+            });
+            return true;
         }
         const slashCommandImage =
             /^\/v0\/agents\/([a-z][a-z0-9]*)\/slash-commands\/([^/]+)\/image$/.exec(url.pathname);

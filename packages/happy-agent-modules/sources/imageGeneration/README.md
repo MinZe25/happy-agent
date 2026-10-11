@@ -8,12 +8,12 @@ the accounts already configured and the configuration that names the generated-f
 import { ConfigModule, ImageGenerationModule } from "@slopus/happy-agent-modules";
 
 const config = await ConfigModule.load();
-const imageGeneration = new ImageGenerationModule(config);
+const imageGeneration = new ImageGenerationModule(config, chatMedia);
 ```
 
-The configuration module is the only thing it takes: it owns the Codex accounts an image may be
-generated on and the generated-files folder a finished image is published into, so the module asks
-it for both rather than being handed a registry and a path.
+The configuration module owns the Codex accounts an image may be generated on and the
+generated-files folder a finished image is published into, so the module asks it for both rather
+than being handed a registry and a path. Chat media owns how a finished image is shown in the chat.
 
 ## The tool
 
@@ -68,3 +68,8 @@ What comes back is proven to be a real PNG — base64, signature, and a decoder 
 picture — before it becomes a file. It is written under a temporary name and published by rename,
 so a reader never sees a partial image, and the model is handed both the path and the image itself
 so it can decide whether to iterate.
+
+The image is also snapshotted through chat media, and the result carries a `media` presentation
+with its dimensions and ThumbHash, so the person sees it inline in this chat. The model is told it
+is shown there and only there. A failed snapshot leaves the paid-for image without a presentation
+and tells the model to present it instead.

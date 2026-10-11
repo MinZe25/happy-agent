@@ -115,6 +115,18 @@ describe("the artifact tools", () => {
             ["index.html", "text/html", version.entry.sha256],
             ["style.css", "text/css", sha256("body { color: teal; }")],
         ]);
+        // The chat shows a card for the version the call made, and the model is told so.
+        expect((artifact as ArtifactRecord & { presentation: unknown }).presentation).toEqual({
+            type: "artifact",
+            artifactId: artifact.id,
+            version: 1,
+            artifactType: "html",
+            title: "Launch page",
+        });
+        expect(textOf(create, artifact)).toContain(
+            "The user now sees it in this chat as a card that opens it",
+        );
+        expect(textOf(create, artifact)).toContain("not in any parent or child chat");
         expect(textOf(create, artifact)).toContain('opening "index.html"');
         expect(textOf(create, artifact)).toContain(
             `Reference it in chat as <happy-artifact id="${artifact.id}"/>.`,
@@ -181,7 +193,17 @@ describe("the artifact tools", () => {
 
         const updated = (await call(w.ctx, update, args, { id: "updatecall" })) as ArtifactRecord;
 
-        expect(updated).toMatchObject({ latestVersion: 2, fileCount: 3 });
+        expect(updated).toMatchObject({
+            latestVersion: 2,
+            fileCount: 3,
+            presentation: {
+                type: "artifact",
+                artifactId: artifact.id,
+                version: 2,
+                artifactType: "markdown",
+                title: "Report",
+            },
+        });
         const version = await w.artifacts.getVersion(w.ctx, artifact.id, 2);
         expect(version.files.map((file) => file.path)).toEqual([
             "appendix.md",

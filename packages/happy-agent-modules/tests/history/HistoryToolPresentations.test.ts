@@ -2,11 +2,13 @@ import type { AgentModuleScope } from "@slopus/happy-agent-base";
 import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
+import { ChatMediaModule } from "../../sources/chatMedia/index.js";
 import { HistoryModule } from "../../sources/history/HistoryModule.js";
 import type { HistoryMessage } from "../../sources/history/index.js";
 import { messageResource } from "../../sources/api/ApiMessageProjection.js";
 import { FakeCompute } from "../compute/support/FakeCompute.js";
 import { computeToolset } from "../compute/support/computeTools.js";
+import { scriptedComputeModule, testConfig } from "../support/computeModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
@@ -238,6 +240,93 @@ describe("History tool presentations", () => {
                         },
                     ],
                 },
+            });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("records presented media and finds each item's snapshot by call and position", async () => {
+        const compute = new FakeCompute();
+        compute.files.set("/workspace/note.txt", {
+            content: "",
+            bytes: Buffer.from("presented"),
+            mtimeMs: 1,
+        });
+        const history = new HistoryModule();
+        const chatMedia = new ChatMediaModule(
+            testConfig,
+            scriptedComputeModule(async () => compute),
+            history,
+        );
+        const database = moduleDatabase(history.migrations, "history-media-presentation");
+        await database.ready;
+        const ctx = database.context;
+        const hooks = await resolveModuleHooks(ctx, history);
+        const values = new Map<string, unknown>();
+        const scope = scopeFor(values);
+        try {
+            const [present] = await (
+                await resolveModuleHooks(ctx, chatMedia)
+            ).tools!(ctx, {
+                agent: { id: "agent-a" },
+            } as never);
+            const argumentsValue = { filepaths: ["note.txt"] };
+            const result = await present!.execute(ctx, argumentsValue, {
+                id: "callpresent",
+            } as never);
+            await history.record(ctx, "agent-a", {
+                blocks: [
+                    {
+                        arguments: argumentsValue,
+                        callId: "callpresent",
+                        name: "present_files",
+                        type: "tool_call",
+                    },
+                ],
+                recordId: "inference-present",
+                role: "assistant",
+            });
+            expect(await chatMedia.storedItem(ctx, "agent-a", "callpresent", 0)).toBeUndefined();
+            await hooks.beforeToolCallTransact!(ctx, scope, {
+                arguments: JSON.stringify(argumentsValue),
+                callId: "callpresent",
+                name: "present_files",
+                type: "tool_call",
+            });
+            await hooks.afterToolCall!(ctx, scope, {
+                arguments: argumentsValue,
+                callId: "callpresent",
+                content: present!.toLLM(result),
+                isError: false,
+                result,
+                tool: present as never,
+            });
+            await hooks.afterToolCallTransact!(ctx, scope, {
+                callId: "callpresent",
+                content: present!.toLLM(result),
+                role: "tool",
+            });
+
+            const recorded = await history.toolResultPresentation(ctx, "agent-a", "callpresent");
+            expect(recorded).toEqual((result as { presentation: unknown }).presentation);
+            const stored = await chatMedia.storedItem(ctx, "agent-a", "callpresent", 0);
+            expect(stored?.item).toMatchObject({ kind: "file", name: "note.txt", size: 9 });
+            expect(stored?.contentPath).toBe(testConfig.chatMediaContentPath(stored!.item.sha256));
+            expect(await chatMedia.storedItem(ctx, "agent-a", "callpresent", 1)).toBeUndefined();
+            expect(await chatMedia.storedItem(ctx, "agent-a", "callother", 0)).toBeUndefined();
+            expect(
+                messageResource((await history.read(ctx, "agent-a")).messages[0]!.message),
+            ).toMatchObject({
+                content: [
+                    {
+                        status: "completed",
+                        presentation: {
+                            type: "media",
+                            items: [{ kind: "file", name: "note.txt", size: 9 }],
+                        },
+                    },
+                ],
             });
         } finally {
             database.close();

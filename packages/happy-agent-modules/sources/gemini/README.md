@@ -7,6 +7,7 @@ compute module so a generated file lands where every other file tool would put i
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
 import {
+    ChatMediaModule,
     ComputeModule,
     ConfigModule,
     GeminiModule,
@@ -16,7 +17,8 @@ import {
 const config = await ConfigModule.load();
 const secrets = new SecretsModule();
 const compute = new ComputeModule(config, secrets);
-const gemini = new GeminiModule(config, compute);
+const chatMedia = new ChatMediaModule(config, compute, history);
+const gemini = new GeminiModule(config, compute, chatMedia);
 const agent = await Agent.create(ctx, { ...options, modules: [secrets, compute, gemini] });
 ```
 
@@ -41,7 +43,8 @@ product never overrides it.
 - **`gemini_imagegen`** — a JPEG image from any of Gemini's three image models, published the same way
   `codex_imagegen` publishes: decoded to prove it is a real image, written into the shared
   generated-files folder under the tool call's name, and handed back to the model as both the path
-  and the image itself. Whatever Gemini wrote about the image comes back as its description.
+  and the image itself. Whatever Gemini wrote about the image comes back as its description. Like
+  `codex_imagegen`, it is snapshotted through chat media and shown inline in this chat.
 
     `model` chooses between `gemini-3.1-flash-image` (Nano Banana 2, the default),
     `gemini-3-pro-image` (Nano Banana Pro), and `gemini-2.5-flash-image` (Nano Banana).

@@ -6,7 +6,9 @@ import { createRootContext } from "@steve.kite/stdlib";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ChatMediaModule } from "../../sources/chatMedia/index.js";
 import { GeminiModule } from "../../sources/gemini/index.js";
+import { HistoryModule } from "../../sources/history/index.js";
 import { FakeCompute } from "../compute/support/FakeCompute.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 import { geminiToolset } from "./support/geminiTools.js";
@@ -82,9 +84,11 @@ describe("the Gemini module's tools", () => {
     });
 
     it("still offers image generation when the agent has no machine to write to", async () => {
+        const compute = scriptedComputeModule(async () => undefined);
         const module = new GeminiModule(
             testConfig,
-            scriptedComputeModule(async () => undefined),
+            compute,
+            new ChatMediaModule(testConfig, compute, new HistoryModule()),
         );
 
         const hooks = await resolveModuleHooks(ctx, module);
@@ -95,9 +99,11 @@ describe("the Gemini module's tools", () => {
     it("has no tools at all when the installation has no Gemini key", async () => {
         vi.stubEnv("GEMINI_API_KEY", "");
         const compute = new FakeCompute();
+        const computeModule = scriptedComputeModule(async () => compute);
         const module = new GeminiModule(
             testConfig,
-            scriptedComputeModule(async () => compute),
+            computeModule,
+            new ChatMediaModule(testConfig, computeModule, new HistoryModule()),
         );
 
         const hooks = await resolveModuleHooks(ctx, module);
@@ -124,6 +130,17 @@ describe("the Gemini module's tools", () => {
         expect(result.bytes).toBe(bytes.byteLength);
         expect(result.media_type).toBe("image/png");
         expect(result.description).toBe("A quiet mountain lake.");
+        expect(result.presentation).toMatchObject({
+            type: "media",
+            items: [
+                {
+                    kind: "image",
+                    name: "geminitestcall.png",
+                    mimeType: "image/png",
+                    size: bytes.byteLength,
+                },
+            ],
+        });
         expect(await readFile(result.path)).toEqual(bytes);
         expect(requestBody(request)).toMatchObject({
             input: [{ type: "text", text: "A quiet mountain lake" }],
@@ -133,7 +150,7 @@ describe("the Gemini module's tools", () => {
         expect(tool("gemini_imagegen").toLLM(result)).toEqual([
             {
                 type: "text",
-                text: `Generated image at ${result.path} (${String(bytes.byteLength)} bytes).\n\nA quiet mountain lake.`,
+                text: `Generated image at ${result.path} (${String(bytes.byteLength)} bytes). The image is now shown to the user in this chat, so do not repeat its path or describe it as if they cannot see it. It appears only in this chat's history, not in any parent or child chat; if a user should see it in another chat, the agent in that chat must present it there.\n\nA quiet mountain lake.`,
             },
             { type: "image", mimeType: "image/png", data: result.image_base64 },
         ]);

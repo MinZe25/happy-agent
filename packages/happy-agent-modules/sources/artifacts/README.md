@@ -64,6 +64,11 @@ Agents mention an artifact in their replies by its reference tag, `<happy-artifa
 `create_artifact`, `update_artifact`, `read_artifact`, and `list_artifacts` hand back the exact tag.
 Clients show the artifact's live title as a link in its place (API.md, "Reference tags").
 
+A successful `create_artifact` or `update_artifact` result also carries an `artifact` presentation
+— the artifact's ID, type, title, and the version the call made — which History records with the
+call, so the chat shows a card that opens it. The model is told the card is visible in its own chat
+only, not in parent or child chats.
+
 A path that leaves the workspace or resolves through a symlink outside it is reviewed and, when
 allowed, read with temporary Full access, through Compute's shared `shouldReviewPath`. Files are
 read one at a time through the agent's own machine, so an artifact made on a runner or in a

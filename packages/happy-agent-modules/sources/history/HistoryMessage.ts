@@ -264,8 +264,7 @@ const historyFileDiffSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/** A bounded result-derived presentation retained with durable tool history. */
-export const historyToolPresentationSchema = Type.Object(
+const historyFileDiffPresentationSchema = Type.Object(
     {
         type: Type.Literal("file_diff"),
         files: Type.Array(historyFileDiffSchema, { maxItems: MAX_HISTORY_FILE_DIFF_FILES }),
@@ -273,6 +272,74 @@ export const historyToolPresentationSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+
+const historyMediaItemFields = {
+    name: Type.String({ minLength: 1, maxLength: 255 }),
+    mimeType: Type.String({ minLength: 1, maxLength: 255, pattern: "^[^\\u0000\\r\\n]+$" }),
+    size: historyFileDiffCountSchema,
+    /** Names the daemon-private snapshot the item's bytes are served from; never public. */
+    sha256: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+};
+
+/** One snapshotted item a call showed inline: a measured image, or any other file. */
+export const historyMediaItemSchema = Type.Union([
+    Type.Object(
+        {
+            kind: Type.Literal("image"),
+            ...historyMediaItemFields,
+            width: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+            height: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+            thumbhash: Type.String({ minLength: 1, maxLength: 128 }),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            kind: Type.Union([
+                Type.Literal("video"),
+                Type.Literal("document"),
+                Type.Literal("file"),
+            ]),
+            ...historyMediaItemFields,
+        },
+        { additionalProperties: false },
+    ),
+]);
+
+export type HistoryMediaItem = Static<typeof historyMediaItemSchema>;
+
+const historyMediaPresentationSchema = Type.Object(
+    {
+        type: Type.Literal("media"),
+        items: Type.Array(historyMediaItemSchema, { minItems: 1, maxItems: 10 }),
+    },
+    { additionalProperties: false },
+);
+
+const historyArtifactPresentationSchema = Type.Object(
+    {
+        type: Type.Literal("artifact"),
+        artifactId: cuid2Schema,
+        version: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+        artifactType: Type.Union([
+            Type.Literal("markdown"),
+            Type.Literal("html"),
+            Type.Literal("image"),
+            Type.Literal("image_series"),
+            Type.Literal("video"),
+            Type.Literal("document"),
+        ]),
+        title: Type.String({ minLength: 1, maxLength: 256 }),
+    },
+    { additionalProperties: false },
+);
+
+/** A bounded result-derived presentation retained with durable tool history. */
+export const historyToolPresentationSchema = Type.Union([
+    historyFileDiffPresentationSchema,
+    historyMediaPresentationSchema,
+    historyArtifactPresentationSchema,
+]);
 
 export type HistoryToolPresentation = Static<typeof historyToolPresentationSchema>;
 

@@ -1,6 +1,8 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import {
     agentSpawnPresentationSchema,
+    artifactPresentationSchema,
+    mediaPresentationSchema,
     type AgentSpawnPresentation,
 } from "@slopus/happy-agent-client";
 
@@ -56,6 +58,8 @@ const toolPresentationSchema = Type.Union([
         { additionalProperties: false },
     ),
     historyToolPresentationSchema,
+    mediaPresentationSchema,
+    artifactPresentationSchema,
     Type.Object(
         {
             type: Type.Literal("search"),
@@ -127,10 +131,13 @@ export function toolCallResource(
     options: MessageResourceOptions = {},
 ): Record<string, unknown> {
     const presentation = presentationForToolCall(call);
+    // Additive presentations keep raw data so older clients can still fall back to it.
     const omitRaw =
         options.omitToolData === true &&
         presentation !== undefined &&
-        presentation.type !== "agent_spawn";
+        presentation.type !== "agent_spawn" &&
+        presentation.type !== "media" &&
+        presentation.type !== "artifact";
     return {
         type: "tool_call",
         id: call.id,
@@ -151,7 +158,7 @@ function presentationForToolCall(call: ToolCallProjection): ToolPresentation | u
     }
     if (call.status === "completed" && call.presentation !== undefined) {
         const presentation = checked(historyToolPresentationSchema, call.presentation);
-        if (presentation !== undefined) return presentation;
+        if (presentation !== undefined) return publicPresentation(presentation);
     }
     if (call.name === "exec_command") {
         const args = checked(codexExecArgumentsSchema, call.arguments);
@@ -208,6 +215,15 @@ function presentationForToolCall(call: ToolCallProjection): ToolPresentation | u
         if (args !== undefined) return { type: "search", target, query: args.query };
     }
     return undefined;
+}
+
+/** Media digests name private snapshots; the public item is served by its position instead. */
+function publicPresentation(presentation: HistoryToolPresentation): ToolPresentation {
+    if (presentation.type !== "media") return presentation;
+    return {
+        type: "media",
+        items: presentation.items.map(({ sha256: _sha256, ...item }) => item),
+    };
 }
 
 function execPresentation(command: string, call: ToolCallProjection): ToolPresentation {

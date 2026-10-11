@@ -120,6 +120,8 @@ tool calls, and tool results), let the model size what it did and did not see wi
 - `toolSpawnPresentation(ctx, agentId, callId)` reads the creation identity retained on the original
   indexed call. `recordToolSpawnPresentation` atomically adds its resolved model or successful child
   ID; identical writes are harmless and conflicting recorded identities are rejected.
+- `toolResultPresentation(ctx, agentId, callId)` reads the presentation a successful result
+  recorded, through the original call's index; Chat Media serves media items from it.
 - `onToolSpawn(listener): () => void` observes those already-committed message updates, separately
   from appends. The API uses the same message projection as history reads.
 
@@ -152,7 +154,8 @@ the run-scoped Agent KV that Agent Base lends the module, under these keys:
   retained until the pending blocks commit or settlement flushes them after interruption.
 
 Per-call presentation state uses that call's scoped `scope.runKV` instead: `tool_name` is written by
-`beforeToolCallTransact`, and `tool_presentation` is written after successful execution. Both are
+`beforeToolCallTransact`, and `tool_presentation` — a bounded `file_diff`, `media`, or `artifact`
+presentation the tool returned — is written after successful execution. Both are
 read by `afterToolCallTransact`; the run store clears them when the agent settles.
 
 Sub-agent creation is different: its resolved identity must exist before execution creates the

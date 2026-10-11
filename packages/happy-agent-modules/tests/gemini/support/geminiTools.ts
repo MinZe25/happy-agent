@@ -6,9 +6,11 @@ import {
 } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
+import { ChatMediaModule } from "../../../sources/chatMedia/index.js";
 import type { ComputeModule, HostCompute } from "../../../sources/compute/index.js";
 import type { ConfigModule } from "../../../sources/config/index.js";
 import { GeminiModule } from "../../../sources/gemini/index.js";
+import { HistoryModule } from "../../../sources/history/index.js";
 import { InMemoryPersistence } from "../../support/InMemoryPersistence.js";
 import { resolveModuleHooks } from "../../support/moduleHooks.js";
 import { scriptedComputeModule, testConfig } from "../../support/computeModule.js";
@@ -24,7 +26,7 @@ export class ScriptedGeminiModule extends GeminiModule {
     readonly #fetch: typeof fetch | undefined;
 
     constructor(config: ConfigModule, compute: ComputeModule, transport?: typeof fetch) {
-        super(config, compute);
+        super(config, compute, new ChatMediaModule(config, compute, new HistoryModule()));
         this.#fetch = transport;
     }
 
