@@ -89,6 +89,7 @@ import {
     type ArtifactSource,
     type ArtifactSourceInput,
 } from "../artifacts/index.js";
+import { ArtifactDataModule } from "../artifactData/index.js";
 import { ServicesModule, ServiceError, ServiceAccessError } from "../services/index.js";
 import { ServiceHttpTunnel } from "./ServiceHttpTunnel.js";
 import {
@@ -214,6 +215,7 @@ import {
     type Workspace,
     type WorkspaceEvent,
 } from "../workspaces/index.js";
+import { ApiArtifactData, ARTIFACT_DATA_ROUTE } from "./ApiArtifactData.js";
 import { ARTIFACT_FILE_ROUTE, artifactFileRequest, sendArtifactFile } from "./ApiArtifactFiles.js";
 import { ApiError, invalidRequest, notFound, unsupported, type ApiErrorCode } from "./ApiError.js";
 import { ApiEventJournal, type ApiEvent } from "./ApiEventJournal.js";
@@ -432,6 +434,7 @@ export class ApiModule implements AgentModule {
     readonly #subtasks: SubtasksModule | undefined;
     readonly #tasks: TasksModule | undefined;
     readonly #artifacts: ArtifactsModule | undefined;
+    readonly #artifactData: ApiArtifactData | undefined;
     readonly #live: LiveModule | undefined;
     readonly #runners: RunnersModule | undefined;
     readonly #projects: ProjectsModule;
@@ -556,6 +559,7 @@ export class ApiModule implements AgentModule {
         runners?: RunnersModule,
         tasks?: TasksModule,
         artifacts?: ArtifactsModule,
+        artifactData?: ArtifactDataModule,
     ) {
         this.#abort = abort;
         this.#config = config;
@@ -589,6 +593,10 @@ export class ApiModule implements AgentModule {
         this.#runners = runners;
         this.#tasks = tasks;
         this.#artifacts = artifacts;
+        this.#artifactData =
+            artifactData === undefined
+                ? undefined
+                : new ApiArtifactData(artifactData, this.#streams);
     }
 
     readonly beforeStart = async (
@@ -5088,6 +5096,10 @@ export class ApiModule implements AgentModule {
     ): Promise<boolean> {
         const artifacts = this.#artifacts;
         if (artifacts === undefined) return false;
+        if (this.#artifactData !== undefined && ARTIFACT_DATA_ROUTE.test(url.pathname)) {
+            await this.#artifactData.handle(ctx, request, response);
+            return true;
+        }
         try {
             if (url.pathname === "/v0/artifact-uploads") {
                 if (request.method !== "POST") return false;

@@ -6045,6 +6045,217 @@ event after commit, echoing `mutationId`. Deleting an artifact that is already d
 was first sent with. `404` when no such artifact exists, and the usual `409` when `If-Match` names
 an older version of an active artifact.
 
+### Artifact data
+
+Every artifact has one small key-value store that its HTML pages read and write, so an `html`
+artifact can be a realtime, multi-user app: a shared to-do list, a poll, a game board. A store
+belongs to the artifact ID. Every version of the artifact uses the same store, and so does everyone
+using the daemon: each device, each client, and in team mode each member. The daemon keeps each
+store in its own file outside the main database, at `.happy/agent/artifacts/_data_/<artifactId>/`.
+
+The data API is served under `/v0/artifacts/:artifactId/api/*` and takes the bearer token like
+every route. A page reaches it at `/api/*` of its own origin. The client showing the page forwards
+`/api/<rest>?<query>` to `/v0/artifacts/<artifactId>/api/<rest>?<query>` on the same daemon or
+connection, unchanged and for every method, and adds the token itself. The page never holds a
+token, and the client needs no knowledge of the routes below, so the API grows with the daemon
+alone. A forwarding client passes at least the request headers `Content-Type`, `Accept`,
+`If-Match`, `If-None-Match`, `Last-Event-ID`, and `Cache-Control`, and the response headers
+`Content-Type`, `Content-Length`, `ETag`, `Cache-Control`, `Last-Modified`, `Retry-After`, and
+`Location`. It buffers or streams request bodies of up to 1 MiB, streams responses without
+buffering, applies no idle timeout to them, and aborts the forwarded request when the page's
+request ends. Files a version holds under `api/` are not reachable through such a client, so
+artifacts should not hold any. An older daemon answers `404` for the whole prefix.
+
+The routes below are under `/v0/artifacts/:artifactId/api/v1/`. The daemon routes on the request
+target as sent, so a path it does not name exactly, `.` and `..` segments included, is `404`.
+Every route answers `404` when the artifact does not exist or is deleted. A deleted artifact's data
+stays on disk.
+
+**Identity.** The caller is always the authenticated person, never something the page claims. A
+user ID is a stable, lowercase alphanumeric ID: in team mode, the member's installation-local Happy
+user ID, the same `id` that `GET /v0/users` returns; in standalone mode, an opaque ID that the
+installation's one person always has. Agents also read and write stores, through their
+`read_artifact_data` and `write_artifact_data` tools; an agent's writes carry a stable opaque ID
+of its own that `users` resolves, never the agent's ID. Pages never see an email address, a
+WorkOS ID, an agent ID, or the profile's private identity.
+
+**Entries and versions.** An entry is one key and its JSON value:
+
+```json
+{
+    "key": "todos/01991f3a",
+    "value": { "title": "Milk", "done": false },
+    "deleted": false,
+    "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e",
+    "updatedBy": "u1x2y3z4a5b6c7d8e9f0g1h2",
+    "updatedAt": 1755400000000,
+    "writeId": "w8c1f0e2d"
+}
+```
+
+- `key` — 1–512 characters, with no control characters. `/` is an ordinary character, so a prefix
+  such as `todos/` groups keys.
+- `value` — any JSON value, `null` included; at most 256 KiB when serialized as UTF-8 JSON. A
+  deletion leaves `value` `null` and `deleted` `true`.
+- `version` — a UUIDv7 that the store minted for the write. Every write to a store gets a version
+  greater than every earlier one, across restarts and clock changes, so versions order a store's
+  changes, double as resume cursors, and carry their write time in the first 48 bits.
+- `updatedBy`, `updatedAt` — who made the write, and when: `updatedAt` is the version's
+  timestamp in milliseconds.
+- `writeId` — the write's idempotency key, or `null`.
+
+A store holds at most 100,000 keys and 64 MiB of keys and values together. A deleted key's
+tombstone is kept for 30 days and then forgotten; a cursor from before a forgotten tombstone can
+no longer resume.
+
+**Reliable writes.** A write may carry a `writeId`: 1–128 characters from `A–Z a–z 0–9 _ . : -`,
+chosen by the client and unique per write. For 24 hours, repeating a write with the same `writeId`
+by the same user answers with the first write's result and `replayed: true`, and changes nothing,
+even if the key changed since. A client that lost a response can therefore retry safely. Reusing a
+`writeId` for another key is `400`.
+
+**Compare-and-set.** A write may carry `If-Match: "<version>"`, which applies only while the key
+holds a value at that version, or `If-None-Match: *`, which applies only while the key holds no
+value. When the condition fails, the response is `409 conflict` with `entry`: the key as it is now,
+or `null`. The quotes around the version are optional, and sending both headers is `400`.
+
+#### `GET /v0/artifacts/:artifactId/api/v1/client.js`
+
+A dependency-free browser SDK. A page loads it with `<script src="/api/v1/client.js"></script>`
+and gets `window.happy`. It is served as `text/javascript; charset=utf-8` with an `ETag` and
+`Cache-Control: no-cache`, and a matching `If-None-Match` answers `304`. It changes with the daemon,
+and pages never need to bundle a copy. The SDK is described in the artifact apps recipe that ships
+with these docs (`recipe/artifact-apps.md`).
+
+#### `GET /v0/artifacts/:artifactId/api/v1/me`
+
+Response — `200`:
+
+```json
+{
+    "user": {
+        "id": "u1x2y3z4a5b6c7d8e9f0g1h2",
+        "kind": "user",
+        "name": "Steve Korshakov",
+        "firstName": "Steve",
+        "lastName": "Korshakov",
+        "photoUrl": "/api/v1/users/u1x2y3z4a5b6c7d8e9f0g1h2/photo?v=9f86d081884c7d65"
+    }
+}
+```
+
+`kind` is `"user"` for a person and `"agent"` for an agent that wrote through its tools; `me` is
+always a person. `name`, `firstName`, `lastName`, and `photoUrl` are `null` when the person has not
+set them. The name is split at its first whitespace, as in the profile. `photoUrl` is relative to
+the page's origin, and it changes when the photo does. An agent's `name` and `firstName` are its
+bot's name, or `"Agent"`; its `lastName` and `photoUrl` are `null`.
+
+#### `GET /v0/artifacts/:artifactId/api/v1/users?ids=...`
+
+Resolves up to 100 comma-separated user IDs, for example the `updatedBy` of entries. Response —
+`200`: `{ "users": [ ... ] }`, user objects as in `me`, in the order asked, each once. Unknown IDs
+are left out. In standalone mode the installation's one person is the only person known. Agents
+are known by the stores they wrote to, so an agent's ID resolves through each artifact it wrote. More than 100 IDs,
+an invalid ID, or a repeated `ids` parameter is `400`.
+
+#### `GET /v0/artifacts/:artifactId/api/v1/users/:userId/photo`
+
+The user's photo bytes, with their content type, `ETag`, `304` on a matching `If-None-Match`, and
+the shared image-caching policy. `404` when the user is unknown or has no photo.
+
+#### `GET /v0/artifacts/:artifactId/api/v1/kv`
+
+Lists live entries in key order. Query parameters, all optional:
+
+- `prefix` — only keys starting with this.
+- `limit` — `1`–`1000`, default `100`.
+- `pageCursor` — the previous page's `nextPageCursor`.
+
+Response — `200`:
+
+```json
+{
+    "entries": [
+        /* live entries */
+    ],
+    "nextPageCursor": null,
+    "cursor": "01991f3a-..."
+}
+```
+
+`cursor` is the store's newest version when the page was read, or `null` for a store nobody has
+written to. A client that follows `kv/events` from the first page's `cursor` misses no change.
+
+#### `GET /v0/artifacts/:artifactId/api/v1/kv/entry?key=...`
+
+Response — `200`: `{ "entry": { ... } | null, "cursor": "..." | null }`. `entry` is `null` while
+the key holds no value. `cursor` is as in the list.
+
+#### `PUT /v0/artifacts/:artifactId/api/v1/kv/entry?key=...`
+
+Sets the key. Body: `{ "value": <JSON>, "writeId": "..." }`; `value` is required, and `writeId` is
+optional. Takes the optional compare-and-set headers.
+
+Response — `200`: `{ "entry": { ... }, "replayed": false }`, the entry as this write left it. A
+value over 256 KiB, or a body over 1 MiB, is `413 too_large`. A write that would take the store past
+its limits is `507 storage_full`. During a daemon drain, writes are `503 draining`; retry them.
+
+#### `DELETE /v0/artifacts/:artifactId/api/v1/kv/entry?key=...`
+
+Deletes the key, leaving a tombstone. The body is empty or `{ "writeId": "..." }`, and the request
+takes the optional compare-and-set headers. Response — `200`: `{ "entry": { ... }, "replayed": false }`
+with `deleted` `true`. Deleting a key that is already deleted answers with its tombstone and
+changes nothing.
+
+#### `GET /v0/artifacts/:artifactId/api/v1/kv/changes`
+
+The changes after a version, in version order. Query parameters, all optional:
+
+- `since` — a version that this store returned. Omitted, the feed starts at the beginning.
+- `prefix` — only keys starting with this.
+- `limit` — `1`–`1000`, default `100`.
+
+Each changed key appears once, as it is now, tombstones included. Response — `200`:
+
+```json
+{
+    "changes": [
+        /* entries */
+    ],
+    "cursor": "01991f3a-...",
+    "hasMore": false
+}
+```
+
+Pass `cursor` as the next `since`. While `hasMore` is `true`, more changes follow at once. `since`
+older than a forgotten tombstone, or newer than any version the store has minted, is
+`409 cursor_unavailable`: read the store again with `kv`, then follow it from that `cursor`.
+
+#### `GET /v0/artifacts/:artifactId/api/v1/kv/events`
+
+Server-Sent Events for the store, as `text/event-stream; charset=utf-8`. Query: optional `since`,
+a version as in `kv/changes`, or the `Last-Event-ID` header instead; and optional `prefix`. Events:
+
+- `change` — one committed entry as `data`, with the entry's version as the event `id`. Changes
+  arrive in version order and include changes made by every user, device, and connection, the
+  caller's own included.
+- `ready` — `data: { "cursor": "..." | null }`. When `since` is given, every change after it is
+  sent first, then `ready`. Without `since`, `ready` comes first and carries the store's current
+  cursor, so a client reads what it needs and applies the stream on top. Live changes follow
+  `ready`.
+- `reset` — `data: { "reason": "cursor_unavailable" }`; the stream then ends. `since` can no
+  longer resume, or it is too far behind to replay. Read the store again and open a stream
+  without `since`. An `EventSource` must be closed and opened again, because it would resend the
+  same `Last-Event-ID`.
+- `closed` — `data: { "reason": "artifact_deleted" }`, or `"shutdown"` when the daemon stops;
+  the stream then ends.
+
+A `: ping` comment arrives every 15 seconds. A client that hears nothing for 45 seconds treats
+the stream as dead and reconnects with `since` set to the last version it saw. The stream also
+ends when the client reads it too slowly; reconnect the same way.
+At most 64 streams may be open for one artifact and 512 in all; another is `429 too_many_streams`
+with `Retry-After`.
+
 ## Live voice sessions
 
 GPT-Live controls the initiating desktop window through a fixed set of UI-equivalent actions.

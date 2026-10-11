@@ -32,6 +32,9 @@ export * from "./tasks/index.js";
 // Artifacts: one global, versioned catalog of published Markdown, HTML, images, video, and documents.
 export * from "./artifacts/index.js";
 
+// Artifact data: realtime key-value stores HTML artifacts use to become small shared apps.
+export * from "./artifactData/index.js";
+
 // Tailcat: stable account-free internet exposure, controlled only by active admin bots.
 export * from "./tailcat/index.js";
 export * from "./connections/index.js";

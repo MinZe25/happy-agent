@@ -118,3 +118,12 @@ The API module serves the routes `packages/happy-agent/API.md` specifies: `/v0/a
 `/v0/artifacts/:artifactId/versions/:number|latest/files/*path`. A person's change is authored as
 the authenticated user and names its source only when the request does; the API turns
 `onEvent` into `artifact.created`, `artifact.updated`, and `artifact.deleted` for every connection.
+
+## Data for HTML apps
+
+An `html` artifact can keep live, shared data through the Artifact Data module
+(`../artifactData`): one key-value store per artifact ID, shared by every version and everyone
+using the daemon, in `artifacts/_data_/<artifactId>/kv.sqlite`, served to the page at `/api/*` of
+its own origin. That module listens to `onEvent` to close a deleted artifact's change streams and
+asks `get` whether an artifact still serves data. The writing tools' guidance points agents at
+`docs/recipe/artifact-apps.md` and tells them to put no files under `api/`.

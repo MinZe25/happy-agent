@@ -1527,6 +1527,17 @@ export class ConfigModule implements AgentModule {
         return join(this.artifactsHome, "uploads", uploadId);
     }
 
+    /**
+     * One artifact's data store: a SQLite file of its own in the artifacts folder's `_data_`
+     * directory, outside the main database, shared by every version of that artifact.
+     */
+    artifactDataPath(artifactId: string): string {
+        if (!Value.Check(cuid2Schema, artifactId)) {
+            throw new Error("The artifact ID cannot name a data store.");
+        }
+        return join(this.artifactsHome, "_data_", artifactId, "kv.sqlite");
+    }
+
     /** A strict service's private native controls never live in the workspace it serves. */
     serviceExecution(serviceId: string): ComputeServiceExecution {
         if (process.platform !== "linux")

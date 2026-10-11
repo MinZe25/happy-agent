@@ -28,6 +28,7 @@ import type { LibSQLDatabase } from "drizzle-orm/libsql";
 
 import { AbortModule } from "../abort/index.js";
 import { ApiModule } from "../api/index.js";
+import { ArtifactDataModule } from "../artifactData/index.js";
 import { ArtifactsModule } from "../artifacts/index.js";
 import { LiveModule } from "../live/index.js";
 import { AutoModule } from "../auto/index.js";
@@ -134,6 +135,7 @@ export interface HappyAgentRuntimeModules {
     readonly abort: AbortModule;
     readonly api: ApiModule;
     readonly artifacts: ArtifactsModule;
+    readonly artifactData: ArtifactDataModule;
     readonly auto: AutoModule;
     readonly bots: BotsModule;
     readonly collaboration: CollaborationModule;
@@ -499,6 +501,11 @@ export async function startHappyAgentRuntime(
         const profile = new ProfileModule<LibSQLDatabase>(config, bots);
         const team = new TeamModule<LibSQLDatabase>(config, profile);
         registerShutdown("team", async () => team.close());
+        const artifactData = new ArtifactDataModule(config, artifacts, profile, team, bots);
+        registerShutdown(
+            "artifact-data",
+            async (shutdownCtx) => await artifactData.close(shutdownCtx),
+        );
         const collaboration = new CollaborationModule(config, abort, history);
         const subtasks = new SubtasksModule(
             bots,
@@ -604,6 +611,7 @@ export async function startHappyAgentRuntime(
             runners,
             tasks,
             artifacts,
+            artifactData,
         );
         api = apiModule;
 
@@ -612,6 +620,7 @@ export async function startHappyAgentRuntime(
             abort,
             api: apiModule,
             artifacts,
+            artifactData,
             auto: autoModule,
             bots,
             collaboration,
@@ -697,6 +706,7 @@ export async function startHappyAgentRuntime(
             bots,
             tasks,
             artifacts,
+            artifactData,
             node,
             skillFolders,
             tailcat,

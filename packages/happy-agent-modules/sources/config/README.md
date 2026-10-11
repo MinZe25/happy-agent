@@ -66,8 +66,9 @@ path segment.
 
 Artifact content is private and lives in `.happy/agent/artifacts`: `artifactContentPath(sha256)`
 names one stored file by its digest under `content/<first two hex digits>/`, and
-`artifactUploadPath(uploadId)` names the file an upload's bytes arrive in under `uploads/`. Both
-validate their segment before it becomes part of a path.
+`artifactUploadPath(uploadId)` names the file an upload's bytes arrive in under `uploads/`, and
+`artifactDataPath(artifactId)` names one artifact's data store, `_data_/<artifactId>/kv.sqlite`.
+Each validates its segment before it becomes part of a path.
 
 `[feature.tailcat] enabled = true` is a machine-only opt-in. The Tailcat module opens the daemon's
 active Unix-socket or team HTTP transport through bundled Tailcat v0.7.0, while the Happy API

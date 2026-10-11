@@ -51,3 +51,13 @@ An agent's source is decided by walking from the acting agent through its parent
 that is a bot's or a task's, or belongs to a workspace or a project root, names the place, and the
 acting agent stays the source's `agentId`. A conversation that belongs to none of them is an
 `agent` source. A project's root workspace has the project's own ID, so it reads as the project.
+
+## HTML artifacts can be apps with data of their own
+
+Steve asked for HTML artifacts to get a realtime key-value API, shared between users and kept in
+a file outside the main database. It is a separate Artifact Data module rather than more of this
+one: the data lives in `_data_/<artifactId>/` beside this module's content, belongs to the artifact
+ID so every version shares it, and stays on disk when the artifact is deleted, like content does.
+Pages reach it at `/api/*`, so `create_artifact` and `update_artifact` tell agents to read the
+artifact apps recipe and to put no files under `api/`. Publishing such files stays allowed, so
+existing clients keep working.
