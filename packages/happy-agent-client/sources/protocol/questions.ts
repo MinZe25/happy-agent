@@ -8,6 +8,26 @@ export interface QuestionOption {
     description: string;
 }
 
+/** One environment variable a secret request asks for. */
+export interface QuestionSecretRequestVariable {
+    name: string;
+    /** What the value is or where to find it; `null` when the agent gave no hint. */
+    description: string | null;
+}
+
+/**
+ * The prefilled secret an agent asks for. The client creates the secret through
+ * `POST /v0/secrets` (or lets the person pick an existing one) and answers with
+ * the secret ID only, never a value.
+ */
+export interface QuestionSecretRequest {
+    /** A suggested secret name, or `null` when the agent has no preference. */
+    suggestedId: string | null;
+    description: string;
+    /** The 1–64 variables the agent needs, in the agent's order. */
+    environmentVariables: QuestionSecretRequestVariable[];
+}
+
 /** One prompt inside a question. */
 export interface QuestionPrompt {
     id: Cuid2;
@@ -17,6 +37,11 @@ export interface QuestionPrompt {
     multiSelect: boolean;
     /** Possibly empty, and then the answer is free text. */
     options: QuestionOption[];
+    /**
+     * Present only on a secret request, which is then the question's only prompt.
+     * Absent from daemons that predate secret requests.
+     */
+    secretRequest?: QuestionSecretRequest;
 }
 
 /** The question object. An agent has at most one open at a time. */

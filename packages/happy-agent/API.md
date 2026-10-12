@@ -275,6 +275,11 @@ Artifacts are additive and do not increment the protocol version. Clients detect
 `artifact.*` events are absent on older compatible daemons, which also serve none of the artifact
 routes.
 
+Secret requests are additive and do not increment the protocol version. Older daemons never send a
+question prompt's optional `secretRequest`. A client that does not recognize it renders the prompt
+as an ordinary free-text question; the daemon rejects any answer to it that is not the ID of an
+existing secret available to agents, so a value typed into that field is never stored.
+
 Subtasks are additive and do not increment the protocol version. The agent's optional `subtask`
 boolean defaults to `false` when absent; the workspace's optional `subtaskAgentId` defaults to
 `null`. Clients use the explicit capability flags for interaction, not ancestry alone.
@@ -2396,6 +2401,10 @@ An agent's effective secrets are the union of those three sources. The grant fol
 future agents that match it; updating a secret leaves every attachment intact. Archiving a target
 preserves its attachments, but attaching to an archived or archiving target is a `409` conflict.
 Detaching remains allowed. An unknown target is `404`.
+
+Answering a secret request, described under Questions, also creates an exact-agent attachment for
+the agent that asked. That answer is the person's direct client action, like the attachment
+endpoint below, and does not pass through the agent's Auto reviewer.
 
 An attachment only makes the secret eligible for explicit use. It does not inject the bundle into
 every command. A shell tool call names the attached secret IDs it needs, and only those bundles are
@@ -4759,12 +4768,52 @@ The question object:
   needing the answer: it was aborted, or the question timed out into its default.
 - `questions` — one or more prompts, answered together. Each has its own `id`, a short
   `header`, the `question` text, `options` the person picks from (possibly empty — then the
-  answer is free text), and `multiSelect`.
+  answer is free text), and `multiSelect`. A prompt may also carry `secretRequest`, described
+  below.
 - `autoResolveAt` — when set, the moment the agent proceeds on its own without an answer;
   `null` means it waits indefinitely.
 - `answers` — `null` while pending; once answered, a map from question `id` to the chosen
   values, so every **other** client watching learns what was picked from the same object.
 - `createdAt`, `answeredAt` — lifecycle timestamps.
+
+#### Secret requests
+
+When an agent needs a credential, it asks for a secret instead of asking for its values. The
+question then has exactly one prompt, and that prompt carries `secretRequest`:
+
+```json
+{
+    "id": "secret",
+    "header": "Secret",
+    "question": "The deploy step needs the staging API token. Create it under **Settings → API tokens** in the staging dashboard.",
+    "multiSelect": false,
+    "options": [],
+    "secretRequest": {
+        "suggestedId": "deploy-api",
+        "description": "Staging deployment API credentials",
+        "environmentVariables": [
+            { "name": "DEPLOY_API_TOKEN", "description": "Token with the deploy scope" },
+            { "name": "DEPLOY_ORGANIZATION", "description": null }
+        ]
+    }
+}
+```
+
+- `question` — Markdown from the agent explaining why it needs the secret and where the person
+  can find the values.
+- `secretRequest.suggestedId` — a secret name the agent suggests, following the secret-name syntax
+  under Secrets, or `null` when the agent has no preference. It is a suggestion only: the name may
+  already be taken, and the person may choose another.
+- `secretRequest.description` — a suggested secret description, 1–2,000 characters.
+- `secretRequest.environmentVariables` — the 1–64 variables the agent needs, in the agent's order.
+  Each `name` follows the variable-name syntax under Secrets and is case-insensitively unique;
+  `description` is a hint of at most 2,000 characters for what the value is or where to find it, or
+  `null`.
+
+`secretRequest` is absent on every other prompt. A client renders a secret request as a form
+prefilled from these fields, so the person only types the values, and creates the secret through
+`POST /v0/secrets`. The client may instead let the person pick an existing secret from the catalog.
+Either way it then answers the question with that secret's ID, never with a value.
 
 #### `GET /v0/agents/:agentId/question`
 
@@ -4792,6 +4841,15 @@ Response — `200`: `{ "question": { ... } }` with `status` `"answered"`, and th
 Answering is first-write-wins across clients: a second answer — or an answer to a question the
 run already abandoned — is `409` (`conflict`) carrying the question as it now stands, and the
 late client renders the outcome instead. `404` when the ID never existed.
+
+A secret request accepts exactly one value: the ID of an existing secret whose `availableToAgents`
+is `true`. Anything else is `400` (`invalid_request`) and the question stays pending, so the client
+may correct the answer and retry. Because a person using an older client may have typed a raw value
+into what looked like a free-text question, the rejected text is never stored, logged, or included
+in the error body. The secret need not contain every requested variable; the agent is told which
+are missing. An accepted answer attaches the secret to the agent that asked, as an exact-agent
+grant, in the same atomic change that answers the question. The answer's `answers` map, its
+events, and the transcript contain only the secret ID.
 
 Questions have their own events (`question.created`, `question.updated`) so watching clients
 show and clear the prompt in real time; aborting the run cancels an open question.
@@ -7148,6 +7206,8 @@ version rules. Snapshot-to-stream cursor and version-gap recovery rules remain u
 - `question.updated` — the question resolved: answered by a client, canceled by an abort, or
   auto-resolved at its deadline. `changes` carries `status`, `answers`, and `answeredAt`.
     - `questionId` (ID string), `previousVersion`, `version`, `changes`.
+    - When the answer settles a secret request, the same commit also emits `secret.attached` for
+      the asking agent's new exact-agent grant, unless that grant already existed.
 
 **Runs and messages**
 
