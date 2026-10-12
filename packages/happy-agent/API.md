@@ -254,6 +254,12 @@ Sandboxed workspace services are additive and do not increment the protocol vers
 workspace, `404` or `501` from `GET /v0/workspaces/:workspaceId/services` means the feature is
 unavailable. Existing terminals, background commands, and workspace proxies remain unchanged.
 
+Workspace bridges are additive and do not increment the protocol version. A daemon that serves
+them reports `capabilities.workspaceBridges: true` from health. Older daemons omit it and answer
+`GET /v0/workspaces/:workspaceId/bridges` with `404`; clients then offer no USB, Bluetooth, or
+workspace-to-local forwarding. Forwarding from the client into a workspace through the workspace
+proxy is unchanged.
+
 The model definition's `autoCompactWindow` is additive and does not increment the protocol
 version. Older daemons omit it; a client that shows remaining context counts down to
 `contextWindow` when the field is absent.
@@ -886,7 +892,8 @@ Fields:
 - `healthy` — always `true`; a daemon that cannot answer does not answer.
 - `capabilities` — optional feature support. `desktopLiveControl: true` advertises the
   window-scoped GPT-Live control contract; missing or false means unavailable, independently
-  of protocol version or provider entitlement.
+  of protocol version or provider entitlement. `workspaceBridges: true` advertises the local
+  bridges described under Workspaces.
 - `ready` — `false` while starting, `true` once the agent system is loaded.
 - `status` — `"starting"` or `"ready"`; the human-readable form of `ready`.
 - `version` — one identity object. `protocol` is the wire protocol number, the client's
@@ -3137,6 +3144,219 @@ whatever the workspace can reach:
 This is what makes non-local compute transparent: a client previews a dev server the same way
 whether the workspace runs on the host or in a container. For a host workspace the tunnel
 simply reaches the machine's own network.
+
+### Local bridges
+
+A bridge connects something on the person's own computer — a USB device, a Bluetooth adapter, or a
+local TCP service — to a workspace's machine. The client that opens a bridge holds it: a bridge
+lives exactly as long as the WebSocket that created it, and ends when that WebSocket closes, the
+daemon stops, or the workspace is archived. Nothing about a bridge is durable or replayed after a
+restart. The daemon never opens a bridge on its own initiative, for an agent, or for a peer.
+
+There are two directions:
+
+- **Local to workspace** needs no new route. The client listens on its own machine and, for each
+  connection it accepts there, opens `CONNECT /v0/workspaces/:workspaceId/proxy` followed by a
+  nested `CONNECT host:port`, and relays the bytes.
+- **Workspace to local** uses bridges: a USB device attached to the kernel of the workspace's
+  machine (`kind: "usb"`), or a loopback listener on that machine whose connections are relayed to
+  the client (`kind: "port"`).
+
+Bluetooth uses the USB path. A USB Bluetooth adapter attached through a USB bridge becomes an
+ordinary Bluetooth controller on the workspace's machine, usable with BlueZ.
+
+Bridges act on the machine, not inside the agent sandbox. An attached USB device belongs to the
+whole kernel of the workspace's machine: any process there allowed to open its device node can use
+it, and device-node permissions follow that machine's own udev rules. A port bridge is ordinary
+loopback TCP on that machine. Terminals, Full access commands, and reviewed escalations in Auto can
+reach it; restricted sandboxed commands have no direct network access and cannot.
+
+In team mode a bridge is private to the user who opened it. Listing, events, closing, and accepting
+connections are limited to that user.
+
+#### `GET /v0/workspaces/:workspaceId/bridges`
+
+Reports what this workspace can bridge, and its open bridges. Response — `200`:
+
+```json
+{
+    "capabilities": {
+        "usb": { "available": true, "reason": null },
+        "bluetooth": { "available": true, "transport": "usb", "reason": null },
+        "localToWorkspace": { "available": true, "reason": null },
+        "workspaceToLocal": { "available": true, "reason": null }
+    },
+    "bridges": [
+        /* open bridge objects, oldest first */
+    ],
+    "cursor": "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f"
+}
+```
+
+Each capability is either available with `reason: null`, or unavailable with
+`reason: { "code": "...", "message": "Human-readable explanation." }`. Clients branch on the code,
+show the message, and treat an unknown code as unavailable. `transport` names how Bluetooth is
+carried; `"usb"` is the only value today. Codes:
+
+- `unsupported_platform` — USB and Bluetooth need the workspace's machine to run Linux.
+- `vhci_not_loaded` — the kernel has USB/IP support, but the `vhci-hcd` module is not loaded.
+- `vhci_missing` — the kernel has no USB/IP virtual host controller.
+- `permission_denied` — the daemon's user cannot write the virtual host controller's attach control,
+  `/sys/devices/platform/vhci_hcd.0/attach`. Run the daemon as root, or grant its user write access
+  with a udev rule.
+- `bluetooth_driver_missing` — USB is available, but the kernel has no USB Bluetooth driver
+  (`btusb`).
+- `container_compute` — the workspace runs in a Docker container, which has neither the host's
+  devices nor its loopback network.
+- `runner_compute` — the workspace is on a runner, where bridges are not available yet.
+
+`localToWorkspace` is unavailable only with `container_compute`. `cursor` is captured before the
+read; follow events from it. The daemon repeats its machine probe about once a minute and
+publishes `bridges.capabilities.updated` when the answer changes; clients then reread the
+capabilities they show. Bot and task workspaces are addressable here. An unknown workspace is
+`404`, and an initializing or archived workspace answers as on the other workspace routes.
+
+#### The bridge object
+
+```json
+{
+    "id": "b7k2m9q4",
+    "workspaceId": "w9x8y7z6",
+    "kind": "usb",
+    "name": "Arduino Uno",
+    "status": "open",
+    "usb": {
+        "busId": "1-2",
+        "vendorId": "2341",
+        "productId": "0043",
+        "deviceClass": 2,
+        "deviceSubclass": 0,
+        "deviceProtocol": 0,
+        "speed": "full",
+        "port": 0
+    },
+    "port": null,
+    "closeReason": null,
+    "version": "01991f3a-6161-7000-8000-8f5061920314",
+    "createdAt": 1755400000000,
+    "updatedAt": 1755400000000,
+    "closedAt": null
+}
+```
+
+- `kind` — `"usb"` or `"port"`. Exactly the detail object of that kind is non-null.
+- `name` — the client's display name, or a derived one such as `"USB device 2341:0043"` or
+  `"Port 5432"`.
+- `status` — `"open"` or `"closed"`. A bridge appears only once it is established, and is listed
+  only while open.
+- `usb` — the device as the client's exporter described it: the requested `busId`, lowercase
+  four-digit hexadecimal `vendorId` and `productId`, the device class triple, `speed` (`"low"`,
+  `"full"`, `"high"`, `"wireless"`, `"super"`, or `"super_plus"`), and the virtual host controller
+  `port` it occupies on the workspace's machine.
+- `port` — for a port bridge, `{ "host": "127.0.0.1", "port": 5432 }`: where programs on the
+  workspace's machine connect.
+- `closeReason` — `null` while open, then `{ "code": "...", "message": "..." }` with `code`
+  `"client_closed"`, `"closed_by_request"`, `"workspace_archived"`, `"daemon_shutdown"`,
+  `"device_detached"`, or `"failed"`.
+
+#### `GET /v0/workspaces/:workspaceId/bridges/usb`
+
+A WebSocket upgrade that attaches one USB device from the client's machine to the kernel of the
+workspace's machine with USB/IP. Query parameters:
+
+- `busId` — required; the device's bus ID as the client's USB/IP exporter names it, 1–31
+  characters from `[0-9A-Za-z._:-]`.
+- `id` — optional client-chosen CUID2 for the bridge, minted when omitted. An ID that is already
+  open is `409 conflict`.
+- `name` — optional display name of 1–128 printable characters.
+
+Before the upgrade, the daemon checks the workspace, `capabilities.usb`, and its limits. Unavailable
+USB is `409 bridge_unavailable`, carrying the capability's `reason`. More than 32 open USB bridges
+on the daemon is `409 bridge_limit`. A draining daemon answers `503 draining`.
+
+After the upgrade, every message is binary and carries the bytes of one USB/IP connection, split
+arbitrarily across messages. The daemon is the USB/IP client; the client is the USB/IP server for
+exactly one device:
+
+1. The daemon sends `OP_REQ_IMPORT` (version `0x0111`) for `busId`.
+2. The client answers with `OP_REP_IMPORT`. A non-zero status or a different bus ID closes the
+   WebSocket with `4404`, no answer within 10 seconds closes it with `4408`, and a malformed
+   answer closes it with `4400`.
+3. The daemon attaches the device to a free virtual host controller port of the matching speed,
+   creates the bridge, and relays the USB/IP data phase (`USBIP_CMD_SUBMIT`, `USBIP_RET_SUBMIT`,
+   `USBIP_CMD_UNLINK`, `USBIP_RET_UNLINK`) unchanged in both directions. No free port closes the
+   WebSocket with `4409`; a kernel refusal closes it with `4502`.
+
+Closing the WebSocket detaches the device: the kernel removes it as soon as the daemon closes its
+USB/IP connection. When the kernel ends the connection, for example because the port was detached
+on that machine, the daemon closes the WebSocket with `1000` and the bridge closes with
+`device_detached`.
+
+#### `GET /v0/workspaces/:workspaceId/bridges/port`
+
+A WebSocket upgrade that opens a loopback listener on the workspace's machine and relays each
+connection it accepts to the client. Query parameters:
+
+- `port` — required; 1–65535, or `0` to let the daemon choose.
+- `id`, `name` — as for USB.
+
+The listener binds `127.0.0.1` only, before the upgrade: a port in use or not bindable by the
+daemon's user is `409 port_unavailable`. Other rejections match USB; the limits are 32 open port
+bridges per workspace and 256 per daemon. On Linux the listener accepts only connections from
+processes running as the daemon's own OS user and closes any other at once. On other platforms,
+every local user of that machine can connect.
+
+Every message on this control WebSocket is a JSON text message of at most 16 KiB. The daemon sends:
+
+- `{ "type": "ready", "bridge": { ... } }` — once, first: the bridge is open.
+- `{ "type": "connection", "connectionId": "..." }` — a program connected and is waiting.
+
+The client accepts a waiting connection by opening
+`GET /v0/workspaces/:workspaceId/bridges/:bridgeId/connections/:connectionId` and connecting it to
+its own local target, or declines it with `{ "type": "reject", "connectionId": "..." }`, which
+closes that connection at once. A connection not accepted within 30 seconds is closed. A bridge
+holds at most 256 open connections, at most 64 of them waiting; a connection beyond either limit is
+closed when it arrives. A binary message or an unknown message from the client closes the control
+WebSocket with `4400`.
+
+#### `GET /v0/workspaces/:workspaceId/bridges/:bridgeId/connections/:connectionId`
+
+A WebSocket upgrade that carries one accepted connection as binary messages in both directions.
+Only the bridge's owner may accept a waiting connection, and only once: an unknown, accepted, or
+closed connection is `404`. Either side closing ends both the TCP connection and the WebSocket;
+half-closed TCP connections are not represented. Closing the control WebSocket closes every
+connection of its bridge.
+
+#### `DELETE /v0/workspaces/:workspaceId/bridges/:bridgeId`
+
+Closes an open bridge: its WebSocket closes with `1000`, a USB device detaches, and a listener stops
+together with its connections. Optional body: `{ "mutationId": "..." }`. Response — `200`:
+`{ "bridge": { ... } }` with `status: "closed"` and `closeReason.code: "closed_by_request"`. An
+unknown or closed bridge is `404`.
+
+#### Bridge lifetime
+
+Archiving the workspace, or the project, bot, or task it belongs to, closes its bridges with
+`workspace_archived`. A draining daemon refuses new bridges and keeps open ones. Graceful shutdown
+closes every bridge with WebSocket code `1001`. After a restart no bridge exists.
+
+Bridge WebSockets close with these codes, with a human-readable close reason:
+
+- `1000` — the client, `DELETE`, archival, or the device or listener ended the bridge;
+- `1001` — the daemon is shutting down;
+- `1011` — an internal failure;
+- `4400` — a protocol violation, such as a text message on a binary WebSocket;
+- `4404` — the USB/IP exporter refused or misidentified the device;
+- `4408` — the USB/IP import deadline passed;
+- `4409` — no virtual host controller port of the needed speed is free;
+- `4502` — the kernel refused the attachment.
+
+Binary messages are at most 1 MiB. Every bridge route, including the WebSockets and their close
+codes, works unchanged through `/v0/connections/:id/api/*`.
+
+`HappyAgentClient.listWorkspaceBridges(workspaceId)` reads the snapshot and
+`closeWorkspaceBridge(workspaceId, bridgeId, request)` closes one. `workspaceUsbBridgeUrl`,
+`workspacePortBridgeUrl`, and `workspaceBridgeConnectionUrl` build the WebSocket URLs.
 
 ### Sandboxed workspace services
 
@@ -7110,6 +7330,19 @@ Events are emitted after the corresponding state commit and contain no process o
 or access credentials. Clients obtain the workspace list and follow its event cursor, then
 merge version-chained updates or refetch on a gap. Existing bootstrap shapes are unchanged;
 services are an on-demand workspace surface.
+
+**Workspace bridges**
+
+- `bridge.created` — a bridge opened.
+    - `bridge` (full bridge object).
+- `bridge.updated` — a bridge closed.
+    - `bridgeId`, `workspaceId`, `previousVersion`, `version`, `changes`, optional `mutationId`.
+    - `changes` holds `status`, `closeReason`, `closedAt`, and `updatedAt`.
+- `bridges.capabilities.updated` — payload `{}`. The daemon's machine probe changed; clients
+  reread `GET /v0/workspaces/:workspaceId/bridges` for the capabilities they show.
+
+In team mode, bridge events reach only the bridge's owner. Bridges are an on-demand workspace
+surface and are not part of bootstrap.
 
 **Git**
 
