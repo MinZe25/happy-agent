@@ -40,6 +40,7 @@ export * from "./protocol/artifacts.js";
 export * from "./protocol/authentication.js";
 export * from "./protocol/bootstrap.js";
 export * from "./protocol/bots.js";
+export * from "./protocol/bridges.js";
 export * from "./protocol/tasks.js";
 export * from "./protocol/cloud.js";
 export * from "./protocol/common.js";

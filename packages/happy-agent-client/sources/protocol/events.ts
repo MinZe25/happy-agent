@@ -51,6 +51,11 @@ import { runnerListResponseSchema } from "./runners.js";
 import type { SkillsUpdatedPayload } from "./skills.js";
 import type { WorkspaceServiceCreatedPayload, WorkspaceServiceUpdatedPayload } from "./services.js";
 import type { LiveSessionCreatedPayload, LiveSessionUpdatedPayload } from "./live.js";
+import type {
+    WorkspaceBridgeCapabilitiesUpdatedPayload,
+    WorkspaceBridgeCreatedPayload,
+    WorkspaceBridgeUpdatedPayload,
+} from "./bridges.js";
 
 /**
  * What every `*.updated` payload carries beside the resource's own ID.
@@ -411,6 +416,9 @@ export type HappyAgentEvent =
     | EventEnvelope<"terminal.updated", TerminalUpdatedPayload>
     | EventEnvelope<"service.created", WorkspaceServiceCreatedPayload>
     | EventEnvelope<"service.updated", WorkspaceServiceUpdatedPayload>
+    | EventEnvelope<"bridge.created", WorkspaceBridgeCreatedPayload>
+    | EventEnvelope<"bridge.updated", WorkspaceBridgeUpdatedPayload>
+    | EventEnvelope<"bridges.capabilities.updated", WorkspaceBridgeCapabilitiesUpdatedPayload>
     | EventEnvelope<"live.session.created", LiveSessionCreatedPayload>
     | EventEnvelope<"live.session.updated", LiveSessionUpdatedPayload>
     | EventEnvelope<"git.updated", GitUpdatedPayload>

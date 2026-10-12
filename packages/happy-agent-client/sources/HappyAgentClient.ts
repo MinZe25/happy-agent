@@ -188,6 +188,13 @@ import type {
     WorkspaceServiceResponse,
 } from "./protocol/services.js";
 import type {
+    CloseWorkspaceBridgeRequest,
+    WorkspaceBridgeListResponse,
+    WorkspaceBridgeResponse,
+    WorkspacePortBridgeQuery,
+    WorkspaceUsbBridgeQuery,
+} from "./protocol/bridges.js";
+import type {
     InvokeSlashCommandRequest,
     InvokeSlashCommandResponse,
 } from "./protocol/slashCommands.js";
@@ -1735,6 +1742,70 @@ export class HappyAgentClient {
         return endpointUrl(
             this.#endpoint,
             `v0/workspaces/${encodeURIComponent(workspaceId)}/services/${encodeURIComponent(serviceId)}/proxy`,
+        );
+    }
+
+    // Local bridges: every bridge is opened and held by a WebSocket the caller owns.
+
+    /**
+     * `GET /v0/workspaces/:workspaceId/bridges` — what the workspace can bridge, and its open
+     * bridges. `404` means the daemon has no bridges, not that the list is empty.
+     */
+    async listWorkspaceBridges(
+        workspaceId: Cuid2,
+        options: RequestOptions = {},
+    ): Promise<WorkspaceBridgeListResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/workspaces/${encodeURIComponent(workspaceId)}/bridges`,
+            signal: options.signal,
+        });
+    }
+
+    /** `DELETE /v0/workspaces/:workspaceId/bridges/:bridgeId` — closes an open bridge. */
+    async closeWorkspaceBridge(
+        workspaceId: Cuid2,
+        bridgeId: Cuid2,
+        request: CloseWorkspaceBridgeRequest = {},
+        options: RequestOptions = {},
+    ): Promise<WorkspaceBridgeResponse> {
+        return await this.#json({
+            method: "DELETE",
+            path: `v0/workspaces/${encodeURIComponent(workspaceId)}/bridges/${encodeURIComponent(bridgeId)}`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * The URL of the `GET /v0/workspaces/:workspaceId/bridges/usb` WebSocket upgrade, whose binary
+     * messages carry one USB/IP connection. Supply the bearer token on the upgrade request.
+     */
+    workspaceUsbBridgeUrl(workspaceId: Cuid2, query: WorkspaceUsbBridgeQuery): string {
+        return endpointUrl(
+            this.#endpoint,
+            `v0/workspaces/${encodeURIComponent(workspaceId)}/bridges/usb`,
+            { busId: query.busId, id: query.id, name: query.name },
+        );
+    }
+
+    /**
+     * The URL of the `GET /v0/workspaces/:workspaceId/bridges/port` WebSocket upgrade, the JSON
+     * control channel of a loopback listener on the workspace's machine.
+     */
+    workspacePortBridgeUrl(workspaceId: Cuid2, query: WorkspacePortBridgeQuery): string {
+        return endpointUrl(
+            this.#endpoint,
+            `v0/workspaces/${encodeURIComponent(workspaceId)}/bridges/port`,
+            { port: query.port, id: query.id, name: query.name },
+        );
+    }
+
+    /** The URL of the WebSocket upgrade that accepts one waiting port-bridge connection. */
+    workspaceBridgeConnectionUrl(workspaceId: Cuid2, bridgeId: Cuid2, connectionId: Cuid2): string {
+        return endpointUrl(
+            this.#endpoint,
+            `v0/workspaces/${encodeURIComponent(workspaceId)}/bridges/${encodeURIComponent(bridgeId)}/connections/${encodeURIComponent(connectionId)}`,
         );
     }
 

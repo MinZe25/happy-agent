@@ -223,6 +223,31 @@ JavaScript, ordinary application requests, and unrelated origins. The same metho
 `client.connection(id)`, preserving that connection's authenticated route. No public sharing or
 invitation is created by issuing a token.
 
+## Local bridges
+
+A bridge brings a USB device, a USB Bluetooth adapter, or a local TCP service from the client's
+machine to a workspace's machine. The client opens it with a WebSocket and holds it; closing that
+WebSocket ends the bridge.
+
+```text
+Desktop USB/IP server ⇄ bridges/usb WebSocket ⇄ daemon USB/IP client ⇄ vhci_hcd on the workspace's machine
+Program on the workspace's machine → 127.0.0.1:port → bridges/port control: { type: "connection" }
+                                                    → bridges/:bridgeId/connections/:id ⇄ local target
+```
+
+Require `getHealth().capabilities?.workspaceBridges === true`, then read
+`listWorkspaceBridges(workspaceId)` for the workspace's `capabilities` and open `bridges`. Each
+capability names a `reason` when unavailable; show its message. Follow the list's `cursor` through
+`updates()` for `bridge.created`, version-chained `bridge.updated`, and the
+`bridges.capabilities.updated` invalidation. `404` means the daemon has no bridges.
+
+`workspaceUsbBridgeUrl()`, `workspacePortBridgeUrl()`, and `workspaceBridgeConnectionUrl()` build
+the WebSocket addresses; supply the bearer token on the upgrade. `WorkspacePortBridgeServerMessage`
+and `WorkspacePortBridgeClientMessage` define the port bridge's JSON control messages, and
+`WORKSPACE_BRIDGE_CLOSE_CODES` names the close codes. `closeWorkspaceBridge()` closes one bridge.
+Forwarding a local port into a workspace uses `workspaceProxyUrl()` with a nested `CONNECT`. All of
+these work through `client.connection(id)`.
+
 `HAPPY_AGENT_PROTOCOL_VERSION` is 25; `HAPPY_AGENT_MIN_PROTOCOL_VERSION` is 22. The range
 is additive, so clients should not require exact protocol equality for existing features.
 Creating a bot without `name` requires a daemon advertising protocol 24 or newer. With
