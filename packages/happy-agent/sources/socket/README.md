@@ -10,8 +10,13 @@ Public Unix socket / team TCP listener
   ├─ CONNECT / remote attachment → raw tunnel adapter
   └─ ordinary HTTP / local WebSocket → Bun.serve
        ├─ HTTP → reusable streaming HTTP pool → existing API handler
-       └─ WebSocket → authenticated terminal attachment
+       └─ WebSocket → authenticated terminal, live control, runner, or bridge attachment
 ```
+
+Bridge WebSockets carry a workspace bridge after the API has admitted it. The server passes binary
+messages through as bytes and closes one larger than 1 MiB with `1009`. Bun cannot pause reading a
+server WebSocket, so under Bun a bridge relay bounds the bytes its socket has not yet taken instead
+of holding the client back; Node's `ws` server pauses.
 
 The internal HTTP hop preserves the API's existing IncomingMessage/ServerResponse boundary,
 including authentication on every request and route-specific body limits. It streams bodies in

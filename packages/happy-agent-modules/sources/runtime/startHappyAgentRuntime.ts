@@ -33,6 +33,7 @@ import { ArtifactsModule } from "../artifacts/index.js";
 import { LiveModule } from "../live/index.js";
 import { AutoModule } from "../auto/index.js";
 import { BotsModule } from "../bots/index.js";
+import { BridgesModule } from "../bridges/index.js";
 import { CollaborationModule } from "../collaboration/index.js";
 import { SubtasksModule } from "../subtasks/index.js";
 import { CompactionsModule } from "../compactions/index.js";
@@ -139,6 +140,7 @@ export interface HappyAgentRuntimeModules {
     readonly artifactData: ArtifactDataModule;
     readonly auto: AutoModule;
     readonly bots: BotsModule;
+    readonly bridges: BridgesModule;
     readonly chatMedia: ChatMediaModule;
     readonly collaboration: CollaborationModule;
     readonly subtasks: SubtasksModule;
@@ -497,6 +499,8 @@ export async function startHappyAgentRuntime(
         registerShutdown("tailcat", async (shutdownCtx) => await tailcat.close(shutdownCtx));
         const terminals = new TerminalsModule(projects, workspaces, runners, bots, tasks);
         registerShutdown("terminals", async () => await terminals.close());
+        const bridges = new BridgesModule(projects, workspaces, runners, bots, tasks);
+        registerShutdown("bridges", async () => await bridges.close());
         const files = new ProjectFilesModule(projects, workspaces, git, runners, bots, tasks);
         registerShutdown("files", async () => await files.close());
 
@@ -618,6 +622,7 @@ export async function startHappyAgentRuntime(
             artifacts,
             artifactData,
             chatMedia,
+            bridges,
         );
         api = apiModule;
 
@@ -629,6 +634,7 @@ export async function startHappyAgentRuntime(
             artifactData,
             auto: autoModule,
             bots,
+            bridges,
             chatMedia,
             collaboration,
             subtasks,
@@ -723,6 +729,7 @@ export async function startHappyAgentRuntime(
             titles,
             workspaces,
             files,
+            bridges,
             secrets,
             collaboration,
             subtasks,

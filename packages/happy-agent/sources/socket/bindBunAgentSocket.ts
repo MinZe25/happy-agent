@@ -4,12 +4,15 @@ import { isWindowsNamedPipe, readAgentSocketInformation } from "./agentSocketPat
 
 import {
     socketRejectionBody,
+    type BridgeWebSocketBinding,
+    type PreparedBridgeSocket,
     type PreparedHappyAgentRuntime,
     type PreparedRunnerSocket,
     type PreparedTerminalSocket,
     type PreparedLiveSocket,
     type LiveControlBinding,
 } from "@slopus/happy-agent-modules";
+import { WORKSPACE_BRIDGE_MAX_BINARY_MESSAGE_BYTES } from "@slopus/happy-agent-client";
 import { MAX_RUNNER_FRAME_BYTES } from "@slopus/happy-agent-compute";
 import { WebSocketDuplex } from "@slopus/happy-agent-modules/transport";
 
@@ -51,8 +54,20 @@ interface LiveWebSocketData {
     binding?: LiveControlBinding;
 }
 
+interface BridgeWebSocketData {
+    readonly kind: "bridge";
+    readonly prepared: Extract<PreparedBridgeSocket, { readonly attach: unknown }>;
+    binding?: BridgeWebSocketBinding;
+}
+
+type BunWebSocketData =
+    | TerminalWebSocketData
+    | LiveWebSocketData
+    | RunnerWebSocketData
+    | BridgeWebSocketData;
+
 interface BunTerminalWebSocket extends BunServerWebSocket {
-    data: TerminalWebSocketData | LiveWebSocketData | RunnerWebSocketData;
+    data: BunWebSocketData;
     send(data: string | Uint8Array, compress?: boolean): number;
 }
 
@@ -60,10 +75,7 @@ export interface BunWebSocketServer {
     readonly hostname: string;
     readonly port: number;
     stop(closeActiveConnections?: boolean): Promise<void> | void;
-    upgrade(
-        request: Request,
-        options: { readonly data: TerminalWebSocketData | LiveWebSocketData | RunnerWebSocketData },
-    ): boolean;
+    upgrade(request: Request, options: { readonly data: BunWebSocketData }): boolean;
     timeout(request: Request, seconds: number): void;
 }
 
@@ -213,6 +225,30 @@ export function startBunHttpServer(
                 live.failed();
                 return socketResponse(500, "internal", "The voice upgrade could not be completed.");
             }
+            const bridge = await prepared.api.prepareBridgeSocket(
+                prepared.context("bun-bridge-websocket-upgrade"),
+                url,
+                request.headers.get("authorization") ?? undefined,
+            );
+            if (bridge.handled) {
+                if ("rejection" in bridge)
+                    return Response.json(socketRejectionBody(bridge.rejection), {
+                        headers: { "cache-control": "no-store" },
+                        status: bridge.rejection.status,
+                    });
+                try {
+                    if (server.upgrade(request, { data: { kind: "bridge", prepared: bridge } }))
+                        return undefined;
+                } catch {
+                    // The admission still holds its reservation until it is told otherwise.
+                }
+                bridge.failed();
+                return socketResponse(
+                    500,
+                    "internal",
+                    "The bridge upgrade could not be completed.",
+                );
+            }
             const pathname = url.pathname;
             const terminal = await prepared.api.prepareTerminalSocket(
                 prepared.context("bun-websocket-upgrade"),
@@ -240,6 +276,25 @@ export function startBunHttpServer(
                     webSocket.data.prepared.attach(
                         createBunBinaryWebSocket(webSocket, webSocket.data),
                     );
+                    return;
+                }
+                if (webSocket.data.kind === "bridge") {
+                    try {
+                        webSocket.data.binding = webSocket.data.prepared.attach({
+                            get bufferedAmount() {
+                                return webSocket.getBufferedAmount();
+                            },
+                            send: (data) => {
+                                webSocket.send(data, false);
+                            },
+                            close: (code, reason) => {
+                                webSocket.close(code, reason);
+                            },
+                        });
+                    } catch {
+                        webSocket.data.prepared.failed();
+                        webSocket.close(1011, "The bridge could not be opened.");
+                    }
                     return;
                 }
                 if (webSocket.data.kind === "live") {
@@ -274,6 +329,19 @@ export function startBunHttpServer(
                 }
             },
             message(webSocket: BunTerminalWebSocket, message: string | Uint8Array) {
+                if (webSocket.data.kind === "bridge") {
+                    if (
+                        typeof message !== "string" &&
+                        message.byteLength > WORKSPACE_BRIDGE_MAX_BINARY_MESSAGE_BYTES
+                    ) {
+                        webSocket.close(1009, "The message is too large.");
+                        return;
+                    }
+                    webSocket.data.binding?.message(
+                        typeof message === "string" ? message : Buffer.from(message),
+                    );
+                    return;
+                }
                 if (webSocket.data.kind === "live") {
                     webSocket.data.binding?.message(
                         typeof message === "string" && Buffer.byteLength(message) <= 256 * 1024
@@ -300,13 +368,17 @@ export function startBunHttpServer(
                 webSocket.data.handlers?.message(Buffer.from(message));
             },
             close(webSocket: BunTerminalWebSocket) {
-                if (webSocket.data.kind === "live") {
+                if (webSocket.data.kind === "live" || webSocket.data.kind === "bridge") {
                     webSocket.data.binding?.closed();
                     return;
                 }
                 webSocket.data.handlers?.close();
             },
             error(webSocket: BunTerminalWebSocket, error: Error) {
+                if (webSocket.data.kind === "bridge") {
+                    webSocket.close(1011, "The bridge connection failed.");
+                    return;
+                }
                 if (webSocket.data.kind === "live") {
                     webSocket.data.binding?.message("");
                     return;

@@ -5,6 +5,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
 import type { Socket } from "node:net";
 import { dirname, join } from "node:path";
+import {
+    BridgeError,
+    BridgesModule,
+    type BridgeAdmission,
+    type BridgeWebSocketBinding,
+} from "../bridges/index.js";
 import { ConnectionsModule, RemoteConnectionError } from "../connections/index.js";
 import { LocalExecutionDisabledError, RunnersModule } from "../runners/index.js";
 import { GlobalSkillsModule, GlobalSkillsError } from "../skills/index.js";
@@ -18,6 +24,8 @@ import {
 
 import { createId } from "@paralleldrive/cuid2";
 import {
+    closeWorkspaceBridgeRequestSchema,
+    WORKSPACE_BRIDGE_MAX_BINARY_MESSAGE_BYTES,
     createLiveSessionRequestSchema,
     closeLiveSessionRequestSchema,
     liveDesktopIdSchema,
@@ -344,6 +352,8 @@ export interface ApiSocketRejection {
     /** How to sign in, carried by a `401` when the deployment offers a way. */
     readonly authentication?: AuthenticationChallenge;
     readonly code: ApiErrorCode;
+    /** Further fields of the error body, such as an unavailable bridge's `reason`. */
+    readonly details?: Readonly<Record<string, unknown>>;
     readonly message: string;
     readonly status: number;
 }
@@ -364,6 +374,15 @@ export type PreparedLiveSocket =
           readonly attach: (socket: LiveControlSocket) => LiveControlBinding;
           readonly failed: () => void;
       };
+
+/**
+ * A bridge WebSocket: a USB device, a port bridge's control channel, or one of its connections.
+ * `failed` must be called when an admitted upgrade does not complete, to release its reservation.
+ */
+export type PreparedBridgeSocket =
+    | { readonly handled: false }
+    | { readonly handled: true; readonly rejection: ApiSocketRejection }
+    | ({ readonly handled: true } & BridgeAdmission);
 
 /** `GET /v0/runners/connect`, admitted by a runner token and nothing else. */
 export type PreparedRunnerSocket =
@@ -495,6 +514,12 @@ export class ApiModule implements AgentModule {
         noServer: true,
         perMessageDeflate: false,
     });
+    readonly #bridgeWebSockets = new WebSocketServer({
+        maxPayload: WORKSPACE_BRIDGE_MAX_BINARY_MESSAGE_BYTES,
+        noServer: true,
+        perMessageDeflate: false,
+    });
+    readonly #bridges: BridgesModule | undefined;
     readonly #serviceTunnels = new Map<ServiceHttpTunnel, string>();
     readonly #serviceAdmissions = new Map<string, number>();
     #serviceAttachmentCount = 0;
@@ -564,6 +589,7 @@ export class ApiModule implements AgentModule {
         artifacts?: ArtifactsModule,
         artifactData?: ArtifactDataModule,
         chatMedia?: ChatMediaModule,
+        bridges?: BridgesModule,
     ) {
         this.#abort = abort;
         this.#config = config;
@@ -602,6 +628,7 @@ export class ApiModule implements AgentModule {
                 ? undefined
                 : new ApiArtifactData(artifactData, this.#streams);
         this.#chatMedia = chatMedia;
+        this.#bridges = bridges;
     }
 
     readonly beforeStart = async (
@@ -724,6 +751,8 @@ export class ApiModule implements AgentModule {
         this.#webSockets.close();
         for (const client of this.#liveWebSockets.clients) client.terminate();
         this.#liveWebSockets.close();
+        for (const client of this.#bridgeWebSockets.clients) client.terminate();
+        this.#bridgeWebSockets.close();
         this.#runnerWebSockets.close();
         await this.#workspaceProxy.close();
     }
@@ -1473,6 +1502,7 @@ export class ApiModule implements AgentModule {
                 await this.#handleWorkspaceList(ctx, url, response);
                 return;
             }
+            if (await this.#handleBridgeRoute(ctx, request, response, url)) return;
             if (await this.#handleWorkspaceRoute(ctx, request, response, url)) return;
             if (await this.#handleWorkspaceContentRoute(ctx, request, response, url)) return;
             if (request.method === "POST" && url.pathname === "/v0/git/watch") {
@@ -1605,6 +1635,64 @@ export class ApiModule implements AgentModule {
                 socket.off("close", upgradeFailed);
                 socket.off("error", upgradeFailed);
                 live.failed();
+                socket.destroy();
+            }
+            return true;
+        }
+        const bridge = await this.prepareBridgeSocket(
+            ctx,
+            requestUrl(request),
+            request.headers.authorization,
+        );
+        if (bridge.handled) {
+            if ("rejection" in bridge) {
+                writeSocketError(socket, bridge.rejection);
+                return true;
+            }
+            const upgradeFailed = () => bridge.failed();
+            socket.once("close", upgradeFailed);
+            socket.once("error", upgradeFailed);
+            try {
+                this.#bridgeWebSockets.handleUpgrade(request, socket, head, (webSocket) => {
+                    socket.off("close", upgradeFailed);
+                    socket.off("error", upgradeFailed);
+                    let binding: BridgeWebSocketBinding | undefined;
+                    webSocket.on("message", (data, binary) => {
+                        binding?.message(
+                            binary ? webSocketBytes(data) : webSocketBytes(data).toString(),
+                        );
+                    });
+                    webSocket.on("close", () => binding?.closed());
+                    webSocket.on("error", () => webSocket.terminate());
+                    binding = bridge.attach({
+                        get bufferedAmount() {
+                            return webSocket.bufferedAmount;
+                        },
+                        send: (data) => {
+                            if (webSocket.readyState !== webSocket.OPEN) return;
+                            webSocket.send(data, {
+                                binary: typeof data !== "string",
+                                compress: false,
+                            });
+                        },
+                        close: (code, reason) => {
+                            if (webSocket.readyState === webSocket.OPEN)
+                                webSocket.close(code, reason);
+                            else if (webSocket.readyState !== webSocket.CLOSED)
+                                webSocket.terminate();
+                        },
+                        pause: () => {
+                            if (webSocket.readyState === webSocket.OPEN) webSocket.pause();
+                        },
+                        resume: () => {
+                            if (webSocket.readyState === webSocket.OPEN) webSocket.resume();
+                        },
+                    });
+                });
+            } catch {
+                socket.off("close", upgradeFailed);
+                socket.off("error", upgradeFailed);
+                bridge.failed();
                 socket.destroy();
             }
             return true;
@@ -1794,6 +1882,82 @@ export class ApiModule implements AgentModule {
     }
 
     /**
+     * A local bridge's WebSocket: a USB device, a port bridge's control channel, or one connection
+     * of a port bridge.
+     *
+     * Everything refusable is refused before the upgrade, so a client sees an ordinary status. A
+     * draining daemon opens no new bridge, but still lets an open port bridge's owner accept its
+     * connections: the bridge stays useful until it is closed.
+     */
+    async prepareBridgeSocket(
+        ctx: Context,
+        url: URL,
+        authorization: string | string[] | undefined,
+    ): Promise<PreparedBridgeSocket> {
+        const match =
+            /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/bridges\/(?:(usb|port)|([a-z][a-z0-9]*)\/connections\/([a-z][a-z0-9]*))$/.exec(
+                url.pathname,
+            );
+        if (match === null) return { handled: false };
+        try {
+            ctx = await this.#authenticate(ctx, authorization);
+            this.#assertTeamUser(ctx);
+            const bridges = this.#bridges;
+            if (bridges === undefined)
+                throw notFound("Local bridges are unavailable in this daemon.");
+            const ownerId = teamUser(ctx)?.id ?? "standalone";
+            const workspaceId = match[1]!;
+            if (match[2] === undefined) {
+                if (!this.#ready || this.#closed)
+                    throw new ApiError(503, "not_initialized", "Happy Agent is still starting.");
+                if (this.#config.configuration.values.features.workspaces === false)
+                    throw new ApiError(
+                        503,
+                        "unsupported",
+                        "Workspaces are disabled in this daemon.",
+                    );
+                const connection = bridges.admitConnection(
+                    ownerId,
+                    workspaceId,
+                    match[3]!,
+                    match[4]!,
+                );
+                return {
+                    handled: true,
+                    attach: (webSocket) => connection.attach(webSocket),
+                    failed: () => {
+                        connection.failed();
+                    },
+                };
+            }
+            this.#assertSocketReady();
+            const query = bridgeQuery(url);
+            const admission =
+                match[2] === "usb"
+                    ? await bridges.admitUsb(ctx, ownerId, workspaceId, {
+                          ...query,
+                          busId: url.searchParams.get("busId") ?? "",
+                      })
+                    : await bridges.admitPort(ctx, ownerId, workspaceId, {
+                          ...query,
+                          port: portParameter(url.searchParams.get("port")),
+                      });
+            return {
+                handled: true,
+                attach: (webSocket) => admission.attach(webSocket),
+                failed: () => {
+                    admission.failed();
+                },
+            };
+        } catch (error) {
+            return {
+                handled: true,
+                rejection: this.#socketRejection(ctx, error, "The bridge was not found."),
+            };
+        }
+    }
+
+    /**
      * A runner's connection. Only a configured runner token is accepted here, and it is accepted
      * nowhere else; an unknown token is refused before the upgrade. Runners are not team users, so
      * neither team sign-in nor the local API token applies.
@@ -1973,6 +2137,27 @@ export class ApiModule implements AgentModule {
                             ? event.service.createdAt
                             : event.changes.updatedAt,
                     );
+                }),
+            );
+        if (this.#bridges !== undefined)
+            this.#unsubscribe.push(
+                this.#bridges.onEvent((event) => {
+                    // A bridge's closing event carries the mutation that closed it, if any, and
+                    // must not inherit one from whatever request happened to end it otherwise.
+                    this.#mutationIds.exit(() => {
+                        if (event.type === "bridges.capabilities.updated") {
+                            this.#journal.append(event.type, event.payload);
+                            return;
+                        }
+                        this.#journal.append(
+                            event.type,
+                            event.payload,
+                            event.type === "bridge.created"
+                                ? event.payload.bridge.createdAt
+                                : event.payload.changes.updatedAt,
+                            event.ownerId === "standalone" ? undefined : event.ownerId,
+                        );
+                    });
                 }),
             );
         if (this.#globalSkills !== undefined)
@@ -6086,6 +6271,52 @@ export class ApiModule implements AgentModule {
         throw notFound("The requested service endpoint does not exist.");
     }
 
+    /** The plain HTTP side of local bridges: reading them and closing one. */
+    async #handleBridgeRoute(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        url: URL,
+    ): Promise<boolean> {
+        const match =
+            /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/bridges(?:\/([a-z][a-z0-9]*)(\/connections\/[a-z][a-z0-9]*)?)?$/.exec(
+                url.pathname,
+            );
+        if (match === null) return false;
+        const bridges = this.#bridges;
+        if (bridges === undefined) throw notFound("Local bridges are unavailable in this daemon.");
+        const workspaceId = match[1]!;
+        const bridgeId = match[2];
+        const ownerId = teamUser(ctx)?.id ?? "standalone";
+        if (request.method === "GET" && bridgeId === undefined) {
+            const cursor = this.#journal.cursor();
+            sendJson(response, 200, {
+                ...(await bridges.list(ctx, ownerId, workspaceId)),
+                cursor,
+            });
+            return true;
+        }
+        if (
+            request.method === "GET" &&
+            (match[3] !== undefined || bridgeId === "usb" || bridgeId === "port")
+        ) {
+            throw invalidRequest("This bridge endpoint is a WebSocket; send an upgrade request.");
+        }
+        if (request.method === "DELETE" && bridgeId !== undefined && match[3] === undefined) {
+            const body = await optionalBodyAs(
+                request,
+                closeWorkspaceBridgeRequestSchema,
+                "bridge close request",
+                8192,
+            );
+            sendJson(response, 200, {
+                bridge: bridges.closeBridge(ownerId, workspaceId, bridgeId, body.mutationId),
+            });
+            return true;
+        }
+        throw notFound("The requested bridge endpoint does not exist.");
+    }
+
     async #handleWorkspaceList(ctx: Context, url: URL, response: ServerResponse): Promise<void> {
         const projectId = url.searchParams.get("projectId") ?? undefined;
         const includeArchived = booleanParameter(url.searchParams.get("includeArchived"), false);
@@ -6888,7 +7119,10 @@ export class ApiModule implements AgentModule {
             drainWaitingFor: this.#drainWaitingFor(ctx),
             shuttingDown: gracefulShutdown?.shuttingDown ?? false,
             status: this.#ready ? "ready" : "starting",
-            capabilities: { desktopLiveControl: this.#live !== undefined },
+            capabilities: {
+                desktopLiveControl: this.#live !== undefined,
+                ...(this.#bridges === undefined ? {} : { workspaceBridges: true }),
+            },
             version: {
                 protocol: API_PROTOCOL_VERSION,
                 daemon: this.#config.configuration.version,
@@ -7093,7 +7327,7 @@ export class ApiModule implements AgentModule {
     }
 
     async #sendError(ctx: Context, response: ServerResponse, error: unknown): Promise<void> {
-        error = serviceApiError(error) ?? error;
+        error = serviceApiError(error) ?? bridgeApiError(error) ?? error;
         if (response.headersSent) {
             response.end();
             return;
@@ -7278,7 +7512,7 @@ export class ApiModule implements AgentModule {
     }
 
     #socketRejection(ctx: Context, error: unknown, notFoundMessage: string): ApiSocketRejection {
-        error = serviceApiError(error) ?? error;
+        error = serviceApiError(error) ?? bridgeApiError(error) ?? error;
         if (error instanceof RemoteConnectionError)
             return { code: error.code, status: error.status, message: error.message };
         if (error instanceof ApiError) {
@@ -7286,6 +7520,7 @@ export class ApiModule implements AgentModule {
                 code: error.code,
                 message: error.message,
                 status: error.status,
+                ...(Object.keys(error.details).length === 0 ? {} : { details: error.details }),
                 ...(error.status === 401 ? this.#authenticationChallenge() : {}),
             };
         }
@@ -7425,6 +7660,52 @@ async function bodyAs<Schema extends TSchema>(
         throw invalidRequest(`The ${name} is invalid.`);
     }
     return value as Static<Schema>;
+}
+
+/** The query parameters every bridge upgrade shares. A repeated parameter is refused. */
+function bridgeQuery(url: URL): { id?: string; name?: string } {
+    for (const key of ["busId", "port", "id", "name"]) {
+        if (url.searchParams.getAll(key).length > 1)
+            throw invalidRequest("The bridge query contains duplicate parameters.");
+    }
+    const id = url.searchParams.get("id");
+    const name = url.searchParams.get("name");
+    return {
+        ...(id === null ? {} : { id }),
+        ...(name === null ? {} : { name }),
+    };
+}
+
+/** A decimal port number, or `NaN` for anything else so the bridge refuses it. */
+function portParameter(value: string | null): number {
+    return value !== null && /^\d{1,5}$/.test(value) ? Number(value) : Number.NaN;
+}
+
+/** Bytes of one WebSocket message, however `ws` delivered them. */
+function webSocketBytes(data: import("ws").RawData): Buffer {
+    if (Array.isArray(data)) return Buffer.concat(data);
+    if (data instanceof ArrayBuffer) return Buffer.from(data);
+    return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+}
+
+function bridgeApiError(error: unknown): ApiError | undefined {
+    if (!(error instanceof BridgeError)) return undefined;
+    const statuses = {
+        invalid_request: 400,
+        not_found: 404,
+        not_initialized: 409,
+        conflict: 409,
+        bridge_unavailable: 409,
+        bridge_limit: 409,
+        port_unavailable: 409,
+        unavailable: 503,
+    } as const;
+    return new ApiError(
+        statuses[error.code],
+        error.code === "unavailable" ? "not_initialized" : error.code,
+        error.message,
+        error.reason === undefined ? {} : { reason: error.reason },
+    );
 }
 
 async function optionalBodyAs<Schema extends TSchema>(
@@ -7631,6 +7912,7 @@ function writeSocketError(
 /** The JSON error body for a rejected attachment, shared by the Node and Bun transports. */
 export function socketRejectionBody(rejection: ApiSocketRejection): Record<string, unknown> {
     return {
+        ...rejection.details,
         error: rejection.message,
         code: rejection.code,
         ...(rejection.authentication === undefined

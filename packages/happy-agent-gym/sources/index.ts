@@ -16,6 +16,10 @@ export {
 } from "./createAgentGym.js";
 export { createUnixSocketFetch } from "./createUnixSocketFetch.js";
 export {
+    BridgeUpgradeError,
+    connectBridgeWebSocket,
+    GymBridgeWebSocket,
+    type GymBridgeMessage,
     connectTerminalWebSocket,
     connectWorkspaceProxy,
     type HappyAgentSocketTransport,

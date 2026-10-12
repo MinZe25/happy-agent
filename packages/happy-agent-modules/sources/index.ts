@@ -584,6 +584,10 @@ export * from "./projects/index.js";
 // at that folder, each with one canonical Ghostty emulator behind it.
 export * from "./terminals/index.js";
 
+// Bridges: a USB device, a Bluetooth adapter, or a local port on a person's own computer, reaching
+// the machine one of their workspaces runs on for as long as their client holds it open.
+export * from "./bridges/index.js";
+
 // Titles: the names a first message settles — the chat, its workspace, and its branch.
 export * from "./titles/index.js";
 

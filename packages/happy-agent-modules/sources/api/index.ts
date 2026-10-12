@@ -21,6 +21,7 @@ export {
     type ApiDrainProgress,
     type ApiDrainSource,
     type ApiSocketRejection,
+    type PreparedBridgeSocket,
     type PreparedTerminalSocket,
     type PreparedLiveSocket,
     type PreparedRunnerSocket,
