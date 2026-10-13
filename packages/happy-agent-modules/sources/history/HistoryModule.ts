@@ -33,7 +33,11 @@ import {
     type AgentModuleMigration,
 } from "@slopus/happy-agent-base";
 
-import { isUserOriginMetadata, senderAgentIdOf } from "../impl/messageOrigin.js";
+import {
+    isGuestOriginMetadata,
+    isUserOriginMetadata,
+    senderAgentIdOf,
+} from "../impl/messageOrigin.js";
 import { decodeRequestProfile } from "../impl/requestProfile.js";
 import type { EventsModule } from "../events/index.js";
 import { queryToolCallMessage } from "./persistence/queryToolCallMessage.js";
@@ -1849,7 +1853,12 @@ export class HistoryModule implements AgentModule {
                 : undefined;
             await this.#beginRun(ctx, scope.agent.id, runId, accepted.kind, acceptedAt);
             const isSystem = accepted.message.role === "system";
-            const fromUser = !isSystem && isUserOriginMetadata(accepted.metadata);
+            // A guest of an exported bot is a person too, so their message is shown as theirs.
+            // Only the trust that the user origin carries elsewhere is withheld from it.
+            const fromUser =
+                !isSystem &&
+                (isUserOriginMetadata(accepted.metadata) ||
+                    isGuestOriginMetadata(accepted.metadata));
             const metadataUserId = accepted.metadata?.["userId"];
             // An existing pending row is authoritative, including an older row with no author.
             const userId =

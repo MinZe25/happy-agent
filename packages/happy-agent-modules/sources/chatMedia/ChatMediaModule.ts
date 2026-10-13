@@ -175,6 +175,28 @@ export class ChatMediaModule implements AgentModule {
         if (facts?.isFile() !== true || facts.size !== item.size) return undefined;
         return { item, contentPath };
     }
+
+    /**
+     * Every item one call presented whose snapshot is still kept, in order. Empty when the call
+     * presented nothing or failed.
+     */
+    async storedItems(
+        ctx: Context,
+        agentId: string,
+        callId: string,
+    ): Promise<readonly ChatMediaStoredItem[]> {
+        const presentation = await this.#history.toolResultPresentation(ctx, agentId, callId);
+        if (presentation?.type !== "media") return [];
+        const stored: ChatMediaStoredItem[] = [];
+        for (const item of presentation.items) {
+            const contentPath = this.#config.chatMediaContentPath(item.sha256);
+            const facts = await stat(contentPath).catch(() => undefined);
+            if (facts?.isFile() === true && facts.size === item.size) {
+                stored.push({ item, contentPath });
+            }
+        }
+        return stored;
+    }
 }
 
 function formatMiB(bytes: number): string {

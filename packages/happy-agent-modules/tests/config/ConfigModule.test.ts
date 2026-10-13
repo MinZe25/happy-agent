@@ -414,6 +414,8 @@ describe("ConfigModule", () => {
         expect(source).toContain('# workos_client_id = "client_01KZD3XE9YAFAMT0P8TD4HP73E"');
         expect(source).toContain('# workos_organization_id = "org_01EXAMPLE"');
         expect(source).toContain('# owner_workos_user_id = "user_01EXAMPLE"');
+        expect(source).toContain("# [telegram]");
+        expect(source).toContain('# api_url = "https://api.telegram.org"');
     });
 
     it("always generates runtime.toml even when it has no settings yet", async () => {

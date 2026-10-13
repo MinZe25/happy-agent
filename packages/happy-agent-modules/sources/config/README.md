@@ -71,6 +71,13 @@ names one stored file by its digest under `content/<first two hex digits>/`, and
 its debug log, `logs.sqlite`, sits in the same directory.
 Each validates its segment before it becomes part of a path.
 
+`[telegram] api_url` points every bot exported to Telegram at a self-hosted Bot API server instead
+of `https://api.telegram.org`. It is a machine setting, dropped from the project layer, because
+that server receives every bot token. The exports themselves live in the database; see
+[`../exportedBots/README.md`](../exportedBots/README.md). `exportedBotFilesPath(kind, account)`
+names one export's private folder for files it receives,
+`.happy/agent/exported-bots/<kind>/<account>`, and validates both segments.
+
 `[feature.tailcat] enabled = true` is a machine-only opt-in. The Tailcat module opens the daemon's
 active Unix-socket or team HTTP transport through bundled Tailcat v0.7.0, while the Happy API
 continues to require its ordinary local bearer token or WorkOS token. `port` defaults to the fixed,

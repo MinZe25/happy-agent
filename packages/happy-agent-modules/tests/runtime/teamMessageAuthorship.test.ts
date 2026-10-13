@@ -273,12 +273,15 @@ describe("team authorship across the real runtime and HTTP API", () => {
             { id: aliceId, name: "Alice" },
         ]);
         expect(Object.keys(lookup.users[0]!).sort()).toEqual([
+            "canLogIn",
             "id",
+            "kind",
             "name",
             "photo",
             "updatedAt",
             "version",
         ]);
+        expect(lookup.users[0]).toMatchObject({ kind: "member", canLogIn: true });
 
         // A graceful stop drains current work but preserves the queued author for restoration.
         await stop();

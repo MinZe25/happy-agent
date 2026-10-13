@@ -22,6 +22,7 @@ async function fixture() {
             handleRequest: async (_ctx, _request, response) => response.end("healthy"),
             prepareTerminalSocket: async () => ({ handled: false }),
             prepareRunnerSocket: () => ({ handled: false }),
+            prepareExportedBotSocket: async () => ({ handled: false }),
             prepareLiveSocket: async () => ({ handled: false }),
             prepareBridgeSocket: async (_ctx, url, authorization) => {
                 // Real admission reads catalogs and binds listeners before answering.

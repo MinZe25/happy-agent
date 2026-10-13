@@ -15,8 +15,9 @@ and these writes commit together through Base's transactional notification hook.
 partial delivery and redundant notices after retries or restart, restores the profile after history
 replacement, and refreshes name/email changes before inference without waking an idle agent.
 Photo-only or version-only updates do not repeat unchanged profile text.
-Standalone Team instances expose no startup hook: the runtime installs the standalone Profile
-module instead, so a disabled Team must not advertise agent runtime behavior.
+Standalone Team instances once exposed no startup hook. Exported bots brought guests to every
+installation, so Team is now registered in both modes and its notifications run in both; in
+standalone they announce only guests, and the owner after a guest.
 
 ## Public user lookup is bounded display information
 
@@ -98,3 +99,20 @@ Keeping private drafts inside the API prevented a member's Happy connection from
 storage. Team now owns drafts keyed by agent and user; the API and each personal Happy connection
 use that seam. Draft updates publish only after commit and must be delivered only to the author.
 The storage move copies existing rows atomically so unsent text and clear timestamps survive.
+
+## Guests are users who can never sign in
+
+People let in through an exported bot needed profiles, so their messages could be attributed, but
+not credentials or the owner's authority. They are Team users with the `guest` authentication,
+which no sign-in method produces, and they exist in both modes. The released identity check
+allowed only sign-in methods, so a new migration rebuilt the users table, renaming photos first
+as the identity migration did, and adds a check that a guest is never the owner. A guest's
+subject is random, never a chat-service ID, so a deployer's JWT user IDs cannot collide with one,
+and `authenticate`, `currentUser`, and `connectionContext` refuse a guest even if they were handed
+one. Guests are created and renamed only through `createGuest` and `renameGuest`; the exported
+bots module keeps its own map from chat-service IDs to guests. Team announces guest profile
+changes only in team mode, because standalone clients have no user directory to refresh.
+
+Team members are all intentionally owner-equivalent when they write: every member's message is a
+trusted user message and may choose any permission mode. Guests are deliberately a separate
+class whose messages carry the guest origin, so they authorize nothing.

@@ -190,6 +190,7 @@ for (let round = 0; round < 2; round++) {
             prepareLiveSocket: async () => ({ handled: false }),
             prepareBridgeSocket: async () => ({ handled: false }),
             prepareRunnerSocket: () => ({ handled: false }),
+            prepareExportedBotSocket: async () => ({ handled: false }),
             prepareTerminalSocket: async (_ctx: unknown, _path: string, authorization: string) => {
                 await new Promise((resolve) => setImmediate(resolve));
                 return authorization === `Bearer ${token}`

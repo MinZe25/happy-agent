@@ -1,3 +1,4 @@
+import { agentMetadataSchema } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 
 export const subtaskIdSchema = Type.String({
@@ -37,6 +38,20 @@ export const createSubtaskInputSchema = Type.Object(
 );
 export type CreateSubtaskInput = Static<typeof createSubtaskInputSchema>;
 
+/**
+ * A subtask whose conversation another module drives, such as one guest's chat with an exported
+ * bot. It has no opening task; `metadata` carries the caller's own fields beside the
+ * subtask's, which always win.
+ */
+export const createConversationSubtaskInputSchema = Type.Object(
+    {
+        title: Type.String({ minLength: 1, maxLength: 256 }),
+        metadata: Type.Optional(agentMetadataSchema),
+    },
+    { additionalProperties: false },
+);
+export type CreateConversationSubtaskInput = Static<typeof createConversationSubtaskInputSchema>;
+
 export const subtaskResultSchema = Type.Object(
     {
         agentId: subtaskIdSchema,
@@ -61,6 +76,11 @@ export const subtaskMetadataSchema = Type.Object({ subtask: Type.Literal(true) }
 export const workspaceSubtaskMetadataSchema = Type.Object({
     subtask: Type.Literal(true),
     subtaskWorkspaceId: subtaskIdSchema,
+});
+/** A subtask holding a conversation another module delivers, created by `createConversation`. */
+export const conversationSubtaskMetadataSchema = Type.Object({
+    subtask: Type.Literal(true),
+    subtaskConversation: Type.Literal(true),
 });
 export const archivedMetadataSchema = Type.Object({ archivedAt: Type.Number() });
 export const restoredMetadataSchema = Type.Object({ archivedAt: Type.Null() });

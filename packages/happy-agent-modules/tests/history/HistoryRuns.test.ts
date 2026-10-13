@@ -9,7 +9,11 @@ import type {
 
 import { EventsModule } from "../../sources/events/index.js";
 import { HistoryModule, type HistoryPendingMessage } from "../../sources/history/index.js";
-import { USER_MESSAGE_ORIGIN_METADATA } from "../../sources/impl/messageOrigin.js";
+import {
+    AGENT_MESSAGE_ORIGIN_METADATA,
+    GUEST_MESSAGE_ORIGIN_METADATA,
+    USER_MESSAGE_ORIGIN_METADATA,
+} from "../../sources/impl/messageOrigin.js";
 import { moduleDatabase, type ModuleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 import { recordingTracer } from "../support/recordingTracer.js";
@@ -284,6 +288,34 @@ describe("HistoryModule run history", () => {
         }
     });
 
+    it("shows an exported bot guest's message as theirs, but an agent's as the agent's", async () => {
+        const world = await setup("history-guest");
+        try {
+            await acceptBatch(world, [
+                {
+                    ...accepted("message-guest", "steering"),
+                    metadata: { ...GUEST_MESSAGE_ORIGIN_METADATA, userId: "guest123" },
+                },
+                {
+                    ...accepted("message-agent", "steering"),
+                    metadata: { ...AGENT_MESSAGE_ORIGIN_METADATA, userId: "guest123" },
+                },
+            ]);
+            expect(
+                await world.history.message(world.database.context, "agent-a", "message-guest"),
+            ).toMatchObject({ role: "user", userId: "guest123", delivery: "steer" });
+            const fromAgent = await world.history.message(
+                world.database.context,
+                "agent-a",
+                "message-agent",
+            );
+            expect(fromAgent?.role).toBe("agent");
+            expect(fromAgent).not.toHaveProperty("userId");
+        } finally {
+            world.database.close();
+        }
+    });
+
     it("never backfills an older pending message from later acceptance metadata", async () => {
         const world = await setup("history-author-absent");
         try {
@@ -340,6 +372,7 @@ describe("HistoryModule run history", () => {
         },
         { metadata: { userId: "alice123" }, userId: undefined },
         { metadata: USER_MESSAGE_ORIGIN_METADATA, userId: undefined },
+        { metadata: { ...GUEST_MESSAGE_ORIGIN_METADATA, userId: "guest123" }, userId: "guest123" },
     ])(
         "accepts only valid person-authored provenance without a pending row %#",
         async ({ metadata, userId }) => {

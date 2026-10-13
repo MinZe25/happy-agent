@@ -174,6 +174,7 @@ its public methods, and its storage and event contracts.
 | [Presence](sources/presence/README.md)           | Configured versus effective availability, custom and temporary states, schedules, and status events.    |
 | [Profile](sources/profile/README.md)             | The one person this installation belongs to, and the machine that may speak for them.                   |
 | [Happy teams](sources/happyTeams/README.md)      | Reviewed standalone tools for Cloud identity, team management, and publishing server endpoints.         |
+| [Exported bots](sources/exportedBots/README.md)  | Bots people reach from Telegram or a bridge, as guests with a subtask each, let in by the Chief.        |
 
 ### Places and things
 
@@ -187,9 +188,9 @@ its public methods, and its storage and event contracts.
 
 ### Storage ownership
 
-Modules owning tables through their own migrations: artifacts, auto, collaboration, compactions,
-events, goal, history, mcp, presence, profile, projects, scheduling, secrets, tasks, usage, user
-input, workflows, and workspaces. The rest own none: abort, compute, config, files, gemini, git, image
+Modules owning tables through their own migrations: artifacts, auto, collaboration,
+compactions, events, exported bots, goal, history, mcp, presence, profile, projects, scheduling, secrets, tasks,
+usage, user input, workflows, and workspaces. The rest own none: abort, compute, config, files, gemini, git, image
 generation, model switch, observation, permissions, search, skills, system prompt, titles, and code mode.
 Compute uses per-agent and shared Agent KV, while system prompt and titles use Agent KV only;
 terminals stores nothing anywhere because a terminal ends with the process behind it, and

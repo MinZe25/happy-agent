@@ -27,6 +27,8 @@ database. The bots module uses the system key to inject the current source guida
 inference, so an upgrade updates its built-in instructions while preserving its identity and
 conversation. Future built-in bots receive their own system keys and seed-ledger entries through
 the same path.
+`chiefOfStaff(ctx)` returns the Chief of Staff by that key, whatever it is named now, so other
+modules can address it; the exported bots module sends it access requests.
 
 A bot's one agent is born with its conversation title set to the bot's display name, and renaming
 the bot renames the conversation with it: a bot is one continuous chat, so its session is called

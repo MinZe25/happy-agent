@@ -1001,6 +1001,21 @@ describe("collaboration", () => {
         expect(instructions).toContain("send_agent_message");
     });
 
+    it("tells an unreported agent that its creator hears from it only through messages", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        collection.seed("conversation", "parent", { metadata: module.unreportedAgentMetadata() });
+
+        const instructions = await hooks.instructions!(ctx, {
+            agent: { id: "conversation", metadata: module.unreportedAgentMetadata() },
+        } as never);
+
+        expect(instructions).toContain(
+            "You were created by agent parent. What you say is not reported to it automatically; use send_agent_message when it needs to hear from you.",
+        );
+        expect(instructions).not.toContain("reported to it automatically, so finish");
+    });
+
     it("tells an agent which collaborators it created", async () => {
         const collection = new Collection();
         const { module, hooks, ctx } = await started(collection);

@@ -16,6 +16,7 @@ export {
     type HappyAgentConfigurationInput,
     type HappyAgentConfigurationPaths,
 } from "./ConfigModule.js";
+export { DEFAULT_TELEGRAM_API_URL } from "./TelegramConfig.js";
 export {
     remoteConnectionConfigSchema,
     remoteConnectionEntrySchema,

@@ -3,9 +3,11 @@
 // Shared, module-neutral utilities: things more than one module needs and none of them owns.
 export {
     AGENT_MESSAGE_ORIGIN_METADATA,
+    GUEST_MESSAGE_ORIGIN_METADATA,
     MESSAGE_ORIGIN_METADATA_KEY,
     SENDER_AGENT_ID_METADATA_KEY,
     USER_MESSAGE_ORIGIN_METADATA,
+    isGuestOriginMetadata,
     isUserOriginMetadata,
     senderAgentIdMetadata,
     senderAgentIdOf,
@@ -25,6 +27,9 @@ export * from "./services/index.js";
 
 // Bots: persistent single-conversation assistants with dedicated folders and agents.
 export * from "./bots/index.js";
+
+// Exported bots: Happy bots people reach from Telegram or a bridge, one subtask per guest.
+export * from "./exportedBots/index.js";
 
 // Tasks: persistent owned conversations with dedicated folders, roots of their own subtasks.
 export * from "./tasks/index.js";

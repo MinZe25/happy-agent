@@ -21,6 +21,17 @@ export const workOSUserIdSchema = Type.String({
 export const teamAuthenticationSchema = Type.Union([Type.Literal("workos"), Type.Literal("jwt")]);
 export type TeamAuthentication = Static<typeof teamAuthenticationSchema>;
 
+/**
+ * How a stored user came to exist: a member proved by a sign-in method, or `guest`, a person who
+ * reaches an exported bot from an outside chat service. No sign-in method ever yields `guest`, so
+ * a guest has no way to authenticate.
+ */
+export const teamUserAuthenticationSchema = Type.Union([
+    teamAuthenticationSchema,
+    Type.Literal("guest"),
+]);
+export type TeamUserAuthentication = Static<typeof teamUserAuthenticationSchema>;
+
 /** A user ID issued by the authentication method; unique only within that method. */
 export const teamSubjectSchema = Type.String({
     maxLength: 256,
@@ -63,12 +74,24 @@ export const teamUserSchema = Type.Object(
         photo: Type.Union([teamUserPhotoMetadataSchema, Type.Null()]),
         updatedAt: timestampSchema,
         version: teamUserVersionSchema,
-        authentication: teamAuthenticationSchema,
+        authentication: teamUserAuthenticationSchema,
         subject: teamSubjectSchema,
     },
     exact,
 );
 export type TeamUser = Static<typeof teamUserSchema>;
+
+/** Whether a user is a guest, who has no credentials and can never sign in. */
+export function isTeamGuest(user: TeamUser): boolean {
+    return user.authentication === "guest";
+}
+
+/** A guest as an exported bot names them. Characters a team name forbids are dropped. */
+export const createTeamGuestInputSchema = Type.Object(
+    { name: Type.String({ minLength: 1, maxLength: 256 }) },
+    exact,
+);
+export type CreateTeamGuestInput = Static<typeof createTeamGuestInputSchema>;
 
 export const createTeamUserInputSchema = Type.Object(
     {

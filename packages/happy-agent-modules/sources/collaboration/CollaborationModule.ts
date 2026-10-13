@@ -79,6 +79,15 @@ export class CollaborationModule implements AgentModule {
         return this.#availableModels();
     }
 
+    /**
+     * Agent metadata saying its creator collects nothing from it when it settles, for a module
+     * that creates the agent itself rather than through `createAgent`. The decision lives in the
+     * agent's own metadata so it survives a restart.
+     */
+    unreportedAgentMetadata(): AgentMetadata {
+        return { collaboration: { reportToCreator: false } };
+    }
+
     selectModel(
         input: CollaborationCreateInput,
         currentProviderId?: string,
@@ -283,7 +292,9 @@ export class CollaborationModule implements AgentModule {
             const lines: string[] = [`Your Agent ID is ${scope.agent.id}.`];
             if (parent !== null) {
                 lines.push(
-                    `You were created by agent ${parent}. When you stop working, whatever you said last is reported to it automatically, so finish by stating your answer. Use send_agent_message only to tell it something before then.`,
+                    reportsToCreator(scope.agent.metadata)
+                        ? `You were created by agent ${parent}. When you stop working, whatever you said last is reported to it automatically, so finish by stating your answer. Use send_agent_message only to tell it something before then.`
+                        : `You were created by agent ${parent}. What you say is not reported to it automatically; use send_agent_message when it needs to hear from you.`,
                 );
             }
             if (children.length > 0) {

@@ -505,6 +505,11 @@ page; in a source checkout, see [`packages/happy-agent/API.md`](../packages/happ
 - **Happy mobile synchronization** — a first-class daemon feature, gated by both
   the embedder's `happyIntegration` option and the user-wide
   `[settings] happy_integration` config value, both fail-closed.
+- **Exported bot bridges** — a bridge program connects a chat service to one exported bot over
+  `GET /v0/exported-bots/connect`, authenticated by that export's own bridge token rather than a
+  daemon credential. The bridge is not a plugin and needs no SDK; see
+  [exported-bot-protocol.md](exported-bot-protocol.md) and the
+  [bridge recipe](recipe/exported-bot-bridge.md).
 - **Remote terminals** — Happy Agent's own libghostty-based terminal protocol. It is
   deliberately unspecified for outside consumers right now: it exists to work
   inside Happy and Happy Agent.

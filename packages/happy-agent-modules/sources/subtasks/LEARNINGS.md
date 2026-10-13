@@ -80,3 +80,15 @@ new list.
 Subtask session titles were too long for the sidebar. The creation tool now asks for 2–3 words,
 with 4 at most and only as a last resort, and directs task details into the message text. This is
 loose prompt guidance, not a runtime word-count limit or automatic truncation.
+
+## Conversation subtasks have no opening task
+
+A bot exported to Telegram needed one subtask per person, holding that person's conversation
+with the bot. `create` always sends an opening task and reports to the coordinator, which fits delegated
+work but not a chat someone else drives. `createConversation` creates a shared-filesystem subtask
+under the same eligibility, depth, and sibling-order rules, with no opening task and no automatic
+report to its coordinator. The caller's metadata, such as the exported bot flag and the first mode, is
+stored beside the subtask's own fields, which always win. The calling module delivers every
+message itself. The subtask is marked `subtaskConversation`, and its instructions say it holds a
+conversation for its parent instead of telling it to report its progress there, which would have
+sent every chat to the bot.

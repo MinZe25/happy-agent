@@ -13,6 +13,13 @@
   stamped human input is trusted; the generated assistant call remains untrusted. The usual
   preferential retention and incomplete-user-evidence checks apply to requests too.
 
+- Exported bots made outside people's messages user-role messages with a real author, stamped
+  with the `guest` origin. Auto needed no change for them: evidence trusts only the positive
+  `user` origin, so a guest's message is recorded as untrusted context and rendered as an agent
+  message, never as user authorization. The gym proves a guest's request for an escalated command
+  is denied while the same request from the owner is allowed. Keep the `user`-only check; never
+  widen it to "any human origin".
+
 - The reviewer already accounts for explicit informed user approval after a denial, but the
   agent-facing refusal used to forbid all retries without explaining that path. Agents therefore
   treated a prior denial as permanent even after the user authorized the exact action and its

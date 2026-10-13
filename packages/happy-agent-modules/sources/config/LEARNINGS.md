@@ -291,3 +291,11 @@ for that table, overwriting the valid global account list and preventing configu
 on the next restart or update. Omitted route fields must stay omitted so layer merging retains
 lower-priority accounts. Test the actual runtime writer followed by repeated configuration loads;
 valid existing runtime files must load without a migration or user configuration rewrite.
+
+## The Telegram Bot API server is a machine setting
+
+Telegram exports started as `[channels.telegram.<bot>]` tables holding the token and allowlist.
+People wanted the Chief of Staff to create and change them on the fly instead, so they moved to
+the exported bots module's database table and need no reload. Only `[telegram] api_url` remains in
+configuration, for a self-hosted Bot API server. It is dropped from the project layer and is not
+something a tool can set, because whichever server it names receives every bot token.

@@ -26,10 +26,8 @@ describe("standalone message authorship", () => {
                     ? history
                     : undefined;
             }, "the standalone message to complete");
-            await expect(gym.client.getUsers(["alice123"])).rejects.toMatchObject({
-                status: 404,
-                code: "not_found",
-            });
+            // Standalone resolves only exported bots' guests, so a client-made ID names no one.
+            await expect(gym.client.getUsers(["alice123"])).resolves.toEqual({ users: [] });
             await gym.restart();
             const retried = await gym.client.sendMessage(gym.defaultSessionId, {
                 ...request,

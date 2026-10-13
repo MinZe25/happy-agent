@@ -98,6 +98,12 @@ import {
     type ArtifactSourceInput,
 } from "../artifacts/index.js";
 import { ArtifactDataModule } from "../artifactData/index.js";
+import {
+    EXPORTED_BOT_MAX_FRAME_BYTES,
+    type ExportedBotsModule,
+    type ExportedBotSocket,
+    type PreparedExportedBotSocket,
+} from "../exportedBots/index.js";
 import { ChatMediaModule } from "../chatMedia/index.js";
 import { ServicesModule, ServiceError, ServiceAccessError } from "../services/index.js";
 import { ServiceHttpTunnel } from "./ServiceHttpTunnel.js";
@@ -200,6 +206,7 @@ import {
     type TerminalScope,
 } from "../terminals/index.js";
 import {
+    isTeamGuest,
     teamUser,
     TEAM_ONBOARDING_PROFILE_VERSION,
     TeamAuthenticationError,
@@ -457,6 +464,7 @@ export class ApiModule implements AgentModule {
     readonly #artifacts: ArtifactsModule | undefined;
     readonly #artifactData: ApiArtifactData | undefined;
     readonly #chatMedia: ChatMediaModule | undefined;
+    readonly #exportedBots: ExportedBotsModule | undefined;
     readonly #live: LiveModule | undefined;
     readonly #runners: RunnersModule | undefined;
     readonly #projects: ProjectsModule;
@@ -520,6 +528,11 @@ export class ApiModule implements AgentModule {
         perMessageDeflate: false,
     });
     readonly #bridges: BridgesModule | undefined;
+    readonly #exportedBotWebSockets = new WebSocketServer({
+        maxPayload: EXPORTED_BOT_MAX_FRAME_BYTES,
+        noServer: true,
+        perMessageDeflate: false,
+    });
     readonly #serviceTunnels = new Map<ServiceHttpTunnel, string>();
     readonly #serviceAdmissions = new Map<string, number>();
     #serviceAttachmentCount = 0;
@@ -590,6 +603,7 @@ export class ApiModule implements AgentModule {
         artifactData?: ArtifactDataModule,
         chatMedia?: ChatMediaModule,
         bridges?: BridgesModule,
+        exportedBots?: ExportedBotsModule,
     ) {
         this.#abort = abort;
         this.#config = config;
@@ -629,6 +643,7 @@ export class ApiModule implements AgentModule {
                 : new ApiArtifactData(artifactData, this.#streams);
         this.#chatMedia = chatMedia;
         this.#bridges = bridges;
+        this.#exportedBots = exportedBots;
     }
 
     readonly beforeStart = async (
@@ -753,6 +768,8 @@ export class ApiModule implements AgentModule {
         this.#liveWebSockets.close();
         for (const client of this.#bridgeWebSockets.clients) client.terminate();
         this.#bridgeWebSockets.close();
+        for (const client of this.#exportedBotWebSockets.clients) client.terminate();
+        this.#exportedBotWebSockets.close();
         this.#runnerWebSockets.close();
         await this.#workspaceProxy.close();
     }
@@ -928,8 +945,7 @@ export class ApiModule implements AgentModule {
                 throw notFound("The requested skill endpoint does not exist.");
             }
             if (request.method === "GET" && url.pathname === "/v0/users") {
-                if (!this.#team.enabled)
-                    throw notFound("Team users are unavailable in standalone mode.");
+                // Standalone has one person, described by the profile; only guests are users.
                 const parameters = url.searchParams.getAll("ids");
                 const ids =
                     parameters.length === 0 || parameters[0] === ""
@@ -938,7 +954,9 @@ export class ApiModule implements AgentModule {
                 if (parameters.length > 1 || !Value.Check(userIdsSchema, ids)) {
                     throw invalidRequest("Provide one list of at most 100 valid Happy user IDs.");
                 }
-                const users = await this.#team.getUsers(ctx, ids);
+                const users = (await this.#team.getUsers(ctx, ids)).filter(
+                    (user) => this.#team.enabled || isTeamGuest(user),
+                );
                 sendJson(response, 200, {
                     users: users.map((user) => ({
                         id: user.id,
@@ -949,17 +967,24 @@ export class ApiModule implements AgentModule {
                         photo: user.photo === null ? null : { thumbhash: user.photo.thumbhash },
                         version: user.version,
                         updatedAt: user.updatedAt,
+                        kind: isTeamGuest(user) ? "guest" : "member",
+                        canLogIn: !isTeamGuest(user),
                     })),
                 });
                 return;
             }
             const userPhoto = /^\/v0\/users\/([^/]+)\/photo$/.exec(url.pathname);
             if (request.method === "GET" && userPhoto !== null) {
-                if (!this.#team.enabled)
-                    throw notFound("Team users are unavailable in standalone mode.");
                 const userId = decodeURIComponent(userPhoto[1] as string);
                 if (!Value.Check(cuid2Schema, userId)) {
                     throw invalidRequest("Provide a valid Happy user ID.");
+                }
+                if (!this.#team.enabled) {
+                    // Standalone users are guests, and guests have no photo.
+                    const user = await this.#team.getUser(ctx, userId);
+                    if (user === undefined || !isTeamGuest(user)) {
+                        throw notFound("The user does not exist.");
+                    }
                 }
                 const photo = await this.#team.getUserPhoto(ctx, userId);
                 if (photo === undefined) throw notFound("The user has no photo.");
@@ -1599,6 +1624,7 @@ export class ApiModule implements AgentModule {
             });
             return true;
         }
+        if (await this.#handleExportedBotUpgrade(ctx, request, socket, head)) return true;
         if (await this.handleRemoteAttachment(ctx, request, socket, head)) return true;
         const live = await this.prepareLiveSocket(
             ctx,
@@ -1709,6 +1735,57 @@ export class ApiModule implements AgentModule {
         }
         this.#webSockets.handleUpgrade(request, socket, head, (webSocket) => {
             prepared.attach(new WebSocketDuplex(createNodeBinaryWebSocket(webSocket)));
+        });
+        return true;
+    }
+
+    /**
+     * `GET /v0/exported-bots/connect`: a bridge, admitted by its export's own bridge token and
+     * nothing else, so neither the API token nor team sign-in applies.
+     */
+    async prepareExportedBotSocket(
+        ctx: Context,
+        url: URL,
+        authorization: string | string[] | undefined,
+    ): Promise<PreparedExportedBotSocket> {
+        if (this.#exportedBots === undefined) return { handled: false };
+        return await this.#exportedBots.prepareSocket(ctx, url, authorization);
+    }
+
+    async #handleExportedBotUpgrade(
+        ctx: Context,
+        request: IncomingMessage,
+        socket: Socket,
+        head: Buffer,
+    ): Promise<boolean> {
+        const prepared = await this.prepareExportedBotSocket(
+            ctx,
+            requestUrl(request),
+            request.headers.authorization,
+        );
+        if (!prepared.handled) return false;
+        if ("rejection" in prepared) {
+            writeSocketError(socket, prepared.rejection);
+            return true;
+        }
+        this.#exportedBotWebSockets.handleUpgrade(request, socket, head, (webSocket) => {
+            const socket: ExportedBotSocket = {
+                send: (text) => webSocket.send(text),
+                close: (code, reason) => webSocket.close(code, reason),
+                terminate: () => webSocket.terminate(),
+                ping: () => webSocket.ping(),
+                get bufferedAmount() {
+                    return webSocket.bufferedAmount;
+                },
+            };
+            const binding = prepared.attach(socket);
+            webSocket.on("message", (data, binary) =>
+                binding.message(binary ? undefined : data.toString()),
+            );
+            webSocket.on("pong", () => binding.pong());
+            webSocket.on("close", () => binding.closed());
+            // A failed socket closes next, and the close is what the export acts on.
+            webSocket.on("error", () => undefined);
         });
         return true;
     }

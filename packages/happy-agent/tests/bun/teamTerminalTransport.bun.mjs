@@ -39,6 +39,7 @@ test("team terminal upgrades survive asynchronous authentication and carry binar
             },
             prepareTerminalSocket,
             prepareRunnerSocket: () => ({ handled: false }),
+            prepareExportedBotSocket: async () => ({ handled: false }),
             prepareLiveSocket: async () => ({ handled: false }),
             prepareBridgeSocket: async () => ({ handled: false }),
             handleUpgrade: async (ctx, request, socket, head) => {

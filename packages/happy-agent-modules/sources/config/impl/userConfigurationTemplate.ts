@@ -225,6 +225,11 @@ export const HAPPY_TOML_TEMPLATE = `# Happy configuration for Happy Agent.
 # [gemini]
 # api_key = "your-gemini-api-key"
 
+# The Chief of Staff exports bots to Telegram and keeps each export in the database. Set
+# api_url only to send every exported bot's requests to a self-hosted Bot API server.
+# [telegram]
+# api_url = "https://api.telegram.org"
+
 # Extra folders to scan for skills, beside ~/.agents/skills. Each folder holds skill directories
 # with a SKILL.md, exactly like ~/.agents/skills. Prefer absolute paths; a ~ prefix or a relative
 # entry is resolved against your home folder. A project's own happy.toml may name folders too,

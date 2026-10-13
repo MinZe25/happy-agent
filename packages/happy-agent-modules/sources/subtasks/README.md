@@ -21,6 +21,10 @@ workspace's ordered agent series, whose order is separate.
 Archival stops the target and descendants but marks only the target archived, preserving its
 history. A workspace-bound subtask and its workspace archive together in one transaction, from
 either side; a shared-filesystem subtask never archives the folder it shares.
+Another module may create a conversation subtask with `createConversation`: it shares the parent's
+folder, has no opening task, is marked `subtaskConversation`, and does not report its runs to the
+parent, because that module delivers its messages itself. The exported bots module holds each
+guest's chat this way.
 Archival is final: a subtask is never restored. Durable Functions owns post-commit compute
 cleanup. Agent Base remains unchanged.
 Coordinators are told to mention a subtask as `<happy-agent id="…"/>` with its agent ID, and

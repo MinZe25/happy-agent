@@ -19,6 +19,11 @@ never supply human authorship. Retries and restarts preserve the original author
 content. History keeps profile text out of user messages and public history; Team separately owns
 model-facing system notifications when the sender or their displayed profile changes.
 
+A guest of an exported bot is a person too, so a message stamped with the guest origin is archived
+as a user message with the guest's ID, in either mode. Archiving it as an agent message would have
+hidden who wrote it. Only the role and author follow; the trust the user origin carries elsewhere
+is decided by each consumer, and none of them accepts the guest origin.
+
 ## Requested tools are user content followed by a separate assistant call
 
 User input is no longer just text or images. Preserve `tool_call_request` unchanged in pending

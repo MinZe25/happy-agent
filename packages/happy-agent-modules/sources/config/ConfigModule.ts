@@ -62,6 +62,7 @@ import { modelServiceTierOptions } from "./impl/modelServiceTierOptions.js";
 import { readGlobalInstructions } from "./impl/readGlobalInstructions.js";
 import { HAPPY_TOML_TEMPLATE, MCP_TOML_TEMPLATE } from "./impl/userConfigurationTemplate.js";
 import { readSecurityDocument } from "./impl/readSecurityDocument.js";
+import { DEFAULT_TELEGRAM_API_URL, telegramApiUrlSchema } from "./TelegramConfig.js";
 import {
     MAX_RUNNERS,
     runnerConfigSchema,
@@ -439,6 +440,12 @@ const partialValuesSchema = Type.Object(
         ),
         profile: Type.Optional(profileBootstrapSchema),
         api: Type.Optional(apiConfigSchema),
+        telegram: Type.Optional(
+            Type.Object(
+                { api_url: Type.Optional(telegramApiUrlSchema) },
+                { additionalProperties: false },
+            ),
+        ),
         connections: Type.Optional(remoteConnectionsConfigSchema),
         runners: Type.Optional(runnersConfigSchema),
         docker: Type.Optional(dockerInputSchema),
@@ -775,6 +782,12 @@ const resolvedValuesSchema = Type.Object(
     {
         profile: Type.Optional(profileBootstrapSchema),
         api: Type.Optional(apiConfigSchema),
+        telegram: Type.Optional(
+            Type.Object(
+                { apiUrl: Type.Optional(telegramApiUrlSchema) },
+                { additionalProperties: false },
+            ),
+        ),
         connections: Type.Optional(remoteConnectionsConfigSchema),
         runners: Type.Optional(runnersConfigSchema),
         docker: Type.Optional(
@@ -1530,6 +1543,17 @@ export class ConfigModule implements AgentModule {
         return join(this.configuration.paths.agentHome, "media", sha256.slice(0, 2), sha256);
     }
 
+    /**
+     * The private folder where an exported bot keeps files people sent until they are taken in,
+     * one per export kind and account.
+     */
+    exportedBotFilesPath(kind: string, account: string): string {
+        if (!/^[a-z][a-z0-9_]{0,31}$/.test(kind) || !/^[A-Za-z0-9_-]{1,128}$/.test(account)) {
+            throw new Error("The exported bot cannot name a files folder.");
+        }
+        return join(this.configuration.paths.agentHome, "exported-bots", kind, account);
+    }
+
     /** Where one artifact upload's bytes arrive before they are stored by their digest. */
     artifactUploadPath(uploadId: string): string {
         if (!Value.Check(cuid2Schema, uploadId)) {
@@ -1917,6 +1941,15 @@ export class ConfigModule implements AgentModule {
             ...(runners.default === undefined ? {} : { defaultId: runners.default }),
             entries: structuredClone(runners.entries),
         };
+    }
+
+    /**
+     * The Telegram Bot API server every Telegram export talks to: `[telegram] api_url` in the
+     * user `happy.toml`, for a self-hosted server, or Telegram's own. A project cannot set it,
+     * because it decides where bot tokens are sent.
+     */
+    get telegramApiUrl(): string {
+        return this.configuration.values.telegram?.apiUrl ?? DEFAULT_TELEGRAM_API_URL;
     }
 
     /** Machine-owned remote roster; callers never receive mutable configuration state. */
@@ -3032,6 +3065,7 @@ export function parseHappyAgentConfigToml(source: string): {
         "providers",
         "settings",
         "skills",
+        "telegram",
         "theme",
         "workspace",
     ]);
@@ -3045,6 +3079,7 @@ export function parseHappyAgentConfigToml(source: string): {
     const features = readFeatures(table.features, recordUnknown);
     const feature = readFeature(table.feature, recordUnknown);
     const gemini = readGemini(table.gemini, recordUnknown);
+    const telegram = readTelegram(table.telegram, recordUnknown);
     const workspace = readWorkspace(table.workspace, recordUnknown);
     const docker = readDocker(table.docker, recordUnknown);
     const runners = readRunners(table.runners);
@@ -3073,6 +3108,7 @@ export function parseHappyAgentConfigToml(source: string): {
         ...(feature === undefined ? {} : { feature }),
         ...(docker === undefined ? {} : { docker }),
         ...(gemini === undefined ? {} : { gemini }),
+        ...(telegram === undefined ? {} : { telegram }),
         ...(mcpServers === undefined ? {} : { mcp_servers: mcpServers }),
         ...(network === undefined ? {} : { network }),
         ...(observation === undefined ? {} : { observation }),
@@ -3313,6 +3349,9 @@ function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigVal
         }
         if (partial.gemini !== undefined)
             Object.assign(merged.gemini, normalizeGemini(partial.gemini));
+        if (partial.telegram?.api_url !== undefined) {
+            merged.telegram = { apiUrl: partial.telegram.api_url };
+        }
         if (partial.mcp_servers !== undefined) {
             Object.assign(merged.mcpServers, normalizeMcpServers(partial.mcp_servers));
         }
@@ -3898,6 +3937,8 @@ function withoutProjectMachineSettings(values: PartialValues): PartialValues {
     const {
         skill_enablement: _skillEnablement,
         api: _api,
+        // The Bot API server receives every bot token, so a checked-in file must not choose it.
+        telegram: _telegram,
         connections: _connections,
         runners: _runners,
         docker: _docker,
@@ -4217,6 +4258,19 @@ function readGemini(
         ["api_key"],
         partialValuesSchema.properties.gemini!,
     ) as PartialValues["gemini"];
+}
+
+function readTelegram(
+    value: TomlValue | undefined,
+    unknown: (path: string) => void,
+): PartialValues["telegram"] {
+    return readTableValues(
+        value,
+        "telegram",
+        unknown,
+        ["api_url"],
+        partialValuesSchema.properties.telegram!,
+    ) as PartialValues["telegram"];
 }
 
 function readSkills(

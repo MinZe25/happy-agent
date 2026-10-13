@@ -229,8 +229,12 @@ For each requested email, call `invite_happy_team_member` from the active local 
 }
 ```
 
-Invitations grant ordinary membership, not administrator access. Happy Cloud also requires the
-connected user to be an active administrator of this specific team. WorkOS controls email
+Invitations grant ordinary membership, not administrator access. Inside the team node, though,
+every member's own messages carry the same authority as the owner's, including in Auto permission
+review, so invite only people the user trusts with the node. People let in through an
+[exported bot](exported-bot-telegram.md) are different: they are guests who can never sign in, and
+their messages authorize nothing. Happy Cloud also requires the connected user to be an active
+administrator of this specific team. WorkOS controls email
 delivery; successful invitation creation does not prove the message was delivered. Report the
 actual result, and share any acceptance link only with its intended recipient. See
 [Email invitations](../happy-teams.md#email-invitations) for acceptance and delivery caveats.

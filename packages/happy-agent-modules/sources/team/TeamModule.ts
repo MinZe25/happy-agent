@@ -25,12 +25,15 @@ import { RefreshingJwks } from "./RefreshingJwks.js";
 import { TeamProfileInputError } from "./TeamProfileInputError.js";
 import { TeamProfileVersionConflictError } from "./TeamProfileVersionConflictError.js";
 import {
+    createTeamGuestInputSchema,
     createTeamUserInputSchema,
+    isTeamGuest,
     preprocessedTeamUserPhotoSchema,
     teamUserPhotoAssetSchema,
     teamUserSchema,
     teamUserVersionSchema,
     updateTeamProfileInputSchema,
+    type CreateTeamGuestInput,
     type CreateTeamUserInput,
     type PreprocessedTeamUserPhoto,
     type TeamAuthentication,
@@ -49,6 +52,7 @@ export const TEAM_USER_PHOTOS_MIGRATION_KEY = "002-user-photos";
 export const TEAM_USER_PROFILE_FIELDS_MIGRATION_KEY = "003-profile-fields";
 export const TEAM_DRAFTS_MIGRATION_KEY = "004-drafts";
 export const TEAM_USER_IDENTITIES_MIGRATION_KEY = "005-identities";
+export const TEAM_GUESTS_MIGRATION_KEY = "006-guests";
 /** Stable optimistic version exposed before an organization member has a durable local user. */
 export const TEAM_ONBOARDING_PROFILE_VERSION = "00000000-0000-7000-8000-00000020eab6";
 
@@ -108,13 +112,26 @@ export type TeamDraftUpdatedListener = (
     event: TeamDraftUpdatedEvent,
 ) => void | Promise<void>;
 
-/** Team deployment identity, membership, WorkOS authentication, and durable user storage. */
+/**
+ * Team deployment identity, membership, member authentication, and durable user storage. Guests,
+ * the people exported bots let in, are stored here in both modes, and no sign-in path accepts one.
+ */
 export class TeamModule<Database extends AgentDatabase = AgentDatabase> implements AgentModule<
     never,
     Database
 > {
     readonly name = "team";
-    readonly beforeStart?: () => AgentModuleHooks<never, Database>;
+    /**
+     * Guests reach this installation in both modes, so their sender notifications run in both.
+     * Member sign-in and its key refresh exist only in team mode.
+     */
+    readonly beforeStart = (): AgentModuleHooks<never, Database> => ({
+        systemNotificationsTransact: (ctx, scope, boundary) =>
+            teamSenderNotifications(ctx, this, scope, boundary),
+        afterStart: (ctx) => {
+            this.#startJwksRefresh(ctx);
+        },
+    });
     readonly migrations: readonly AgentModuleMigration<Database>[] = [
         [
             TEAM_USERS_MIGRATION_KEY,
@@ -277,6 +294,68 @@ export class TeamModule<Database extends AgentDatabase = AgentDatabase> implemen
                 await run(sql`DROP TABLE happy_agent_team_users_previous`);
             },
         ],
+        [
+            TEAM_GUESTS_MIGRATION_KEY,
+            async (_ctx, database) => {
+                // Guests are users no sign-in method can prove. The released identity check
+                // allows only sign-in methods, and SQLite cannot change a check in place, so both
+                // tables are rebuilt the way the identity migration rebuilt them.
+                const run = async (statement: ReturnType<typeof sql>) =>
+                    await agentDatabaseRun(database, statement);
+                await run(
+                    sql`ALTER TABLE ${sql.raw(USERS_TABLE)} RENAME TO happy_agent_team_users_previous`,
+                );
+                await run(
+                    sql`ALTER TABLE ${sql.raw(USER_PHOTOS_TABLE)} RENAME TO happy_agent_team_user_photos_previous`,
+                );
+                await run(
+                    sql`CREATE TABLE ${sql.raw(USERS_TABLE)} (
+                        id TEXT PRIMARY KEY,
+                        authentication TEXT NOT NULL
+                            CHECK (authentication IN ('workos', 'jwt', 'guest')),
+                        subject TEXT NOT NULL,
+                        first_name TEXT NOT NULL,
+                        last_name TEXT,
+                        is_owner INTEGER NOT NULL CHECK (is_owner IN (0, 1)),
+                        email TEXT,
+                        profile_version TEXT,
+                        created_at INTEGER,
+                        updated_at INTEGER,
+                        UNIQUE (authentication, subject),
+                        CHECK (authentication <> 'guest' OR is_owner = 0)
+                    )`,
+                );
+                await run(
+                    sql`INSERT INTO ${sql.raw(USERS_TABLE)}
+                        (id, authentication, subject, first_name, last_name, is_owner, email,
+                            profile_version, created_at, updated_at)
+                        SELECT id, authentication, subject, first_name, last_name, is_owner, email,
+                            profile_version, created_at, updated_at
+                        FROM happy_agent_team_users_previous`,
+                );
+                await run(
+                    sql`CREATE TABLE ${sql.raw(USER_PHOTOS_TABLE)} (
+                        user_id TEXT PRIMARY KEY REFERENCES ${sql.raw(USERS_TABLE)} (id)
+                            ON DELETE CASCADE,
+                        photo_bytes BLOB NOT NULL,
+                        content_type TEXT NOT NULL CHECK (content_type = 'image/webp'),
+                        content_hash TEXT NOT NULL,
+                        thumbhash TEXT NOT NULL,
+                        width INTEGER NOT NULL,
+                        height INTEGER NOT NULL
+                    )`,
+                );
+                await run(
+                    sql`INSERT INTO ${sql.raw(USER_PHOTOS_TABLE)}
+                        (user_id, photo_bytes, content_type, content_hash, thumbhash, width, height)
+                        SELECT user_id, photo_bytes, content_type, content_hash, thumbhash, width,
+                            height
+                        FROM happy_agent_team_user_photos_previous`,
+                );
+                await run(sql`DROP TABLE happy_agent_team_user_photos_previous`);
+                await run(sql`DROP TABLE happy_agent_team_users_previous`);
+            },
+        ],
     ] as readonly AgentModuleMigration<Database>[];
 
     readonly #config: ConfigModule;
@@ -342,13 +421,6 @@ export class TeamModule<Database extends AgentDatabase = AgentDatabase> implemen
             });
             this.#verify = async (accessToken) => (await verifier.verify(accessToken)).userId;
         }
-        this.beforeStart = () => ({
-            systemNotificationsTransact: (ctx, scope, boundary) =>
-                teamSenderNotifications(ctx, this, scope, boundary),
-            afterStart: (ctx) => {
-                this.#startJwksRefresh(ctx);
-            },
-        });
     }
 
     /** Stop background key downloads; the runtime calls this at shutdown. */
@@ -436,18 +508,23 @@ export class TeamModule<Database extends AgentDatabase = AgentDatabase> implemen
         let requestCtx = await this.authenticateIdentity(ctx, authorization);
         const identity = this.#requireIdentity(requestCtx);
         const user = await this.findUserByIdentity(requestCtx, identity);
-        if (user !== undefined) requestCtx = withTeamUser(requestCtx, user);
+        // Identities are keyed by sign-in method, so no token can name a guest. Never trust it.
+        if (user !== undefined && !isTeamGuest(user)) requestCtx = withTeamUser(requestCtx, user);
         return requestCtx;
     }
 
     async currentUser(ctx: Context): Promise<TeamUser | undefined> {
         const identity = teamIdentity(ctx);
         if (identity === undefined) return undefined;
-        return await this.findUserByIdentity(ctx, identity);
+        const user = await this.findUserByIdentity(ctx, identity);
+        return user === undefined || isTeamGuest(user) ? undefined : user;
     }
 
     /** Bind an independently owned personal connection to its locally onboarded member. */
     connectionContext(ctx: Context, user: TeamUser): Context {
+        if (user.authentication === "guest") {
+            throw new TeamAuthenticationError();
+        }
         return withTeamUser(
             withTeamIdentity(ctx, { authentication: user.authentication, subject: user.subject }),
             user,
@@ -477,6 +554,65 @@ export class TeamModule<Database extends AgentDatabase = AgentDatabase> implemen
             await this.#insertUser(txCtx, user);
             this.#publish(txCtx, { previousVersion: null, user });
             return user;
+        });
+    }
+
+    /**
+     * Create a guest: a person who reaches an exported bot from an outside chat service. A guest
+     * has an opaque identity no sign-in method can prove, is never the owner, and has no email or
+     * photo. Only team mode announces the new profile, because only team clients resolve users.
+     */
+    async createGuest(ctx: Context, input: CreateTeamGuestInput): Promise<TeamUser> {
+        if (!Value.Check(createTeamGuestInputSchema, input)) {
+            throw new TeamProfileInputError("The guest is not valid.");
+        }
+        const now = Date.now();
+        const user: TeamUser = {
+            createdAt: now,
+            email: null,
+            ...guestName(input.name),
+            id: createId(),
+            isOwner: false,
+            photo: null,
+            updatedAt: now,
+            version: createTeamUserVersion(),
+            authentication: "guest",
+            subject: createId(),
+        };
+        return await ctx.inTx(async (txCtx) => {
+            await this.#insertUser(txCtx, user);
+            if (this.enabled) this.#publish(txCtx, { previousVersion: null, user });
+            return user;
+        });
+    }
+
+    /** Give a guest the name their chat service now shows. Members are never renamed here. */
+    async renameGuest(
+        ctx: Context,
+        userId: string,
+        input: CreateTeamGuestInput,
+    ): Promise<TeamUser | undefined> {
+        if (!Value.Check(createTeamGuestInputSchema, input)) {
+            throw new TeamProfileInputError("The guest is not valid.");
+        }
+        const name = guestName(input.name);
+        return await ctx.inTx(async (txCtx) => {
+            const current = await this.getUser(txCtx, userId);
+            if (current === undefined || !isTeamGuest(current)) return undefined;
+            if (current.firstName === name.firstName && current.lastName === name.lastName) {
+                return current;
+            }
+            const updated: TeamUser = {
+                ...current,
+                ...name,
+                updatedAt: Date.now(),
+                version: createTeamUserVersion(current.version),
+            };
+            await this.#writeUser(txCtx, updated);
+            if (this.enabled) {
+                this.#publish(txCtx, { previousVersion: current.version, user: updated });
+            }
+            return updated;
         });
     }
 
@@ -603,6 +739,11 @@ export class TeamModule<Database extends AgentDatabase = AgentDatabase> implemen
 
     async listUsers(ctx: Context): Promise<readonly TeamUser[]> {
         return await queryTeamUsers(ctx);
+    }
+
+    /** Every member who can sign in, leaving guests out. */
+    async listMembers(ctx: Context): Promise<readonly TeamUser[]> {
+        return await queryTeamUsers(ctx, { membersOnly: true });
     }
 
     /** Store already-normalized media for module callers that already own preprocessing. */
@@ -863,6 +1004,36 @@ function splitProfileName(name: string): {
     }
     const lastName = parts.join(" ");
     return { firstName, lastName: lastName.length === 0 ? null : lastName };
+}
+
+/** Characters a stored name may not hold: controls and invisible direction marks. */
+const FORBIDDEN_NAME_CHARACTERS =
+    // oxlint-disable-next-line no-control-regex
+    /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f]/gu;
+const MAX_NAME_LENGTH = 128;
+
+/**
+ * A chat service's display name as a stored first and last name. Forbidden characters become
+ * spaces, each part keeps at most 128 UTF-16 units without splitting a character, and a name with
+ * nothing left becomes "Guest".
+ */
+function guestName(name: string): { readonly firstName: string; readonly lastName: string | null } {
+    const parts = name.replace(FORBIDDEN_NAME_CHARACTERS, " ").trim().split(/\s+/u);
+    const firstName = truncateName(parts.shift() ?? "");
+    const lastName = truncateName(parts.join(" "));
+    return {
+        firstName: firstName.length === 0 ? "Guest" : firstName,
+        lastName: lastName.length === 0 ? null : lastName,
+    };
+}
+
+function truncateName(name: string): string {
+    let result = "";
+    for (const character of name) {
+        if (result.length + character.length > MAX_NAME_LENGTH) break;
+        result += character;
+    }
+    return result.trim();
 }
 
 function deepFreeze<Value>(value: Value): Value {

@@ -137,7 +137,7 @@ export class HappyModule extends HappyConnection implements AgentModule<AnyAgent
         this.#agents = agents;
         return {
             afterStart: async () => {
-                const users = await this.#team.listUsers(this.#context!);
+                const users = await this.#team.listMembers(this.#context!);
                 await Promise.all(
                     users.map(async (user) => {
                         await this.#personalConnection(user);

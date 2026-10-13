@@ -34,6 +34,7 @@ import { LiveModule } from "../live/index.js";
 import { AutoModule } from "../auto/index.js";
 import { BotsModule } from "../bots/index.js";
 import { BridgesModule } from "../bridges/index.js";
+import { ExportedBotsModule } from "../exportedBots/index.js";
 import { CollaborationModule } from "../collaboration/index.js";
 import { SubtasksModule } from "../subtasks/index.js";
 import { CompactionsModule } from "../compactions/index.js";
@@ -142,6 +143,7 @@ export interface HappyAgentRuntimeModules {
     readonly bots: BotsModule;
     readonly bridges: BridgesModule;
     readonly chatMedia: ChatMediaModule;
+    readonly exportedBots: ExportedBotsModule;
     readonly collaboration: CollaborationModule;
     readonly subtasks: SubtasksModule;
     readonly cloud: CloudModule;
@@ -568,6 +570,16 @@ export async function startHappyAgentRuntime(
         );
         const goal = new GoalModule();
         const chatMedia = new ChatMediaModule(config, compute.computeModule, history);
+        const exportedBots = new ExportedBotsModule(
+            config,
+            bots,
+            subtasks,
+            durableFunctions,
+            chatMedia,
+            compute.computeModule,
+            team,
+        );
+        registerShutdown("exportedBots", async () => await exportedBots.close());
         const gemini = new GeminiModule(config, compute.computeModule, chatMedia);
         const imageGeneration = new ImageGenerationModule(config, chatMedia);
         menuBar = new MenuBarModule(config);
@@ -623,6 +635,7 @@ export async function startHappyAgentRuntime(
             artifactData,
             chatMedia,
             bridges,
+            exportedBots,
         );
         api = apiModule;
 
@@ -636,6 +649,7 @@ export async function startHappyAgentRuntime(
             bots,
             bridges,
             chatMedia,
+            exportedBots,
             collaboration,
             subtasks,
             cloud,
@@ -711,7 +725,9 @@ export async function startHappyAgentRuntime(
             compactions,
             slashCommands,
             contextWindow,
-            ...(team.enabled ? [team] : [profile]),
+            // Team stores exported bots' guests in both modes; standalone adds its one profile.
+            team,
+            ...(team.enabled ? [] : [profile]),
             git,
             durableFunctions,
             globalSkills,
@@ -733,6 +749,7 @@ export async function startHappyAgentRuntime(
             secrets,
             collaboration,
             subtasks,
+            exportedBots,
             workflows,
             scheduling,
             userInput,

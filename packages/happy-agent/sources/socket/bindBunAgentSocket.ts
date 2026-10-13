@@ -3,9 +3,12 @@ import { join } from "node:path";
 import { isWindowsNamedPipe, readAgentSocketInformation } from "./agentSocketPaths.js";
 
 import {
+    EXPORTED_BOT_MAX_FRAME_BYTES,
     socketRejectionBody,
     type BridgeWebSocketBinding,
+    type ExportedBotSocketBinding,
     type PreparedBridgeSocket,
+    type PreparedExportedBotSocket,
     type PreparedHappyAgentRuntime,
     type PreparedRunnerSocket,
     type PreparedTerminalSocket,
@@ -60,15 +63,24 @@ interface BridgeWebSocketData {
     binding?: BridgeWebSocketBinding;
 }
 
+interface ExportedBotWebSocketData {
+    readonly kind: "exportedBot";
+    readonly prepared: Extract<PreparedExportedBotSocket, { readonly attach: unknown }>;
+    binding?: ExportedBotSocketBinding;
+}
+
 type BunWebSocketData =
     | TerminalWebSocketData
     | LiveWebSocketData
     | RunnerWebSocketData
-    | BridgeWebSocketData;
+    | BridgeWebSocketData
+    | ExportedBotWebSocketData;
 
 interface BunTerminalWebSocket extends BunServerWebSocket {
     data: BunWebSocketData;
     send(data: string | Uint8Array, compress?: boolean): number;
+    ping(): number;
+    terminate(): void;
 }
 
 export interface BunWebSocketServer {
@@ -205,6 +217,28 @@ export function startBunHttpServer(
                     "The runner upgrade could not be completed.",
                 );
             }
+            const exportedBot = await prepared.api.prepareExportedBotSocket(
+                prepared.context("bun-exported-bot-websocket-upgrade"),
+                url,
+                request.headers.get("authorization") ?? undefined,
+            );
+            if (exportedBot.handled) {
+                if ("rejection" in exportedBot)
+                    return Response.json(socketRejectionBody(exportedBot.rejection), {
+                        headers: { "cache-control": "no-store" },
+                        status: exportedBot.rejection.status,
+                    });
+                const data: ExportedBotWebSocketData = {
+                    kind: "exportedBot",
+                    prepared: exportedBot,
+                };
+                if (server.upgrade(request, { data })) return undefined;
+                return socketResponse(
+                    500,
+                    "internal",
+                    "The bridge upgrade could not be completed.",
+                );
+            }
             const live = await prepared.api.prepareLiveSocket(
                 prepared.context("bun-live-websocket-upgrade"),
                 url,
@@ -278,6 +312,22 @@ export function startBunHttpServer(
                     );
                     return;
                 }
+                if (webSocket.data.kind === "exportedBot") {
+                    webSocket.data.binding = webSocket.data.prepared.attach({
+                        send: (text) => {
+                            webSocket.send(text, false);
+                        },
+                        close: (code, reason) => webSocket.close(code, reason),
+                        terminate: () => webSocket.terminate(),
+                        ping: () => {
+                            webSocket.ping();
+                        },
+                        get bufferedAmount() {
+                            return webSocket.getBufferedAmount();
+                        },
+                    });
+                    return;
+                }
                 if (webSocket.data.kind === "bridge") {
                     try {
                         webSocket.data.binding = webSocket.data.prepared.attach({
@@ -329,6 +379,20 @@ export function startBunHttpServer(
                 }
             },
             message(webSocket: BunTerminalWebSocket, message: string | Uint8Array) {
+                if (webSocket.data.kind === "exportedBot") {
+                    if (
+                        (typeof message === "string"
+                            ? Buffer.byteLength(message)
+                            : message.byteLength) > EXPORTED_BOT_MAX_FRAME_BYTES
+                    ) {
+                        webSocket.close(1009, "The message is too large.");
+                        return;
+                    }
+                    webSocket.data.binding?.message(
+                        typeof message === "string" ? message : undefined,
+                    );
+                    return;
+                }
                 if (webSocket.data.kind === "bridge") {
                     if (
                         typeof message !== "string" &&
@@ -367,14 +431,26 @@ export function startBunHttpServer(
                 }
                 webSocket.data.handlers?.message(Buffer.from(message));
             },
+            pong(webSocket: BunTerminalWebSocket) {
+                if (webSocket.data.kind === "exportedBot") webSocket.data.binding?.pong();
+            },
             close(webSocket: BunTerminalWebSocket) {
-                if (webSocket.data.kind === "live" || webSocket.data.kind === "bridge") {
+                if (
+                    webSocket.data.kind === "live" ||
+                    webSocket.data.kind === "bridge" ||
+                    webSocket.data.kind === "exportedBot"
+                ) {
                     webSocket.data.binding?.closed();
                     return;
                 }
                 webSocket.data.handlers?.close();
             },
             error(webSocket: BunTerminalWebSocket, error: Error) {
+                if (webSocket.data.kind === "exportedBot") {
+                    // The close that follows is what the export acts on.
+                    webSocket.terminate();
+                    return;
+                }
                 if (webSocket.data.kind === "bridge") {
                     webSocket.close(1011, "The bridge connection failed.");
                     return;

@@ -36,6 +36,8 @@ export const apiErrorCodeSchema = Type.Union([
     Type.Literal("bridge_unavailable"),
     Type.Literal("bridge_limit"),
     Type.Literal("port_unavailable"),
+    Type.Literal("unsupported_protocol"),
+    Type.Literal("exported_bot_unavailable"),
 ]);
 
 export type ApiErrorCode = Static<typeof apiErrorCodeSchema>;

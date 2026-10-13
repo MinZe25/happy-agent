@@ -213,6 +213,12 @@ export class BotsModule implements AgentModule {
         return structuredClone(await readBotByAgent(ctx, agentId));
     }
 
+    /** The built-in Chief of Staff, whatever it is named now, or undefined when it is absent. */
+    async chiefOfStaff(ctx: Context): Promise<BotRecord | undefined> {
+        const bots = await readBots(ctx);
+        return structuredClone(bots.find((bot) => bot.systemKey === CHIEF_OF_STAFF_SYSTEM_KEY));
+    }
+
     /**
      * Create the row, its folder, and its ordinary root agent in one database transaction.
      *

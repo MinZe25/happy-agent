@@ -20,10 +20,12 @@ import { WorkspacesModule } from "../workspaces/index.js";
 import {
     archivedMetadataSchema,
     archiveSubtaskInputSchema,
+    conversationSubtaskMetadataSchema,
     orderedSubtaskMetadataSchema,
     restoredMetadataSchema,
     versionedMetadataSchema,
     SUBTASK_ARCHIVE_FUNCTION,
+    createConversationSubtaskInputSchema,
     createSubtaskInputSchema,
     SUBTASK_START_FUNCTION,
     subtaskIdSchema,
@@ -31,6 +33,7 @@ import {
     subtaskStartSchema,
     SubtaskInputError,
     workspaceSubtaskMetadataSchema,
+    type CreateConversationSubtaskInput,
     type CreateSubtaskInput,
     type ArchiveSubtaskInput,
     type SubtaskResult,
@@ -366,6 +369,71 @@ export class SubtasksModule implements AgentModule {
         });
     }
 
+    /**
+     * Create a shared-filesystem subtask with no opening task, for a conversation another module
+     * delivers messages into itself, such as one guest's chat with an exported bot. It obeys
+     * the same eligibility, depth, and sibling-order rules as `create`. Nobody is waiting for an
+     * answer from it, so its coordinator receives no automatic report when it settles. Repeating
+     * the same agent ID under the same parent returns it unchanged.
+     */
+    async createConversation(
+        ctx: Context,
+        parentAgentId: string,
+        input: CreateConversationSubtaskInput,
+        agentId: string,
+    ): Promise<SubtaskResult> {
+        if (
+            !Value.Check(createConversationSubtaskInputSchema, input) ||
+            !Value.Check(subtaskIdSchema, parentAgentId) ||
+            !Value.Check(subtaskIdSchema, agentId)
+        ) {
+            throw new SubtaskInputError("The conversation subtask request is invalid.");
+        }
+        const agents = this.#requireAgents();
+        return await ctx.inTx(async (txCtx) => {
+            const existing = await agents.config(txCtx, agentId);
+            if (existing !== undefined) {
+                if (
+                    !this.isSubtask(existing) ||
+                    (await agents.parentOf(txCtx, agentId)) !== parentAgentId
+                ) {
+                    throw new SubtaskInputError(
+                        "That agent identity already belongs to another task.",
+                    );
+                }
+                return { agentId };
+            }
+            const parent = await this.#assertCanCreate(txCtx, parentAgentId);
+            const siblingKeys = (await this.#subtaskChildren(txCtx, parentAgentId))
+                .map((sibling) => this.siblingOrderKey(sibling.config))
+                .filter((key) => key !== null)
+                .sort();
+            const now = Date.now();
+            await agents.create(
+                txCtx,
+                {
+                    provenance: { createdAt: now },
+                    ...(parent.environment === undefined
+                        ? {}
+                        : { environment: parent.environment }),
+                    ...(parent.modules === undefined ? {} : { modules: parent.modules }),
+                    metadata: {
+                        ...input.metadata,
+                        ...this.#collaboration.unreportedAgentMetadata(),
+                        title: input.title,
+                        subtask: true,
+                        subtaskConversation: true,
+                        subtaskOrderKey: subtaskOrderKeyBetween(null, siblingKeys[0] ?? null),
+                        updatedAt: now,
+                        version: 1,
+                    },
+                },
+                { id: agentId, parent: parentAgentId },
+            );
+            return { agentId };
+        });
+    }
+
     async archive(
         ctx: Context,
         actingAgentId: string,
@@ -485,11 +553,14 @@ export class SubtasksModule implements AgentModule {
                 archiveSubtaskTool(this, scope.agent.id),
             ],
             instructions: async (ctx, scope) => {
-                if (this.isSubtask(await agents.config(ctx, scope.agent.id))) {
-                    return (
-                        "You are a user-visible subtask managed by your parent; users may talk to you directly. Keep your assigned work in this subtask and its workspace, and report progress, findings, diffs, and verification to your parent through send_agent_message. Prefer create_subtask by default only for substantial, distinct workstreams, such as changes across projects; handle small steps inline. Usually create second-level subtasks only on explicit user request. If the user explicitly asks for a subtask, use create_subtask within the two-level limit below your bot or task; explain if blocked. Use create_agent for internal research. Coordinate via send_agent_message and archive_subtask; do not wait for subtasks. Keep delegated work in the child subtask: ask its agent for progress, findings, diffs, verification, or follow-up changes instead of directly inspecting or modifying its files or running commands in its workspace. Direct access to another workspace often requires elevated permissions and review by the reviewer model; talking to its agent avoids unnecessary permission reviews. Archival stops the task and descendants and archives the task with its own workspace, if it has one; a shared folder stays. History is kept, but archival is final.\n\n" +
-                        SUBTASK_REFERENCE_INSTRUCTIONS
-                    );
+                const config = await agents.config(ctx, scope.agent.id);
+                if (this.isSubtask(config)) {
+                    // A conversation subtask answers whoever it is talking to; its parent hears
+                    // from it only when it chooses to write.
+                    const role = Value.Check(conversationSubtaskMetadataSchema, config?.metadata)
+                        ? "You are a user-visible subtask holding one conversation for your parent; users may talk to you directly."
+                        : "You are a user-visible subtask managed by your parent; users may talk to you directly. Keep your assigned work in this subtask and its workspace, and report progress, findings, diffs, and verification to your parent through send_agent_message.";
+                    return `${role} Prefer create_subtask by default only for substantial, distinct workstreams, such as changes across projects; handle small steps inline. Usually create second-level subtasks only on explicit user request. If the user explicitly asks for a subtask, use create_subtask within the two-level limit below your bot or task; explain if blocked. Use create_agent for internal research. Coordinate via send_agent_message and archive_subtask; do not wait for subtasks. Keep delegated work in the child subtask: ask its agent for progress, findings, diffs, verification, or follow-up changes instead of directly inspecting or modifying its files or running commands in its workspace. Direct access to another workspace often requires elevated permissions and review by the reviewer model; talking to its agent avoids unnecessary permission reviews. Archival stops the task and descendants and archives the task with its own workspace, if it has one; a shared folder stays. History is kept, but archival is final.\n\n${SUBTASK_REFERENCE_INSTRUCTIONS}`;
                 }
                 if (
                     (await this.#bots.forAgent(ctx, scope.agent.id)) !== undefined ||

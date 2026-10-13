@@ -16,6 +16,7 @@ export {
 } from "./TeamDraft.js";
 export {
     TEAM_DRAFTS_MIGRATION_KEY,
+    TEAM_GUESTS_MIGRATION_KEY,
     TEAM_USER_IDENTITIES_MIGRATION_KEY,
     TEAM_ONBOARDING_PROFILE_VERSION,
     TEAM_USERS_MIGRATION_KEY,
@@ -31,7 +32,9 @@ export {
 export { TeamProfileInputError } from "./TeamProfileInputError.js";
 export { TeamProfileVersionConflictError } from "./TeamProfileVersionConflictError.js";
 export {
+    createTeamGuestInputSchema,
     createTeamUserInputSchema,
+    isTeamGuest,
     preprocessedTeamUserPhotoSchema,
     teamUserNameSchema,
     teamUserPhotoAssetSchema,
@@ -40,12 +43,15 @@ export {
     teamUserVersionSchema,
     teamAuthenticationSchema,
     teamSubjectSchema,
+    teamUserAuthenticationSchema,
     updateTeamProfileInputSchema,
     workOSUserIdSchema,
+    type CreateTeamGuestInput,
     type CreateTeamUserInput,
     type PreprocessedTeamUserPhoto,
     type TeamAuthentication,
     type TeamUser,
+    type TeamUserAuthentication,
     type TeamUserPhotoAsset,
     type TeamUserPhotoMetadata,
     type UpdateTeamProfileInput,

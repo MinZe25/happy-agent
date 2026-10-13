@@ -4,13 +4,15 @@ import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 
-import { teamAuthenticationSchema, teamUserSchema, type TeamUser } from "../TeamUser.js";
+import { teamUserAuthenticationSchema, teamUserSchema, type TeamUser } from "../TeamUser.js";
 
 const filterSchema = Type.Object({
     id: Type.Optional(Type.String()),
     ids: Type.Optional(Type.Array(Type.String())),
     authentication: Type.Optional(Type.String()),
     subject: Type.Optional(Type.String()),
+    /** Only people who can sign in, leaving guests out. */
+    membersOnly: Type.Optional(Type.Boolean()),
 });
 
 const storedUserRowSchema = Type.Object(
@@ -27,7 +29,7 @@ const storedUserRowSchema = Type.Object(
         thumbhash: Type.Union([Type.String(), Type.Null()]),
         updated_at: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
         width: Type.Union([Type.Integer(), Type.Null()]),
-        authentication: teamAuthenticationSchema,
+        authentication: teamUserAuthenticationSchema,
         subject: Type.String(),
     },
     { additionalProperties: false },
@@ -44,6 +46,7 @@ export async function queryTeamUsers(
     if (filter.authentication !== undefined)
         predicates.push(sql`u.authentication = ${filter.authentication}`);
     if (filter.subject !== undefined) predicates.push(sql`u.subject = ${filter.subject}`);
+    if (filter.membersOnly === true) predicates.push(sql`u.authentication <> 'guest'`);
     if (filter.ids !== undefined)
         predicates.push(
             sql`u.id IN (${sql.join(

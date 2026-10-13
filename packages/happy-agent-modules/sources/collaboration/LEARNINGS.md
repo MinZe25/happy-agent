@@ -58,3 +58,12 @@ existing agent whose unguessable ID was shared with the sender. Explicitly disab
 messaging to direct creator and collaborator relationships. Unknown IDs are rejected before
 delivery. Cross-workspace access does not broaden `interrupt_agent`, which remains ancestry-scoped
 because it is destructive.
+
+## Unreported agents are told nobody collects their answer
+
+An exported bot's conversation is a subtask whose runs answer a person in an outside chat, so reporting
+each one to the bot would flood the bot with chats it did not start. `unreportedAgentMetadata()`
+gives a module that creates such an agent itself the same `reportToCreator: false` decision
+`createAgent` records, so its settlement never reaches the creator. The creator line in the
+instructions now follows that decision: an unreported agent is told to use `send_agent_message`
+when its creator needs to hear from it, rather than that its final words are reported.

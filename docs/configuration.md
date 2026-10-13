@@ -47,8 +47,8 @@ accent = "cyan"
 Some settings apply without a restart. Network policy is reread before every sandboxed command,
 and MCP servers are reloaded online with `reload_mcp_servers` (see [MCP](MCP.md)). The daemon
 reads everything else in the user `happy.toml` only at startup. That includes providers and
-their accounts, `hidden`, smart providers, the `[gemini]` key, Ethan mode, heap snapshots, and
-the Tailcat port. Reload the daemon after changing any of these:
+their accounts, `hidden`, smart providers, the `[gemini]` key, the Telegram Bot API server,
+Ethan mode, heap snapshots, and the Tailcat port. Reload the daemon after changing any of these:
 
 ```sh
 happy-agent reload
@@ -144,6 +144,47 @@ address unnecessarily. A project `happy.toml` cannot enable Tailcat. An active a
 `set_tailcat_enabled` to persist and immediately apply a runtime override, and
 `get_tailcat_status` to read the live address and port. See [tailcat.md](tailcat.md) for the
 complete Tailcat setup and client commands.
+
+## Exported bots
+
+Exporting a bot lets people reach it from a chat service. There are two kinds: `telegram`, built
+in, and `bridge`, which a bridge program serves for any other service over the
+[bridge protocol](exported-bot-protocol.md). A bot can be exported at most once of each kind.
+
+Export a bot of its own, not the Chief of Staff. Exports are not configuration: an active admin
+bot, normally the Chief of Staff, creates and changes them for that bot with
+`set_telegram_exported_bot` or `set_bridge_exported_bot`, removes them with
+`remove_exported_bot`, and reads them with `get_exported_bot_status`, and Happy Agent keeps them
+in its database. Every change applies immediately, without a reload. The
+[Telegram](recipe/exported-bot-telegram.md) and [bridge](recipe/exported-bot-bridge.md) recipes
+are the walkthroughs.
+
+Each allowed person, named by their ID on the service, becomes a guest: a user Happy knows by the
+name the service gives, who can never sign in. Every guest gets their own subtask under the bot,
+and the bot's reply to each message goes back to their private chat. A guest's messages are their
+own requests, never the owner's or a team member's instructions, including in Auto permission
+review, and they always run in Auto; the bot still works for them with whatever it can reach, so
+allow only people trusted with the bot. A Telegram user is one guest on every bot exported to
+Telegram; a bridge's users are guests of that one export. Someone not on the allowlist is asked
+about by default (`unknownSenders = "ask"`): their first message is held, they get one fixed
+notice, and the Chief of Staff is told who is asking, never what they wrote. It lets them in with
+`approve_exported_bot_user`, which delivers the held message, or turns them away with
+`deny_exported_bot_user`, once the user decides. With `unknownSenders = "ignore"`, strangers are
+dropped silently. Messages from other bots and from groups are always ignored.
+
+Only one program may read a Telegram bot's messages, so each Happy bot needs its own Telegram bot,
+and its token must not be used by a webhook or another program. A bridge token is written to a
+file for its bridge and stored only as a digest; whoever holds it can speak as any allowed guest.
+
+The one setting is the Bot API server, for a self-hosted `telegram-bot-api` server:
+
+```toml
+[telegram]
+api_url = "http://127.0.0.1:8081"
+```
+
+It defaults to `https://api.telegram.org`. It is a machine setting, because that server receives
+every bot token: a project `happy.toml` cannot set it, and it applies after a reload.
 
 ## Runners
 

@@ -20,6 +20,10 @@ import { Value } from "@sinclair/typebox/value";
  * the field off, which is treated the same way). Only `"user"` is trusted; anything else, including
  * an unstamped message, is untrusted context. This fails closed: a human path that forgets the
  * marker under-authorizes rather than an agent path over-authorizing.
+ *
+ * A third origin, `"guest"`, marks what an outside person wrote to an exported bot. It is a real
+ * person's message, so history shows it as theirs, but it is not the user's: it authorizes nothing,
+ * and every check that asks for `"user"` treats it as untrusted.
  */
 
 /** The metadata key carrying a message's provenance for the automatic permission reviewer. */
@@ -34,6 +38,19 @@ export const USER_MESSAGE_ORIGIN_METADATA = Object.freeze({
 export const AGENT_MESSAGE_ORIGIN_METADATA = Object.freeze({
     [MESSAGE_ORIGIN_METADATA_KEY]: "agent",
 } as const);
+
+/**
+ * Stamp a message an exported bot's guest wrote. A guest is a real person but not the user, so
+ * this is attribution, never authorization.
+ */
+export const GUEST_MESSAGE_ORIGIN_METADATA = Object.freeze({
+    [MESSAGE_ORIGIN_METADATA_KEY]: "guest",
+} as const);
+
+/** Whether this message's metadata positively marks it as written by an exported bot's guest. */
+export function isGuestOriginMetadata(metadata: AgentMessageMetadata | undefined): boolean {
+    return ownMetadataValue(metadata, MESSAGE_ORIGIN_METADATA_KEY) === "guest";
+}
 
 /**
  * Whether this message's metadata positively marks it as an end-user submission. A missing marker,
