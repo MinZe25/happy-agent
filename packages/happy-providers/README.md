@@ -210,6 +210,11 @@ rejection of an unrelated staged token, and persistence back to the original sel
 The native retry budget defaults to ten; a session can override it. With zero retries, the test
 expects one rejected request, no refresh, and a terminal authentication error—not an outer replay.
 
+`tests/vendors/claudeNativeCredentialRotation.test.ts` keeps one real resumed SDK child alive
+across an external rotation of the original native credential file. Its next turn must adopt the
+rotated access token without replacing the child or updating the stale access-only staging copy.
+Run it in the same network-disabled Linux container; no live login or keychain is involved.
+
 The evidence has limits: macOS keychain namespace binding is covered by environment/staging tests
 and SDK source inspection, not a real-keychain end-to-end test. Opaque history is asserted unchanged
 at the SDK session-store boundary, while prior plaintext turns are checked on the wire. The SDK
