@@ -597,7 +597,7 @@ export class CollaborationModule implements AgentModule {
             this.#config.configuration.values.settings;
         const seenAncestors = new Set<string>();
         let rootAgentId = actingAgentId;
-        let depth = 1;
+        let depth = 0;
         for (;;) {
             if (seenAncestors.has(rootAgentId)) {
                 throw new Error("The collaboration ancestry contains a cycle.");
@@ -606,8 +606,13 @@ export class CollaborationModule implements AgentModule {
             const config = await agents.config(ctx, rootAgentId);
             // A workflow-created agent owns any collaborators it asks for through its own tool.
             // The workflow call that created it is governed separately by WorkflowsModule.
-            if (config !== undefined && belongsToWorkflow(config.metadata)) break;
-            const parent = await agents.parentOf(ctx, rootAgentId);
+            const parent =
+                config !== undefined && belongsToWorkflow(config.metadata)
+                    ? null
+                    : await agents.parentOf(ctx, rootAgentId);
+            // A subtask stays in its tree but adds no depth; subtask nesting is limited by the
+            // subtasks module. The root always counts.
+            if (parent === null || !isSubtask(config?.metadata)) depth += 1;
             if (parent === null) break;
             if (depth >= maxCollaborationDepth) {
                 throw new Error(
@@ -615,7 +620,6 @@ export class CollaborationModule implements AgentModule {
                 );
             }
             rootAgentId = parent;
-            depth += 1;
         }
         if (depth >= maxCollaborationDepth) {
             throw new Error(
@@ -640,11 +644,14 @@ export class CollaborationModule implements AgentModule {
                 // Direct workflow calls are separately governed roots. They and their branches do
                 // not consume the model-facing create_agent budget of the workflow owner.
                 if (belongsToWorkflow(config.metadata)) continue;
-                toolCollaborators += 1;
-                if (toolCollaborators >= maxCollaborators) {
-                    throw new Error(
-                        `Each root agent tree is limited to ${maxCollaborators} collaborators. Reuse an existing collaborator with send_agent_message.`,
-                    );
+                // A subtask is not a collaborator, but the collaborators below it are in this tree.
+                if (!isSubtask(config.metadata)) {
+                    toolCollaborators += 1;
+                    if (toolCollaborators >= maxCollaborators) {
+                        throw new Error(
+                            `Each root agent tree is limited to ${maxCollaborators} collaborators. Reuse an existing collaborator with send_agent_message.`,
+                        );
+                    }
                 }
             }
             pending.push(...(await agents.childOf(ctx, current)));
@@ -745,6 +752,9 @@ const INTERRUPTED_KEY = "interrupted";
 
 const archivedAgentMetadataSchema = Type.Object({ archivedAt: Type.Number() });
 
+/** A subtask's own marker; subtask nesting is limited by the subtasks module, not here. */
+const subtaskAgentMetadataSchema = Type.Object({ subtask: Type.Literal(true) });
+
 /** How a collaborator's answer reaches its creator. */
 function answerReport(agentId: string, answer: string): string {
     return `Collaborator ${agentId} finished working. Its answer follows, verbatim.\n\n${answer}`;
@@ -811,6 +821,11 @@ function reportsToCreator(metadata: AgentMetadata | undefined): boolean {
         return true;
     }
     return collaboration["reportToCreator"] !== false;
+}
+
+/** Subtasks stay in their tree but are neither counted collaborators nor a level of depth. */
+function isSubtask(metadata: AgentMetadata | undefined): boolean {
+    return Value.Check(subtaskAgentMetadataSchema, metadata);
 }
 
 /** Workflow metadata is the explicit ownership boundary for collaborators created by its agents. */

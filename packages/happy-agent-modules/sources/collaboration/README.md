@@ -182,11 +182,15 @@ Parallel tool calls share one reservation path and cannot race past the configur
 Workflows call the module operation directly instead of going through the tool and remain under the
 workflow system's separate call limit. Workflow metadata is an explicit tree boundary, so those
 agents do not consume their owning agent's tool budget; if a workflow agent itself calls
-`create_agent`, it receives a fresh tool budget rooted at that workflow agent.
+`create_agent`, it receives a fresh tool budget rooted at that workflow agent. Subtasks are not
+a boundary: they stay in their bot's or task's tree, and collaborators created by any subtask draw
+on that tree's one budget. A subtask itself is not a collaborator and never counts, so a bot or
+task may have any number of subtasks. Subtask nesting is limited separately by the subtasks module.
 
 `max_collaboration_depth` in `[settings]` controls `create_agent` ancestry and defaults to three
-agents including the root: root, child, and grandchild. Direct workflow creation is excluded
-because workflows enforce their own limits.
+agents including the root: root, child, and grandchild. Subtasks add no depth, so a
+second-level subtask's collaborator sits at the same depth as one created by the bot or task.
+Direct workflow creation is excluded because workflows enforce their own limits.
 
 A collaborator inherits its creator's environment and module configuration, and the `title` the
 call gave it is written to the agent's **real** `AgentMetadata` — not to a record of this module's

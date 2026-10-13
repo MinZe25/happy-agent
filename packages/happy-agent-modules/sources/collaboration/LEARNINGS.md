@@ -13,6 +13,18 @@ or explicit subtask requests. Small steps stay inline; ordinary `create_agent` h
 internal work such as research. Second-level subtasks should usually be explicitly requested by
 the user. Eligibility and depth enforcement are unchanged.
 
+## Subtasks belong to the tree but consume no collaborator limits
+
+Subtasks live in the same Agent Base parent graph as hidden collaborators, and the `create_agent`
+limits counted them as collaborators. A task with five subtasks could not create a collaborator,
+neither could any of its subtasks, and a second-level subtask failed on depth before creating
+anything. A bot or task may have any number of subtasks; their nesting is limited only by the
+subtasks module. Subtasks are not separate roots, unlike workflow agents: they stay in their bot's
+or task's tree, and the hidden collaborators any subtask creates share that tree's one budget. A
+subtask itself is never counted toward `max_collaborators` and adds no level toward
+`max_collaboration_depth`. The check reads a local schema of the `subtask` marker because the
+subtasks module depends on this one, not the other way round.
+
 ## Spawn rows describe resolved execution, not task titles
 
 A creation row cannot infer its model from the task name or wait for an arbitrary result string.
