@@ -661,6 +661,7 @@ export async function startHappyAgentRuntime(
             chatMedia,
             bridges,
             exportedBots,
+            scheduling,
         );
         api = apiModule;
 

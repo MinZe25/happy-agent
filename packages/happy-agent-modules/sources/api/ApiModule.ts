@@ -65,6 +65,7 @@ import {
     type DrainWaitingFor,
     type MessageMode,
     type ServiceTierOption,
+    agentWaitSchema,
 } from "@slopus/happy-agent-client";
 import {
     cuid2Schema,
@@ -82,6 +83,7 @@ import { MAX_RUNNER_FRAME_BYTES, RunnerUnavailableError } from "@slopus/happy-ag
 import { WebSocketServer } from "ws";
 
 import { AbortModule } from "../abort/index.js";
+import type { SchedulingModule } from "../scheduling/index.js";
 import {
     ArtifactConflictError,
     ArtifactInputError,
@@ -456,6 +458,7 @@ export class ApiModule implements AgentModule {
     readonly #abort: AbortModule;
     readonly #config: ConfigModule;
     readonly #events: EventsModule;
+    readonly #scheduling: SchedulingModule | undefined;
     readonly #cloud: CloudModule;
     readonly #compactions: CompactionsModule;
     readonly #bots: BotsModule;
@@ -604,10 +607,12 @@ export class ApiModule implements AgentModule {
         chatMedia?: ChatMediaModule,
         bridges?: BridgesModule,
         exportedBots?: ExportedBotsModule,
+        scheduling?: SchedulingModule,
     ) {
         this.#abort = abort;
         this.#config = config;
         this.#events = events;
+        this.#scheduling = scheduling;
         this.#cloud = cloud;
         this.#compactions = compactions;
         this.#bots = bots;
@@ -2181,6 +2186,22 @@ export class ApiModule implements AgentModule {
 
     #subscribeToModules(ctx: Context): void {
         if (this.#unsubscribe.length > 0) return;
+        if (this.#scheduling !== undefined) {
+            this.#unsubscribe.push(
+                this.#scheduling.onEventTransactional(async (eventCtx, event) => {
+                    if (
+                        (event.type !== "wait_started" && event.type !== "wait_finished") ||
+                        event.activeWait === undefined
+                    )
+                        return;
+                    await this.#events.record(eventCtx, {
+                        type: "scheduling.wait-changed",
+                        agentId: event.agentId,
+                        payload: { wait: event.activeWait },
+                    });
+                }),
+            );
+        }
         if (this.#live !== undefined)
             this.#unsubscribe.push(
                 this.#live.onEvent((event) => {
@@ -2834,6 +2855,13 @@ export class ApiModule implements AgentModule {
         if (event.type !== "message.accepted" && this.#acceptedMessageBatches.has(agentId)) {
             await this.#waitForPendingMessageAnnouncements(agentId);
             await this.#flushAcceptedMessages(ctx, agentId);
+        }
+        if (event.type === "scheduling.wait-changed") {
+            const wait = payload?.["wait"];
+            if (!Value.Check(agentWaitStateSchema, wait))
+                throw new Error("The durable scheduled wait state is invalid.");
+            await this.#appendAgentUpdate(ctx, event, { wait, updatedAt: event.occurredAt });
+            return;
         }
         if (event.type === "slash_commands.updated") {
             if (!Value.Check(slashCommandCatalogEventPayloadSchema, payload)) {
@@ -4254,6 +4282,9 @@ export class ApiModule implements AgentModule {
                     } else {
                         await agents.send(txCtx, agentId, { role: "user", content }, options);
                     }
+                    afterCommit(txCtx, (postCommitCtx) =>
+                        this.#scheduling?.interruptWaits(postCommitCtx, agentId),
+                    );
                 });
             } catch (error) {
                 this.#announcedPendingMessages.delete(id);
@@ -4497,6 +4528,12 @@ export class ApiModule implements AgentModule {
             readonly latestEvent?: LatestAgentEvent | null;
         } = {},
     ): Promise<Record<string, unknown> | undefined> {
+        // Read the version before the scheduled interval, so a concurrent transition cannot
+        // label an old interval with a newer version and hide its correcting event.
+        const latestEvent =
+            options.latestEvent === undefined
+                ? ((await this.#events.latestAgentEvent(ctx, agentId)) ?? null)
+                : options.latestEvent;
         const config = options.config ?? (await this.#agentSystem().config(ctx, agentId));
         if (config === undefined) return undefined;
         // Owner-series entries and bot and task projections already establish visibility. Only an
@@ -4521,10 +4558,14 @@ export class ApiModule implements AgentModule {
             this.#activeRunId(ctx, agentId),
             this.#subtaskResources(ctx, children, options.subtaskDepth ?? 0),
         ]);
+        const wait =
+            activeRunId === undefined
+                ? null
+                : ((await this.#scheduling?.readActiveWait(ctx, agentId)) ?? null);
         return await agentResource(ctx, this.#agentSystem(), this.#events, agentId, workspaceId, {
             config,
             children,
-            ...(options.latestEvent === undefined ? {} : { latestEvent: options.latestEvent }),
+            latestEvent,
             ...(orderKey === undefined ? {} : { orderKey }),
             userVisible,
             subtask: this.#subtasks?.isSubtask(config) ?? false,
@@ -4534,6 +4575,7 @@ export class ApiModule implements AgentModule {
             runningProcesses: processes.filter((process) => process.status === "running").length,
             runningSubagents,
             working: activeRunId !== undefined,
+            wait,
         });
     }
 
@@ -7712,6 +7754,8 @@ async function readJson(
         throw invalidRequest("The request body must be valid JSON.");
     }
 }
+
+const agentWaitStateSchema = Type.Union([agentWaitSchema, Type.Null()]);
 
 const runtimeConfigPatchSchema = Type.Object(
     {

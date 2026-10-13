@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { AgentConfig, AgentSystemRef } from "@slopus/happy-agent-base";
+import type { AgentWait } from "@slopus/happy-agent-client";
 import type { Context } from "@steve.kite/stdlib";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -565,6 +566,7 @@ export async function agentResource(
         readonly runningProcesses?: number;
         readonly runningSubagents?: number;
         readonly working?: boolean;
+        readonly wait?: AgentWait | null;
         readonly userVisible?: boolean;
         readonly subtask?: boolean;
         readonly subtasks?: readonly Record<string, unknown>[];
@@ -605,6 +607,7 @@ export async function agentResource(
         title: typeof metadata.title === "string" ? metadata.title : null,
         titleStatus: typeof metadata.title === "string" ? "ready" : "idle",
         status: state.working === true ? "working" : "idle",
+        wait: state.wait ?? null,
         subagents: { total: children.length, running: state.runningSubagents ?? 0 },
         processes: { running: state.runningProcesses ?? 0 },
         pendingQuestionId: state.pendingQuestionId ?? null,

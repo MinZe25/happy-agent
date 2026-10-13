@@ -12,10 +12,12 @@ import {
     schedulingSchedulePageQuerySchema,
     schedulingScheduledMessageSchema,
     schedulingWaitRecordSchema,
+    schedulingWaitingRecordSchema,
     type SchedulingSchedulePage,
     type SchedulingSchedulePageQuery,
     type SchedulingScheduledMessage,
     type SchedulingWaitRecord,
+    type SchedulingWaitingRecord,
 } from "./Scheduling.js";
 import { schedulingPendingQuerySchema, type SchedulingStore } from "./SchedulingStore.js";
 
@@ -106,6 +108,20 @@ export const schedulingMigrations: readonly AgentModuleMigration[] = [
             );
         },
     ],
+    [
+        "005-scheduling-active-wait-index",
+        async (_ctx, database) => {
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS happy_scheduling_waits_active
+                ON happy_scheduling_waits (
+                    agent_id, json_extract(record_json, '$.status'),
+                    json_extract(record_json, '$.dueAt'),
+                    json_extract(record_json, '$.startedAt'), id
+                )`,
+            );
+        },
+    ],
 ];
 
 export function createSqliteSchedulingStorage<
@@ -138,6 +154,26 @@ export function createSqliteSchedulingStorage<
                     agent_id = excluded.agent_id,
                     record_json = excluded.record_json`,
         );
+    };
+    const readActiveWait = async (
+        ctx: Context,
+        agentId: string,
+    ): Promise<SchedulingWaitingRecord | undefined> => {
+        const rows = await agentDatabaseRows<WaitRow>(
+            dbFor(ctx),
+            sql`SELECT record_json
+            FROM happy_scheduling_waits
+            WHERE agent_id = ${agentId} AND json_extract(record_json, '$.status') = 'waiting'
+            ORDER BY json_extract(record_json, '$.dueAt'),
+                json_extract(record_json, '$.startedAt'), id
+            LIMIT 1`,
+        );
+        if (rows[0] === undefined) return undefined;
+        const wait = parse(rows[0].record_json, "active wait");
+        if (!Value.Check(schedulingWaitingRecordSchema, wait)) {
+            throw new Error("Scheduling database returned an invalid active wait.");
+        }
+        return wait as SchedulingWaitingRecord;
     };
     const readSchedule = async (
         ctx: Context,
@@ -223,6 +259,7 @@ export function createSqliteSchedulingStorage<
     return {
         readWait,
         writeWait,
+        readActiveWait,
         readSchedule,
         writeSchedule,
         listSchedules,

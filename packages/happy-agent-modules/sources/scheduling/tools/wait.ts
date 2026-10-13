@@ -18,6 +18,7 @@ export function waitTool(scheduling: SchedulingModule, agentId: string) {
         parameters: schedulingWaitToolInputSchema,
         returnType: schedulingWaitResultSchema,
         durable: true,
+        reloadable: true,
         steerable: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: SchedulingWaitToolInput, call) =>

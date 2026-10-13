@@ -8,6 +8,7 @@ import {
     schedulingScheduledMessageSchema,
     schedulingWaitRecordSchema,
     schedulingWaitResultSchema,
+    schedulingWaitIntervalSchema,
 } from "./Scheduling.js";
 
 const eventEnvelope = {
@@ -27,6 +28,7 @@ export const schedulingEventSchema = Type.Union([
             ...eventEnvelope,
             type: Type.Literal("wait_started"),
             wait: schedulingWaitRecordSchema,
+            activeWait: Type.Optional(Type.Union([schedulingWaitIntervalSchema, Type.Null()])),
         },
         { additionalProperties: false },
     ),
@@ -36,6 +38,7 @@ export const schedulingEventSchema = Type.Union([
             type: Type.Literal("wait_finished"),
             wait: schedulingWaitRecordSchema,
             result: schedulingWaitResultSchema,
+            activeWait: Type.Optional(Type.Union([schedulingWaitIntervalSchema, Type.Null()])),
         },
         { additionalProperties: false },
     ),

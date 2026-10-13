@@ -9,7 +9,7 @@ import {
 } from "@slopus/happy-agent-base";
 import { type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { afterCommit, detach, type Context } from "@steve.kite/stdlib";
+import { afterCommit, detach, shutdown, type Context } from "@steve.kite/stdlib";
 
 import type { BotSettingsModule } from "../botSettings/index.js";
 import { senderAgentIdMetadata } from "../impl/messageOrigin.js";
@@ -35,6 +35,7 @@ import {
     type SchedulingWaitResult,
     type SchedulingWaitUntilInput,
     type SchedulingWaitingRecord,
+    type SchedulingWaitInterval,
 } from "./Scheduling.js";
 import {
     schedulingEventListenerSchema,
@@ -208,6 +209,15 @@ export class SchedulingModule implements AgentModule {
         return await this.#wait(ctx, agentId, input.id, "wait_until", (startedAt) =>
             this.#dueFromInstant(startedAt, instantMilliseconds(input.at)),
         );
+    }
+
+    /** The earliest active interval, read from the caller's transaction snapshot. */
+    async readActiveWait(ctx: Context, agentId: string): Promise<SchedulingWaitInterval | null> {
+        this.#assertAgentId(agentId, "acting agent");
+        return await ctx.inTx(async (txCtx) => {
+            const wait = await this.#store.readActiveWait(txCtx, agentId);
+            return wait === undefined ? null : { startedAt: wait.startedAt, dueAt: wait.dueAt };
+        });
     }
 
     /**
@@ -434,15 +444,26 @@ export class SchedulingModule implements AgentModule {
                 updatedAt: startedAt,
                 startedAt,
             };
+            const previousWait = await this.readActiveWait(txCtx, agentId);
             await this.#writeWait(txCtx, claimed);
             await this.#announce(
                 txCtx,
-                this.#event({ type: "wait_started", agentId, wait: claimed }),
+                this.#event({
+                    type: "wait_started",
+                    agentId,
+                    wait: claimed,
+                    ...(await this.#waitChange(txCtx, agentId, previousWait)),
+                }),
             );
             return claimed;
         });
         if (claimed.status !== "waiting") return waitResult(claimed);
         const outcome = await this.#suspensions.suspend(agentId, claimed.dueAt, ctx.lifetime);
+        // Reloadable tools retain their pending call during daemon shutdown. Leave the owned
+        // interval pending too, so replay resumes the original deadline rather than restarting it.
+        if (outcome === "interrupted" && shutdown.get(ctx)?.shuttingDown === true) {
+            throw new Error("The scheduled wait is suspended while the daemon restarts.");
+        }
         return await ctx.inTx(async (txCtx) => {
             const before = await this.#readRequiredWait(txCtx, agentId, id);
             if (before.status !== "waiting") return waitResult(before);
@@ -457,6 +478,7 @@ export class SchedulingModule implements AgentModule {
                 finishedAt,
                 elapsedMs: finishedAt - before.startedAt,
             };
+            const previousWait = await this.readActiveWait(txCtx, agentId);
             await this.#writeWait(txCtx, settled);
             const result = waitResult(settled);
             await this.#announce(
@@ -466,10 +488,23 @@ export class SchedulingModule implements AgentModule {
                     agentId,
                     wait: settled,
                     result,
+                    ...(await this.#waitChange(txCtx, agentId, previousWait)),
                 }),
             );
             return result;
         });
+    }
+
+    async #waitChange(
+        ctx: Context,
+        agentId: string,
+        previous: SchedulingWaitInterval | null,
+    ): Promise<{ activeWait?: SchedulingWaitInterval | null }> {
+        const activeWait = await this.readActiveWait(ctx, agentId);
+        return previous?.startedAt === activeWait?.startedAt &&
+            previous?.dueAt === activeWait?.dueAt
+            ? {}
+            : { activeWait };
     }
 
     /** Re-arm every message the previous process left pending, oldest due time first. */
@@ -774,12 +809,14 @@ type SchedulingEventPayload =
           readonly type: "wait_started";
           readonly agentId: string;
           readonly wait: SchedulingWaitRecord;
+          readonly activeWait?: SchedulingWaitInterval | null;
       }
     | {
           readonly type: "wait_finished";
           readonly agentId: string;
           readonly wait: SchedulingWaitRecord;
           readonly result: SchedulingWaitResult;
+          readonly activeWait?: SchedulingWaitInterval | null;
       }
     | {
           readonly type:

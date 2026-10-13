@@ -22,6 +22,72 @@ describe("Scheduling waits", () => {
         vi.useRealTimers();
     });
 
+    it("projects the earliest concurrent interval and announces only changes to that interval", async () => {
+        const harness = await schedulingHarness("wait-current-interval");
+        const intervals: unknown[] = [];
+        harness.module.onEventTransactional((_ctx, event) => {
+            if (
+                (event.type === "wait_started" || event.type === "wait_finished") &&
+                event.activeWait !== undefined
+            )
+                intervals.push(event.activeWait);
+        });
+        try {
+            const ten = harness.module.wait(harness.database.context, agentId, {
+                id: "waitten",
+                duration: { seconds: 10 },
+            });
+            await settle();
+            const five = harness.module.wait(harness.database.context, agentId, {
+                id: "waitfive",
+                duration: { seconds: 5 },
+            });
+            await settle();
+            const fifteen = harness.module.wait(harness.database.context, agentId, {
+                id: "waitfifteen",
+                duration: { seconds: 15 },
+            });
+            await settle();
+            const interval = (seconds: number) => ({
+                startedAt: START_TIME,
+                dueAt: START_TIME + seconds * 1_000,
+            });
+            expect(await harness.module.readActiveWait(harness.database.context, agentId)).toEqual(
+                interval(5),
+            );
+            expect(intervals).toEqual([interval(10), interval(5)]);
+            await advance(5_000);
+            await five;
+            expect(await harness.module.readActiveWait(harness.database.context, agentId)).toEqual(
+                interval(10),
+            );
+            await advance(5_000);
+            await ten;
+            expect(await harness.module.readActiveWait(harness.database.context, agentId)).toEqual(
+                interval(15),
+            );
+            await advance(5_000);
+            await fifteen;
+            expect(
+                await harness.module.readActiveWait(harness.database.context, agentId),
+            ).toBeNull();
+            expect(intervals).toEqual([
+                interval(10),
+                interval(5),
+                interval(10),
+                interval(15),
+                null,
+            ]);
+            await harness.module.wait(harness.database.context, agentId, {
+                id: "waitfive",
+                duration: { seconds: 5 },
+            });
+            expect(intervals).toHaveLength(5);
+        } finally {
+            harness.close();
+        }
+    });
+
     it("finishes a wait when its own time comes and reports what really elapsed", async () => {
         const harness = await schedulingHarness("wait-elapses");
         try {
@@ -256,6 +322,8 @@ describe("Scheduling waits", () => {
             expect(childTools.map((tool) => tool.name)).toEqual(["wait", "wait_until"]);
             expect(childTools.map((tool) => tool.steerable)).toEqual([true, true]);
             expect(rootTools.filter((tool) => tool.reloadable).map((tool) => tool.name)).toEqual([
+                "wait",
+                "wait_until",
                 "list_scheduled_messages",
             ]);
         } finally {

@@ -28,6 +28,13 @@ export const schedulingTimestampSchema = Type.Integer({
     maximum: MAX_SCHEDULING_TIMESTAMP,
 });
 
+/** The current scheduled interval exposed by the owning module. */
+export const schedulingWaitIntervalSchema = Type.Object({
+    startedAt: schedulingTimestampSchema,
+    dueAt: schedulingTimestampSchema,
+});
+export type SchedulingWaitInterval = Static<typeof schedulingWaitIntervalSchema>;
+
 const durationValueSchema = Type.Number({ minimum: 0, maximum: MAX_SCHEDULING_TIMESTAMP });
 const durationTextSchema = Type.String({
     minLength: 1,

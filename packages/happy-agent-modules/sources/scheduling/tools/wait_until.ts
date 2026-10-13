@@ -18,6 +18,7 @@ export function waitUntilTool(scheduling: SchedulingModule, agentId: string) {
         parameters: schedulingWaitUntilToolInputSchema,
         returnType: schedulingWaitResultSchema,
         durable: true,
+        reloadable: true,
         steerable: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: SchedulingWaitUntilToolInput, call) =>

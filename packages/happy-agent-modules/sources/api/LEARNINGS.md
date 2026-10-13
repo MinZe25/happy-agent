@@ -1,5 +1,14 @@
 # API module learnings
 
+## Scheduled waits travel through the agent resource
+
+The desktop sidebar could not show waits because agent snapshots and updates omitted Scheduling's
+durable interval. The shared projection now carries `wait`, and a Scheduling transition records
+its agent event in the same transaction before the API publishes the versioned update. Snapshots
+read the version before the interval, so a concurrent finish cannot label an old interval with a
+newer version. Idle catalog agents avoid the active-wait query. Desktop sends interrupt waits
+after their submission commits, matching the promised message-interruption behavior.
+
 ## Project conflicts can happen after the header check
 
 An upload can pass If-Match before image processing and lose its version before the store writes.

@@ -12,6 +12,7 @@ import {
     schedulingTimestampSchema,
     schedulingWaitRecordSchema,
     schedulingWaitResultSchema,
+    schedulingWaitingRecordSchema,
     type SchedulingSchedulePage,
     type SchedulingScheduledMessage,
     type SchedulingWaitRecord,
@@ -44,6 +45,10 @@ export const schedulingStoreSchema = Type.Object(
         writeWait: Type.Function(
             [schedulingContextSchema, schedulingWaitRecordSchema],
             voidPromiseSchema,
+        ),
+        readActiveWait: Type.Function(
+            [schedulingContextSchema, schedulingAgentIdSchema],
+            Type.Promise(Type.Union([schedulingWaitingRecordSchema, Type.Undefined()])),
         ),
         readSchedule: Type.Function(
             [schedulingContextSchema, schedulingMessageIdSchema],
