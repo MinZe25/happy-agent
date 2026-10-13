@@ -202,6 +202,10 @@ carries an `authentication` object whose `methods` are the same as those returne
 A runner token from `[runners.<id>] token` authenticates only `GET /v0/runners/connect`, in both
 standalone and team mode, and no other credential is accepted on that route. See Runners.
 
+A bridge token authenticates only `GET /v0/exported-bots/connect`, in both standalone and team
+mode, and no other credential is accepted on that route. See Exported bots. Exported-bot guests
+have no credentials: no sign-in method, bearer token, or bridge token authenticates as a guest.
+
 `GET /v0/authentication` is the only unauthenticated endpoint. Every other endpoint, health
 included, requires a valid bearer token.
 
@@ -820,6 +824,46 @@ accepted on no other route. An unknown token is refused with `401` before the up
 frames carry the runner protocol specified in `@slopus/happy-agent-compute`
 (`sources/runner/README.md`), which is versioned independently of this API; a text frame closes
 the connection. A newer connection with the same token replaces the older one.
+
+### Exported bots
+
+An exported bot is a Happy bot that people reach from an outside chat service. Admin bots export
+a bot, change or pause its export, and stop exporting it with their own tools; this API has no
+exported-bot management routes. Exports are additive and do not increment the protocol version;
+older daemons answer `GET /v0/exported-bots/connect` with `404`.
+
+Telegram is built in: the daemon talks to the Telegram Bot API itself. Any other service is
+reached through a bridge: a program that runs on the daemon's machine, talks to the chat
+service, and connects to the daemon. Exporting a bot through a bridge, or rotating its token,
+writes a new random bridge token to a file the admin bot names. The daemon stores only the
+token's SHA-256 digest. A bridge token identifies exactly one exported bot and grants nothing
+else.
+
+Each person an admin bot lets in becomes a guest user (see Team users) and talks to the bot in
+their own subtask under it. Their messages are user messages attributed to that guest through
+`metadata.userId`. A guest's message is the guest's own request: it is never the installation
+owner's or a team member's instruction or authorization, including in Auto permission review,
+and it always runs in `auto` permission mode, whatever mode earlier messages in that subtask
+selected.
+
+#### `GET /v0/exported-bots/connect`
+
+A WebSocket upgrade used only by bridges. `Authorization: Bearer <bridge token>` identifies the
+exported bot; no other credential is accepted on this route, and a bridge token is accepted on no
+other route. A standalone bridge connects through the daemon's Unix socket and a team bridge
+through its TCP listener.
+
+The optional `protocol` query parameter selects the bridge protocol version and defaults to `1`.
+Before the upgrade the daemon answers:
+
+- `400 unsupported_protocol`: the requested version is not one this daemon speaks.
+- `401 unauthorized`: the token is unknown, was rotated, or its bot is no longer exported.
+- `503 exported_bot_unavailable`: the export is turned off or its bot is archived.
+- `503 not_initialized`: the daemon is still starting.
+
+After the upgrade, UTF-8 JSON text frames carry the bridge protocol specified in
+`docs/exported-bot-protocol.md`, which is versioned independently of this API. A newer
+connection with the same token replaces the older one, which is closed with code `4000`.
 
 ### `GET /`
 
@@ -1653,8 +1697,10 @@ Response — `200`: `{ "stopped": true }` — `false` when no inspector was runn
 ### `GET /v0/users`
 
 Resolve a batch of installation-local Happy user IDs, for example the authors in message
-`metadata.userId`. Available only in team mode to authenticated, locally onboarded organization
-members. Standalone mode returns `404` with code `not_found`.
+`metadata.userId`. In team mode it is available to authenticated, locally onboarded organization
+members and resolves both members and guests. In standalone mode, where `GET /v0/profile`
+describes the one person, it resolves only guests. Older compatible daemons return `404` with
+code `not_found` in standalone mode.
 
 Query `ids` is an optional comma-separated list of at most 100 CUID2 user IDs. Missing or empty
 `ids` returns an empty list, never the whole user directory. Invalid IDs, repeated `ids` query
@@ -1669,17 +1715,31 @@ Response — `200`: `{ "users": [ ... ] }`. Each user contains:
 - `photo` — `null` or `{ "thumbhash": "..." }`, a photo placeholder.
 - `version` — the current UUIDv7 profile resource version.
 - `updatedAt` — the profile's last update timestamp.
+- `kind` — optional: `"member"` for an organization member who signs in, or `"guest"` for a
+  person who reaches an exported bot from an outside chat service. Clients treat a missing
+  `kind` as `"member"`.
+- `canLogIn` — optional boolean, `false` for a guest and `true` for a member. A guest has no
+  credentials: they cannot sign in, call this API, or open any app, and nothing turns a guest
+  into a member. Clients treat a missing `canLogIn` as `true`.
+
+A guest is created when an admin bot approves a person on an exported bot, or when someone an
+admin bot put on an export's allowlist first writes. Its `name` is the display name the chat
+service gave. Every bot exported to Telegram shares one guest per Telegram user; a bridge's users
+are guests of that one export. Removing a guest from an allowlist or turning them away keeps the
+guest, so their messages stay attributed to them. In team mode, creating or renaming a guest
+emits the identity-only `profile.updated` invalidation; standalone mode emits no event for
+guests.
 
 This read has no side effects and emits no events. It never returns email addresses, WorkOS IDs,
-JWT user IDs, or owner flags. Clients may resolve IDs again after a `profile.updated` invalidation. Older
+JWT user IDs, chat-service user IDs, or owner flags. Clients may resolve IDs again after a `profile.updated` invalidation. Older
 compatible daemons may return `404` for this additive endpoint.
 
 ### `GET /v0/users/:userId/photo`
 
 Serves one team member's photo bytes, for example a task owner's, with their content type and the
 same content-derived `ETag`, conditional-request, and image-caching behavior as
-`GET /v0/profile/photo`. Available in team mode to the same callers as `GET /v0/users`; standalone
-mode returns `404` with code `not_found`. An invalid user ID is `400 invalid_request`; an unknown
+`GET /v0/profile/photo`. Available to the same callers as `GET /v0/users`, in both modes. Guests
+have no photo, so a guest's photo is `404`. An invalid user ID is `400 invalid_request`; an unknown
 user or a user without a photo is `404`, including when a conditional request names a removed
 photo. The `thumbhash` from `GET /v0/users` is the placeholder for these bytes. Additive: older
 compatible daemons return `404`.
@@ -4161,8 +4221,10 @@ history, send acceptances, pending state, and events all speak it.
 - `providerId` — the provider that produced the message, when it came from inference.
 - `modelId` — the model that produced the message, when it came from inference.
 - `senderAgentId` — the agent that sent a system-generated message, when one identified itself.
-- `userId` — the installation-local Happy CUID2 of the authenticated person who submitted a
-  user message in team mode. The daemon derives it from authentication; clients cannot set it.
+- `userId` — the installation-local Happy CUID2 of the person who wrote a user message: the
+  authenticated member who submitted it in team mode, or, in either mode, the guest who wrote it
+  to an exported bot. The daemon derives it from authentication or from the export; clients
+  cannot set it.
 
 Each field is optional, but the object itself is always present. A message without public
 provenance therefore carries `"metadata": {}`. Clients ignore metadata fields they do not
@@ -4173,8 +4235,8 @@ steer delivery. It is retained in the agent's durable message metadata and conve
 pending and accepted history, send responses, bootstrap, and every full-message event or history
 response, including after restart. Re-sending an existing message ID preserves its original
 author even when a different member retries. Client-owned metadata cannot override this identity.
-Standalone messages, older messages without recorded authorship, and agent-generated messages
-omit `userId`; the daemon never backfills it from the current caller. This field does not change
+Standalone messages other than guests', older messages without recorded authorship, and
+agent-generated messages omit `userId`; the daemon never backfills it from the current caller. This field does not change
 user-message content or context-reset behavior.
 
 In team mode, the Team module injects a separate, model-facing system notification identifying
@@ -4192,8 +4254,11 @@ the original author on duplicate submissions, and remain consistent across rollb
 When compaction or a context reset replaces the model's history, the current sender's profile is
 reintroduced before inference as needed. A user message with missing or unresolvable authorship
 clears any previously announced sender rather than inheriting another person's profile;
-agent-generated and system messages do not impersonate or change the human sender. Standalone
-mode does not inject team-profile notifications. These notifications belong to private model
+agent-generated and system messages do not impersonate or change the human sender. A guest's
+message is announced in both modes, as an outside guest who is neither the owner nor a team
+member and whose requests authorize nothing on anyone's behalf; the notification carries the
+guest's Happy user ID and name. Standalone mode injects no other sender notification, except that
+an owner's message following a guest's in the same conversation is announced as the owner's. These notifications belong to private model
 context, not user-message content, public message metadata, or profile-update event payloads;
 the HTTP request and response schemas are unchanged.
 
