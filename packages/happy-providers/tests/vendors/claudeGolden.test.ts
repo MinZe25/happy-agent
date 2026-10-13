@@ -94,6 +94,9 @@ describe("Claude provider golden", () => {
         if (credential === null) throw new Error("Expected a Claude test credential.");
         const providerEnv = {
             ...process.env,
+            // SDK history resume otherwise probes the host keychain even with an auth token.
+            // Keep the synthetic fixture inside its own empty native configuration directory.
+            CLAUDE_CONFIG_DIR: cwd,
             ANTHROPIC_API_KEY: "must-be-cleared",
             CLAUDE_CODE_OAUTH_TOKEN: "must-also-be-cleared",
             ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`,
