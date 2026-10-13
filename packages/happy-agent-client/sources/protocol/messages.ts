@@ -259,7 +259,10 @@ export const messageMetadataSchema = Type.Object({
     modelId: Type.Optional(Type.String()),
     /** The agent that sent this system-generated message, when one identified itself. */
     senderAgentId: Type.Optional(cuid2Schema),
-    /** The authenticated team member's local Happy user ID, captured at submission. */
+    /**
+     * The local Happy user ID of the person who wrote a user message: the authenticated team member
+     * who submitted it, or the exported-bot guest who wrote it.
+     */
     userId: Type.Optional(userIdSchema),
 });
 export type MessageMetadata = Static<typeof messageMetadataSchema>;

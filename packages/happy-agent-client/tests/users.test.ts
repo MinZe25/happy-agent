@@ -37,6 +37,20 @@ describe("team authorship and user lookup", () => {
         expect(Value.Check(usersResponseSchema, { users: [{ ...user, name: null }] })).toBe(false);
     });
 
+    it("marks guests who cannot sign in while accepting users from older daemons", () => {
+        const guest: User = { ...user, id: "guest123", kind: "guest", canLogIn: false };
+        expect(Value.Check(usersResponseSchema, { users: [user, guest] })).toBe(true);
+        expect(
+            Value.Check(usersResponseSchema, {
+                users: [{ ...user, kind: "member", canLogIn: true }],
+            }),
+        ).toBe(true);
+        expect(Value.Check(usersResponseSchema, { users: [{ ...user, kind: "bot" }] })).toBe(false);
+        expect(Value.Check(usersResponseSchema, { users: [{ ...user, canLogIn: "no" }] })).toBe(
+            false,
+        );
+    });
+
     it("looks up users through the authenticated remote path with cancellation", async () => {
         const controller = new AbortController();
         const client = new HappyAgentClient({

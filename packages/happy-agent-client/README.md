@@ -106,6 +106,13 @@ past another user's events.
 The integration remains separate from required onboarding, so a product may present pairing as an
 optional onboarding screen or later in settings without changing onboarding completion.
 
+`getUsers()` resolves the authors in message `metadata.userId`. Team mode resolves members and
+guests; standalone mode, where `getProfile()` describes the one person, resolves only guests. A
+guest is someone who reaches an exported bot from an outside chat service: `kind` is `"guest"` and
+`canLogIn` is `false`, and a guest has no photo. Older daemons omit both fields, so treat a missing
+`kind` as `"member"` and a missing `canLogIn` as `true`; older daemons also answer `404` in
+standalone mode.
+
 The global secrets surface exposes only safe metadata: descriptions, environment-variable names,
 availability, attachments, versions, and timestamps. Raw values appear only in typed create and
 update request bodies. Project, workspace, and exact-agent attachment targets are discriminated by

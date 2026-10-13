@@ -831,7 +831,10 @@ export class HappyAgentClient {
 
     // Profile
 
-    /** `GET /v0/users` — resolve up to 100 local team user IDs to public display information. */
+    /**
+     * `GET /v0/users` — resolve up to 100 local user IDs to public display information: team
+     * members and guests in team mode, guests in standalone mode.
+     */
     async getUsers(ids: readonly Cuid2[], options: RequestOptions = {}): Promise<UsersResponse> {
         if (!Value.Check(userIdsSchema, ids)) {
             throw new Error("Provide at most 100 valid Happy user IDs.");
@@ -863,7 +866,7 @@ export class HappyAgentClient {
         });
     }
 
-    /** `GET /v0/users/:userId/photo` — a team member's photo bytes; `null` when unchanged. */
+    /** `GET /v0/users/:userId/photo` — a user's photo bytes; `null` when unchanged. */
     async getUserPhoto(
         userId: Cuid2,
         options: ConditionalRequestOptions = {},
