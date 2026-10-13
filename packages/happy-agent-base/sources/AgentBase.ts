@@ -140,6 +140,14 @@ const insideLoops = new AsyncLocalStorage<readonly string[]>();
  * hears the shutdown finish, short enough that one still holding the loop is told promptly.
  */
 const INSIDE_CLOSE_REPORT_MS = 15;
+/**
+ * The notice a request continuing a cut-off response follows. The text is Claude Code's own
+ * prompt for resuming an interrupted turn.
+ */
+const CONTINUATION_NOTICE: SessionSystemMessage = {
+    role: "system",
+    content: [{ type: "text", text: "Continue from where you left off." }],
+};
 /** Ethan-mode failures start quickly, then back off enough to avoid hammering a broken service. */
 const FAILURE_RETRY_INITIAL_MS = 100;
 const FAILURE_RETRY_MAX_MS = 60_000;
@@ -371,6 +379,10 @@ export interface AgentBaseOptions {
  * stage and the durable conversation decide what resumes. A consumed message, tool result, or
  * failure note is owed an answer. A standalone compaction replacement is not, while an automatic
  * compaction atomically preserves the inference identity of the response already owed after it.
+ *
+ * A request that continues a response whose finished blocks end the conversation first appends a
+ * durable "Continue from where you left off." notice in its inference-stage transaction, so the
+ * model is never asked to extend its own message and every later request repeats that prompt.
  *
  * ## Abort
  *
@@ -2956,19 +2968,29 @@ export class AgentBase {
             "agent.turn.id": inferenceStart.turnId,
             "agent.inference.id": inferenceStart.inferenceId,
         });
+        const continuation = this.#endsWithResponse()
+            ? structuredClone(CONTINUATION_NOTICE)
+            : undefined;
         const notifications = await this.#enterStage(
             ctx,
             "inference",
-            this.#hooks.beforeInferenceTransact === undefined &&
+            continuation === undefined &&
+                this.#hooks.beforeInferenceTransact === undefined &&
                 this.#hooks.systemNotificationsTransact === undefined
                 ? undefined
                 : async (hookCtx) => {
+                      if (continuation !== undefined) {
+                          await this.#appendRecord(hookCtx, {
+                              type: "system",
+                              message: continuation,
+                          });
+                      }
                       const messages = await this.#appendSystemNotifications(hookCtx, {
                           type: "inference",
                           inference: inferenceStart,
                       });
                       await this.#hooks.beforeInferenceTransact?.(hookCtx, inferenceStart);
-                      return messages;
+                      return continuation === undefined ? messages : [continuation, ...messages];
                   },
         );
         this.#messages.push(...(notifications ?? []));
@@ -3046,6 +3068,19 @@ export class AgentBase {
             this.#messages.push({ role: "assistant", content });
         }
         return { content, state, ...(errorMessage === undefined ? {} : { errorMessage }) };
+    }
+
+    /**
+     * Whether the next request would continue a response that already left finished blocks,
+     * with nothing said since: a cut-off response reopened for a notice it never answered, one
+     * resumed after a restart, or one retried in Ethan mode. Claude rejects a conversation that
+     * ends with the model's own message, and binds each thinking block to the exact messages
+     * before it, so the prompt that continues the response has to be durable history rather
+     * than something a provider adds to one request and drops from the next. A trailing native
+     * compaction is not a response and is continued as it stands.
+     */
+    #endsWithResponse(): boolean {
+        return this.#messagesForProvider(this.#messages).at(-1)?.role === "assistant";
     }
 
     /**

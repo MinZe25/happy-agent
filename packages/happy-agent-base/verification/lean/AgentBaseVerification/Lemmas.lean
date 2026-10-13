@@ -27,6 +27,19 @@ namespace AgentBaseVerification
     results (r :: h) = (match r with | .result c => [c] | _ => []) ++ results h := by
   cases r <;> simp [results, Record.resultId?]
 
+@[simp] theorem userIds_continueResponse (h : List Record) :
+    userIds (continueResponse h) = userIds h := by
+  unfold continueResponse; split <;> simp
+@[simp] theorem calls_continueResponse (h : List Record) :
+    calls (continueResponse h) = calls h := by
+  unfold continueResponse; split <;> simp
+@[simp] theorem results_continueResponse (h : List Record) :
+    results (continueResponse h) = results h := by
+  unfold continueResponse; split <;> simp
+@[simp] theorem unanswered_continueResponse (h : List Record) :
+    unanswered (continueResponse h) = unanswered h := by
+  simp [unanswered]
+
 theorem mem_unanswered {x : Call} {h : List Record} :
     x ∈ unanswered h ↔ x ∈ calls h ∧ x ∉ results h := by
   simp [unanswered, List.mem_filter]

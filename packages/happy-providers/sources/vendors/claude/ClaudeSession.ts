@@ -428,17 +428,6 @@ export class ClaudeSession extends BaseSession {
             ...sdkRequestOptions
         } = options;
         const cwd = this.cwd === undefined ? undefined : claudeWorkingDirectory(this.cwd);
-        const replay = createClaudeSessionReplay({
-            context: configuredContext,
-            // The replayed environment must name the directory the live query runs in.
-            ...(cwd === undefined ? {} : { cwd }),
-            env: this.env,
-            model: options.model,
-            sessionId: this.sdkSessionId,
-        });
-        // System notices replay as reminder turns, so anything before the prompt is history —
-        // including a compaction summary followed only by a notice.
-        const hasReplayHistory = replay.entries().length > 0;
         let stream = this.activeQuery;
         let resolveAbort = () => {};
         let invalidatedAfterAbort = false;
@@ -501,6 +490,19 @@ export class ClaudeSession extends BaseSession {
         let sawInferenceUsage = false;
         try {
             if (!continuingQuery) {
+                // A context Claude cannot replay fails this run like any other error, rather than
+                // escaping the stream before it reports an outcome.
+                const replay = createClaudeSessionReplay({
+                    context: configuredContext,
+                    // The replayed environment must name the directory the live query runs in.
+                    ...(cwd === undefined ? {} : { cwd }),
+                    env: this.env,
+                    model: options.model,
+                    sessionId: this.sdkSessionId,
+                });
+                // System notices replay as reminder turns, so anything before the prompt is
+                // history — including a compaction summary followed only by a notice.
+                const hasReplayHistory = replay.entries().length > 0;
                 const promptQueue = new ClaudePromptQueue();
                 const toolBridge = new ClaudeToolBridge();
                 const sdkOptions = toClaudeSdkOptions({

@@ -26,6 +26,15 @@ disabled. The replay edit's trigger sits beyond the 1M context window so the pro
 compacts mid-run; only `compact()` sends the edit with a real trigger and
 `pause_after_compaction` to ask the provider for a new checkpoint.
 
+The transcript must end with a user turn, a tool result, or that native compaction checkpoint.
+Claude models from 4.6 onward reject a trailing assistant message ("This model does not support
+assistant message prefill"), and the adapter does not add or drop a turn to work around it:
+Opus 5.5, Sonnet 5.5, and Fable 5.1 bind each signed thinking block to the exact messages before
+it, so a user turn sent with one request and missing from the next would make every later request
+fail. A caller
+continuing a cut-off response appends a durable system notice instead, which serializes as a
+`<system-reminder>` user turn and, like any user input, ends a pending server call's turn.
+
 On Mantle, the SDK sends the normal Anthropic request to `/v1/messages`, retains the direct model
 ID, and puts betas in the `anthropic-beta` header. On Runtime, it adds
 `anthropic_version: "bedrock-2023-05-31"`, moves betas to `anthropic_beta`, removes `model` and

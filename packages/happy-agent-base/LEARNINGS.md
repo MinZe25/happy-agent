@@ -91,6 +91,25 @@ would be wrong the other way, since a stage can be recorded before any request o
 case is still left to the first loaded edge, which resets only when the conversation owes a
 response.
 
+## A continued response is continued from a durable notice, never from itself
+
+Three paths request again from a conversation that ends with the model's own finished blocks: a
+response cut off and reopened for a background notice it never answered, one resumed after a
+restart, and one retried in Ethan mode. Claude on 4.6 and later models rejects that request
+with "This model does not support assistant message prefill", so the turn failed instead of
+continuing.
+
+Before such a request, `#requestInference` appends a system notice, "Continue from where you
+left off." (Claude Code's own resume prompt), in the inference-stage transaction that writes
+the hook notifications. The condition is the provider context's last message having the
+assistant role, so a trailing native compaction, which is a valid continuation, is left alone.
+
+The notice has to be durable history. A provider adding a user turn to one request and
+dropping it from the next would not work: Claude binds each thinking block to the exact
+messages before it and permanently rejects a later request whose prefix changed, and reload
+merges consecutive block records into one assistant message, so no provider-only projection
+stays stable across requests.
+
 ## A call's store handles die when its result commits
 
 The batch can commit an aborted result while the execution is still unwinding. The call's KV

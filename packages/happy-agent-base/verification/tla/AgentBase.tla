@@ -353,13 +353,17 @@ Consume ==
             /\ UNCHANGED <<d, g>>
 
 (* #requestInference: #enterStage("inference") then open the stream. A     *)
-(* cancellation that arrived first returns undefined and cycles.            *)
+(* cancellation that arrived first returns undefined and cycles. A request  *)
+(* that would continue the model's own finished blocks (#endsWithResponse)  *)
+(* first appends the continuation notice in the stage's transaction.        *)
 Infer ==
     /\ At("infer")
     /\ IF v.aborted
        THEN /\ v' = Goto("loop") /\ UNCHANGED d
        ELSE \* the stage carries the new inference identity
-            /\ d' = [d EXCEPT !.pending = "inference", !.reqOpen = TRUE]
+            /\ d' = [d EXCEPT !.pending = "inference", !.reqOpen = TRUE,
+                              !.hist = IF LastType(@) \in {"text", "call"}
+                                       THEN Append(@, Rec("sys", NoCall)) ELSE @]
             /\ v' = [v EXCEPT !.resp = <<>>, !.blocks = 0, !.pc = "stream"]
     /\ UNCHANGED g
 
@@ -706,6 +710,12 @@ StaleBlockResetBeforeNewOutput == g.stale => (~g.partial /\ ~(v.up /\ v.pc = "id
 (* Plan 20: abort as fast as possible -- no tool execution starts after the  *)
 (* turn was aborted.                                                         *)
 NoToolStartAfterAbort == ~g.startAfterAbort
+
+(* A provider request never ends with the model's own blocks: Claude       *)
+(* rejects that as an assistant prefill. Checked when the request opens,    *)
+(* before its response has appended anything.                              *)
+RequestNeverEndsWithResponse ==
+    (v.up /\ v.pc = "stream" /\ v.blocks = 0) => LastType(d.hist) \notin {"text", "call"}
 
 (* Messages are interchangeable model values; used only for safety checking. *)
 MsgSymmetry == Permutations(Msgs)

@@ -57,6 +57,61 @@ describe("Session system messages", () => {
         });
     });
 
+    it("ends a continued Bedrock response with the caller's notice rather than a prefill", () => {
+        const searchCall = {
+            type: "server_tool_use",
+            id: "srvtoolu_cut_off",
+            name: "tool_search_tool_regex",
+            input: { pattern: "web_fetch" },
+        };
+        // A response cut off mid-search after thinking and text, followed by the notice the
+        // caller wrote before continuing it.
+        const messages: SessionContext["messages"] = [
+            { role: "user", content: [{ type: "text", text: "Open the PR." }] },
+            {
+                role: "assistant",
+                content: [
+                    { type: "reasoning", text: "Plan the PR body.", reasoning: "signature" },
+                    { type: "text", text: "Meanwhile, drafting the PR body." },
+                    {
+                        type: "tool_call",
+                        callId: searchCall.id,
+                        name: "ToolSearch",
+                        server: true,
+                        arguments: JSON.stringify(searchCall.input),
+                        vendor: { outputBlock: JSON.stringify(searchCall) },
+                    },
+                ],
+            },
+            {
+                role: "system",
+                content: [{ type: "text", text: "Continue from where you left off." }],
+            },
+        ];
+        const before = structuredClone(messages);
+
+        expect(toAnthropicMessages(messages).slice(1)).toEqual([
+            {
+                role: "assistant",
+                content: [
+                    { type: "thinking", thinking: "Plan the PR body.", signature: "signature" },
+                    { type: "text", text: "Meanwhile, drafting the PR body." },
+                ],
+            },
+            {
+                role: "user",
+                content: [
+                    {
+                        type: "text",
+                        text: "<system-reminder>\nContinue from where you left off.\n</system-reminder>",
+                        cache_control: { type: "ephemeral" },
+                    },
+                ],
+            },
+        ]);
+        expect(messages).toEqual(before);
+    });
+
     it("sends a Grok notice as a reminder rather than a conversational system turn", () => {
         const input = toGrokResponseInput(CONTEXT);
 

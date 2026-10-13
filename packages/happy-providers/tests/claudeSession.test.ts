@@ -2052,6 +2052,120 @@ describe("ClaudeSession", () => {
         expect(query).toHaveBeenCalledTimes(2);
     });
 
+    it("fails a run that would extend the model's own message instead of throwing", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const query = vi.fn<ClaudeSdkQuery>(() => fakeQuery("ANSWER"));
+        const session = new ClaudeSession("trailing-assistant-session", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            query,
+            tools: [],
+        });
+        const first = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "First." }],
+        };
+
+        await collectSessionEvents(
+            session.run(testContext, { context: { instructions: "", messages: [first] } }),
+        );
+        // The live query can only be handed a user turn, so it restarts. The replay then
+        // reports that Claude cannot continue from the model's own message.
+        const events = [];
+        for await (const event of session.run(testContext, {
+            context: {
+                instructions: "",
+                messages: [
+                    first,
+                    {
+                        role: "assistant",
+                        content: [{ type: "text" as const, text: "ANSWER" }],
+                    },
+                    {
+                        role: "assistant",
+                        content: [{ type: "text" as const, text: "PARTIAL" }],
+                    },
+                ],
+            },
+        })) {
+            events.push(event);
+        }
+
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(events.at(-1)).toMatchObject({
+            type: "done",
+            state: "error",
+            message: "Claude inference must start from a user or tool-result message.",
+        });
+    });
+
+    it("continues an interrupted response from the caller's durable notice", async () => {
+        let capturedPrompt: unknown;
+        let capturedEntries: unknown;
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const session = new ClaudeSession("continuation-session", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            query: ((parameters) => {
+                async function* messages() {
+                    capturedEntries = await parameters.options?.sessionStore?.load({
+                        projectKey: "test",
+                        sessionId: parameters.options.resume ?? "continuation-session",
+                    });
+                    if (typeof parameters.prompt !== "string") {
+                        capturedPrompt = (await parameters.prompt[Symbol.asyncIterator]().next())
+                            .value;
+                    }
+                    yield* fakeQuery("CONTINUED");
+                }
+                const generator = messages();
+                return Object.assign(generator, { close: () => {} });
+            }) as ClaudeSdkQuery,
+            tools: [],
+        });
+
+        const events = await collectSessionEvents(
+            session.run(testContext, {
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Open the PR." }],
+                        },
+                        {
+                            role: "assistant",
+                            content: [{ type: "text" as const, text: "PARTIAL" }],
+                        },
+                        {
+                            role: "system",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "Continue from where you left off.",
+                                },
+                            ],
+                        },
+                    ],
+                },
+            }),
+        );
+
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+        expect(JSON.stringify(capturedEntries)).toContain("PARTIAL");
+        expect(capturedPrompt).toMatchObject({
+            type: "user",
+            message: {
+                role: "user",
+                content: "<system-reminder>\nContinue from where you left off.\n</system-reminder>",
+            },
+        });
+    });
+
     it("restarts rather than dropping a system notice queued behind the next prompt", async () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");

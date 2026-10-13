@@ -21,8 +21,9 @@ modelled; module hooks are folded into the transaction of the transition that ca
 The model follows the code after the fixes for the findings listed in the README: the
 settlement keeps a record rewritten by late work, a stream ending without `done` keeps only
 finished blocks and still requests a turn for queued input, a restart resets a response whose
-provider request was still open, no tool starts once its turn is aborted, and committing a
-call's result revokes its call-state handle.
+provider request was still open, no tool starts once its turn is aborted, committing a call's
+result revokes its call-state handle, and a request that would continue the model's own blocks
+first records a continuation notice.
 -/
 
 namespace AgentBaseVerification
@@ -206,6 +207,19 @@ def lastOwesAnswer (h : List Record) : Bool :=
   | some .system => true
   | _ => false
 
+/-- `#endsWithResponse`: the conversation ends with the model's own finished blocks. A trailing
+compaction is continued as it stands. -/
+def endsWithResponse (h : List Record) : Bool :=
+  match h.getLast? with
+  | some (.block _) => true
+  | _ => false
+
+/-- The history a request is sent with: one that would continue the model's own blocks first
+gets the durable "Continue from where you left off." notice, since Claude rejects a conversation
+that ends with an assistant message. -/
+def continueResponse (h : List Record) : List Record :=
+  if endsWithResponse h then h ++ [Record.system] else h
+
 /-- Take the next queued message: steering always outranks sends (`#runInferenceAttempt`). -/
 def pop : List Msg → List Msg → Option (Msg × List Msg × List Msg)
   | m :: r, sd => some (m, r, sd)
@@ -284,10 +298,12 @@ def consumeEff (msg : Msg) (st sd : List Msg) (reset : Bool) (call? : Option Cal
     g := { s.g with released := s.g.released ++ (if reset then userIds s.d.history else []),
                     issued := s.g.issued ++ optCall call? } }
 
-/-- `#requestInference`: the inference stage is recorded with a fresh `inferenceId` and the
+/-- `#requestInference`: the inference stage is recorded with a fresh `inferenceId`, together
+with the continuation notice when the conversation ends with the model's own blocks, and the
 provider stream opens. -/
 def beginInferenceEff : State :=
-  { s with d := { s.d with pending := some .inference, requestOpen := true },
+  { s with d := { s.d with history := continueResponse s.d.history,
+                           pending := some .inference, requestOpen := true },
            m := { s.m with phase := .streaming, unfinished := none } }
 
 /-- `#collect` emitting `text_start`/`reasoning_start`/`toolcall_start` (a fresh Base ID). -/

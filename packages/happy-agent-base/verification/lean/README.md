@@ -83,7 +83,7 @@ record only.
 | `start`            | `start` / `#startRun` → `#runLoops`' first `#enterStage("inference")`; only for a requested turn, a reopened record, or a restored instance                                 |
 | `recover`          | the restart's one-time interruption check (`#resetInterruptedResponse` at run start, then `#resumesInterruptedRun` at the first loaded edge) + resume of the `tool.*` batch |
 | `consume`          | `#consumeQueue` (queue delete, user record, input-tool call, `owed`, optional model/profile reset; one tx)                                                                  |
-| `beginInference`   | `#requestInference` (`#enterStage("inference")` with an `inferenceId`, provider stream opens)                                                                               |
+| `beginInference`   | `#requestInference` (`#enterStage("inference")` with an `inferenceId` and, when the history ends with a block, the continuation notice; provider stream opens)              |
 | `showPartial`      | `#collect` emitting `*_start` / deltas before the block ends                                                                                                                |
 | `completeBlock`    | `#collect`'s `persist` on `text_end` / `reasoning_end` / `toolcall_end`                                                                                                     |
 | `finish`           | `done` event; the following stage write retires the `inferenceId`                                                                                                           |
@@ -196,8 +196,9 @@ state is replayed on the fixed model with `decide`: `r1_no_stranded_message` / `
 `r3_replayed`, `abandoned_work_settles` / `b2_replayed`, `r2_no_orphan_result` /
 `r2_replayed`, `truncation_keeps_queued_input_requested`, `r4_replayed`,
 `no_tool_starts_after_abort`, `r5_handle_dies_with_its_call` / `r5_replayed`, and
-`owed_work_is_scheduled` / `aborted_turn_keeps_request` / `r6_replayed` / `f1_replayed`, and
-`unrecovered_keeps_inference_stage` / `c1_replayed` / `c2_replayed`.
+`owed_work_is_scheduled` / `aborted_turn_keeps_request` / `r6_replayed` / `f1_replayed`,
+`unrecovered_keeps_inference_stage` / `c1_replayed` / `c2_replayed`, and
+`request_never_ends_with_response` / `compaction_continued_as_is` / `p1_replayed`.
 
 ## Findings
 
@@ -216,16 +217,16 @@ overwrote the send's `inference` back to `settlement`. Either way a crash before
 the message queued in a store that looked settled, and `AgentSystemLocal` restores only active
 agents.
 
-**Fix.** The settlement stage is written by `#enterSettlementStage` (line 2274). In one
+**Fix.** The settlement stage is written by `#enterSettlementStage` (line 2286). In one
 transaction it reads the queues and leaves the record alone when an entry is queued that no
-abort or run failure dropped (`#abandonQueuedInput`, line 2262; the dropped keys are
+abort or run failure dropped (`#abandonQueuedInput`, line 2274; the dropped keys are
 remembered from `#signalAbort` and the failure paths, and forgotten when a turn starts that is
-not already aborted, line 2179; a turn whose scope an abort in the loop hooks already ended
+not already aborted, line 2191; a turn whose scope an abort in the loop hooks already ended
 keeps them, so that abort still settles over its input). The
-settlement transaction then reads `owed` (line 2321). If it no longer holds the settlement
+settlement transaction then reads `owed` (line 2333). If it no longer holds the settlement
 stage, the same transaction still settles the finished run but writes a fresh inference stage
-and announces the activation (line 2332). In process, the `#startRun` `finally` starts another
-run for the reopened record (line 1994); under drain, which never starts another run in this process, the store stays active so
+and announces the activation (line 2344). In process, the `#startRun` `finally` starts another
+run for the reopened record (line 2006); under drain, which never starts another run in this process, the store stays active so
 the next owner resumes it. Input an abort dropped still settles, so 2a is unchanged. Model:
 `decideSettle`, `recordSettlement`, `settleEff`, `Memory.dropped`.
 
@@ -240,7 +241,7 @@ memory and after a restart. This is the documented behaviour and was kept delibe
 **Fix (2b).** An abort that landed after the settlement commit but before the `#startRun`
 `finally`, while a message accepted in that window had made the store active again, left the
 store active with nothing running. `#signalAbort` now records that it dropped a turn (line
-1856); the `finally` then starts a run that only settles (line 1981, `#runTurns` at line 2019),
+1868); the `finally` then starts a run that only settles (line 1993, `#runTurns` at line 2031),
 recording the settlement stage through `#enterSettlementStage` so a message accepted meanwhile
 still keeps the store owed. Model: `abortEff`, `settleAbandoned`.
 
@@ -254,11 +255,11 @@ request survived. A turn that failed (for example a failing `messageAcceptedTran
 store reopened the same way, and once every reopen started a run it retried the same failure
 without end.
 
-**Fix.** A turn whose abort scope is already aborted claims no request (line 2179), so the
+**Fix.** A turn whose abort scope is already aborted claims no request (line 2191), so the
 send's request starts the next turn. `#settleRecord` remembers that it reopened the record
-(line 2351), and the `#startRun` `finally` starts another run for it unless the agent is
-draining or closed, after the turn-request and settle-after-abort branches (line 1994). A
-failed turn abandons its queued input as a failed run does (line 2866), so its settlement
+(line 2363), and the `#startRun` `finally` starts another run for it unless the agent is
+draining or closed, after the turn-request and settle-after-abort branches (line 2006). A
+failed turn abandons its queued input as a failed run does (line 2878), so its settlement
 records the settlement stage and reopens nothing; the message stays queued as after an abort.
 Model: `beginTurnEff`, `failTurn`, `Memory.reopened`, the `start` guard, and the invariant
 clauses `idleRecoveredClean` and `idleWorkScheduled`; `owed_work_is_scheduled` states the
@@ -272,8 +273,8 @@ recorded. Separately, the turn ended without raising a turn request, so messages
 memory were stranded until something else started the agent.
 
 **Fix.** On EOF `#collect` keeps only the persisted blocks and emits `block_reset` for an
-unfinished one (line 5230). `#requestInference` raises the turn request when input is still
-queued (line 3014). Model: `truncateEff`.
+unfinished one (line 5265). `#requestInference` raises the turn request when input is still
+queued (line 3036). Model: `truncateEff`.
 
 ### R4 / TLA+ 3: no `block_reset` after a crash that follows a finished block
 
@@ -282,9 +283,9 @@ queued (line 3014). Model: `truncateEff`.
 listener kept the half-shown block and the response was never continued.
 
 **Fix.** A block or compaction last counts as interrupted while the inherited stage still
-carries the response's `inferenceId` (line 3065). For that to mean "the request was still
+carries the response's `inferenceId` (line 3100). For that to mean "the request was still
 open", the transaction after a response now always retires the identity together with the
-token measurement (`#recordContextTokens`, line 3146); before, it stayed on the record whenever
+token measurement (`#recordContextTokens`, line 3181); before, it stayed on the record whenever
 no `afterInferenceTransact` hook was installed. Model: `recoverEff`, `finishEff`,
 `Durable.requestOpen`.
 
@@ -297,13 +298,13 @@ batch it resumed or dispatched. If that process died there, the next restart sti
 response but emitted no `block_reset`, and the listener kept the half-shown block from the
 first crash.
 
-**Fix.** One guard, `#resetInterruptedResponse` (line 3104), runs at the start of every run
-until it has decided (line 2027), before the settle-only branch, the loop's first stage record,
+**Fix.** One guard, `#resetInterruptedResponse` (line 3139), runs at the start of every run
+until it has decided (line 2039), before the settle-only branch, the loop's first stage record,
 the batch, the compaction, and the settlement. It decides from the inherited record alone: an
 inference stage carrying an open request gets the reset. An inference stage without an open
 request never streamed anything; the first loaded edge still resets it when the conversation
-owes a response, as before (line 3065). The owed response is now also decided before a
-requested compaction (line 2651), so the compaction continues it. Model: every transition that
+owes a response, as before (line 3100). The owed response is now also decided before a
+requested compaction (line 2663), so the compaction continues it. Model: every transition that
 writes a stage other than inference, or retires an open request, needs `recovered`;
 `unrecovered_keeps_interruption_record` in `Correct.lean` proves that over every transition.
 `c1_replayed` (compaction) and `c2_replayed` (tool batch) replay both paths.
@@ -311,8 +312,8 @@ writes a stage other than inference, or retires an open request, needs `recovere
 ### TLA+ 4: an abort just before tool dispatch still started the tools
 
 **Fix.** The batch answers a call as aborted without starting it once the turn is aborted or
-the agent is closing (line 4308), and `#executeToolCall` refuses to start one whose lifetime
-ended during its `beforeToolCall` hook (line 4761). The model always required
+the agent is closing (line 4343), and `#executeToolCall` refuses to start one whose lifetime
+ended during its `beforeToolCall` hook (line 4796). The model always required
 `aborted = false` for `execStart`; `no_tool_starts_after_abort` states it.
 
 ### R5 / TLA+ 5: an aborted tool could recreate call or run state after its result erased it
@@ -322,19 +323,35 @@ usable until `#executeToolCall` returned; the run KV handle on the call context 
 at all. A tool writing through a context of its own recreated `kv.<agent>.call.<id>.*`, or run
 state, after settlement.
 
-**Fix.** Each execution registers its call lifetime (line 4602), and the batch aborts it right
-after committing the call's result (line 4275). The call context's run KV handle is bounded by
-the same lifetime (line 4618). Both handles die before the settlement that clears run state.
+**Fix.** Each execution registers its call lifetime (line 4637), and the batch aborts it right
+after committing the call's result (line 4310). The call context's run KV handle is bounded by
+the same lifetime (line 4653). Both handles die before the settlement that clears run state.
 Model: `commitResultEff` removes the call from `zombies`; `toolWrite` and `toolRunWrite` need a
 running or unwinding call.
+
+### Prefill: a request that continued the model's own blocks
+
+This one surfaced in production on Bedrock rather than in either model; both now state it. A
+response cut off after finished blocks was continued by a request whose conversation still
+ended with those blocks: after a restart, when a background notice reopened it, or on a
+`retryForever` retry. Claude rejects a request that ends with an assistant message ("This model
+does not support assistant message prefill"), so the continued turn failed. A notice added by
+the provider to one request only would not do: Claude binds thinking blocks to the exact messages
+before them, so the next request's prefix would no longer match.
+
+**Fix.** When `#endsWithResponse` (line 3082) finds the provider context ending with an assistant
+message, `#requestInference` appends the durable system notice "Continue from where you left
+off." in the inference stage's transaction, ahead of the module notices (line 2971). A trailing
+compaction is continued as it stands. Regression tests: `tests/AgentBaseResponseContinuation.test.ts`.
+Model: `endsWithResponse`, `continueResponse`, `beginInferenceEff`.
 
 ### Master plan 08: swallowed persistence errors (not fixed)
 
 Master plan 08 says any database failure terminates the system. `AgentBase` still continues
-after some persistence failures: `#enterStage` without a hook (line 1028),
-`#enterSettlementStage` (line 2286, which keeps the behaviour of the stage write it replaced),
-`#settleRecord` (line 2354), `#recordContextTokens` (line 3170), and `#appendFailure` (line
-3526). Existing
+after some persistence failures: `#enterStage` without a hook (line 1040),
+`#enterSettlementStage` (line 2298, which keeps the behaviour of the stage write it replaced),
+`#settleRecord` (line 2366), `#recordContextTokens` (line 3205), and `#appendFailure` (line
+3561). Existing
 tests (`AgentSettlementFailure.test.ts`, "settles with the failure even when the conversation
 could not record it") specify that behaviour. Making these failures fatal needs a way to tell
 a database failure from a hook or provider failure, and a termination path owned by the agent
@@ -357,7 +374,8 @@ as a crash.
   writes, and failing `…Transact` hooks, are covered only by `Tx.lean`'s generic rollback
   result.
 - Not modelled: system-notice injection, `#enqueueInTransaction` (outer-transaction delivery;
-  its durable effect equals `enqueue`), `retryForever`, drain/close/graceful shutdown (the R1
+  its durable effect equals `enqueue`), `retryForever` (the continuation notice is modelled in
+  `beginInference`, wherever the history ends with a block), drain/close/graceful shutdown (the R1
   drain case is covered only by its regression test), steerable and reloadable interruption,
   provider server tools and block-reset replay within a stream, multiple agents per system, the
   active-agent index, and module migrations.

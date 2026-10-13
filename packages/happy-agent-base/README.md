@@ -181,6 +181,12 @@ An inference ID survives only while that provider request has produced no comple
 restart finds completed response content whose inference transaction never finished, Base retires
 that request's ID before recovering its tool calls or making another provider request. Recovery
 therefore never gives two provider requests the same inference identity.
+A request never ends with the model's own message. When one would continue a response whose
+completed blocks end the conversation (after a restart, a notice that reopened it, or a
+`retryForever` retry), Base first appends the durable system notice "Continue from where you left
+off." in the inference stage's transaction, ahead of that boundary's module notices. Providers
+such as Claude reject an assistant prefill, and the notice stays in history so every later request
+repeats the same prefix. A trailing native compaction is continued as it stands.
 Modules may also observe agent creation, restoration, metadata changes, and archival. Creation,
 restoration, and archival provide transactional and post-commit hook pairs with an immutable agent
 ID/metadata snapshot and module-scoped shared KV.

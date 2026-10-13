@@ -91,6 +91,7 @@ theorem msgsDup_step (hs : Safe s) (st : Step P s t) : Dup1 (msgs t.d) := by
   | truncate => exact h
   | completeBlock p => cases p <;> simpa [completeBlockEff, msgs, queued, toBlock] using h
   | commitResult e rest => simpa [commitResultEff, msgs, queued] using h
+  | beginInference => simpa [beginInferenceEff, msgs, queued] using h
   | _ => exact h
 
 theorem msgsIds_step (hs : Safe s) (st : Step P s t) : ∀ x ∈ msgs t.d, x ∈ t.d.ids := by
@@ -117,6 +118,7 @@ theorem msgsIds_step (hs : Safe s) (st : Step P s t) : ∀ x ∈ msgs t.d, x ∈
   | truncate => exact h
   | completeBlock p => cases p <;> simpa [completeBlockEff, msgs, queued, toBlock] using h
   | commitResult e rest => simpa [commitResultEff, msgs, queued] using h
+  | beginInference => simpa [beginInferenceEff, msgs, queued] using h
   | _ => exact h
 
 theorem noLoss_step (hs : Safe s) (st : Step P s t) :
@@ -149,6 +151,7 @@ theorem noLoss_step (hs : Safe s) (st : Step P s t) :
   | truncate => exact h
   | completeBlock p => cases p <;> simpa [completeBlockEff, msgs, queued, toBlock] using h
   | commitResult e rest => simpa [commitResultEff, msgs, queued] using h
+  | beginInference => simpa [beginInferenceEff, msgs, queued] using h
   | _ => exact h
 
 /-- Generic per-case attempt: unfold whichever effect produced the new state and close with the
@@ -404,6 +407,7 @@ theorem execTracked_step (hs : Safe s) (st : Step P s t) :
     intro x _; right; simp [compactEff, enterCompactionEff, mem_unanswered]
   | start => simpa [startEff] using h
   | crash => simpa [crashEff] using h
+  | beginInference => simpa [beginInferenceEff, batchCalls] using h
   | _ => exact h
 
 theorem execResumed_step (hs : Safe s) (st : Step P s t) :

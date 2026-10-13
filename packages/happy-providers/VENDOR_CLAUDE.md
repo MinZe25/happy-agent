@@ -32,6 +32,14 @@ through `impl/createClaudeSessionReplay.ts` when a query is first created. Compa
 turns use the same streaming SDK query and subprocess, so the HTTP connection and prompt cache
 remain live. Claude's filesystem transcript is not Rig's source of truth.
 
+A turn is compatible when the context extends the previous one by tool results the bridge
+answers, or by one message the prompt queue can deliver as a user turn: a user message, a system
+notice, or an agent message. Any other suffix, such as a lone assistant message or a compaction,
+rebuilds the query from the context. A context the replay cannot start from fails that run with
+an error `done` event instead of throwing before the stream reports an outcome. Claude rejects a
+conversation that ends with the model's own message, so a caller continuing a cut-off response
+appends a durable system notice, which becomes the next prompt.
+
 `impl/toClaudeSdkOptions.ts` deliberately strips the native Claude environment:
 
 - `tools: []` disables native tools.

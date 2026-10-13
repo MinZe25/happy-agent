@@ -34,7 +34,10 @@ export function resolveClaudeLiveDelta(options: {
         return { kind: "tool_results", results };
     }
     if (suffix.length !== 1) return { kind: "restart" };
-    if (suffix[0]?.role === "tool") return { kind: "restart" };
+    // The prompt queue delivers one user turn, which a system notice or an agent message also
+    // becomes. A stray tool result, a compaction, or the model's own message cannot be handed over.
+    const role = suffix[0]?.role;
+    if (role !== "user" && role !== "system" && role !== "agent") return { kind: "restart" };
     return { kind: "prompt" };
 }
 

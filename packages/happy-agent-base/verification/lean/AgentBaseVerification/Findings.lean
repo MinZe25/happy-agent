@@ -440,4 +440,47 @@ tools stage recorded, the next process inherits that stage and nothing is left s
 theorem c2_replayed : c2_10.g.uiOpen = false ∧ c2_12.m.inherited = some .tools ∧
     c2_12.g.uiOpen = false := by decide
 
+/-! ## Prefill — a request that continued the model's own blocks
+
+A response cut off after finished blocks was continued by a request whose conversation ended
+with those blocks: after a restart, when a notice reopened it, or on an Ethan-mode retry. Claude
+rejects such a request as an assistant prefill. The request's inference-stage transaction now
+first records the durable "Continue from where you left off." notice, so every later request
+repeats the same prefix. -/
+
+/-- **Prefill, general.** No provider request ends with the model's own blocks. -/
+theorem request_never_ends_with_response (s : State) :
+    endsWithResponse (beginInferenceEff s).d.history = false := by
+  unfold beginInferenceEff continueResponse
+  split
+  · simp [endsWithResponse]
+  · simp_all
+
+/-- A trailing compaction is continued as it stands, with no notice. -/
+theorem compaction_continued_as_is (h : List Record) (hl : h.getLast? = some .compaction) :
+    continueResponse h = h := by
+  simp [continueResponse, endsWithResponse, hl]
+
+def p1_5 : State := showPartialEff s4 .text
+def p1_6 : State := completeBlockEff p1_5 .text
+def p1_7 : State := crashEff p1_6
+def p1_8 : State := startEff p1_7
+def p1_9 : State := recoverEff p1_8
+def p1_10 : State := beginInferenceEff p1_9
+
+theorem p1_reachable : Reachable P₀ p1_10 := by
+  have r5 : Reachable P₀ p1_5 :=
+    .step reach_s4 (.showPartial .text (by decide) (by decide) (by intro c h; cases h))
+  have r6 : Reachable P₀ p1_6 := .step r5 (.completeBlock .text (by decide) (by decide))
+  have r7 : Reachable P₀ p1_7 := .step r6 .crash
+  have r8 : Reachable P₀ p1_8 := .step r7 (.start (by decide) (by decide))
+  have r9 : Reachable P₀ p1_9 := .step r8 (.recover (by decide) (by decide))
+  exact .step r9 (.beginInference (by decide) (by decide) (by decide) (by decide) (by decide))
+
+/-- **Prefill, replayed.** The process died after one finished text block. The restarted request
+continues that response from the durable notice instead of from the block itself. -/
+theorem p1_replayed : p1_9.d.history = [.user 1, .block .text] ∧
+    p1_10.d.history = [.user 1, .block .text, .system] ∧ p1_10.d.requestOpen = true := by
+  decide
+
 end AgentBaseVerification.Findings
