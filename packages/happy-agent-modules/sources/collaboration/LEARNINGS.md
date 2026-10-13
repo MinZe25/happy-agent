@@ -75,3 +75,12 @@ When a bot keeps its agents inside its own tree, `send_agent_message` reaches on
 tree, the cross-workspace instruction is withheld, and the tool describes itself without
 cross-workspace reach. Direct parent and child messages are always allowed. The tool hook became
 asynchronous because the answer depends on the agent's bot.
+
+## Files in text read elsewhere are linked through the Agent ID
+
+A subtask's report named files as `path:line`, and a parent relaying it showed paths that resolved
+against the parent's workspace, so they could not be opened. Agents are now told, next to their
+Agent ID, to write a file that will be read outside their own chat as
+`[name:line](happy-file://agents/<own ID>/<path>#L…)`, to use another agent's or a workspace's ID
+for files elsewhere, and to copy received links unchanged. Plain `path:line` remains the default
+inside the agent's own chat. The guidance lives here because the Agent ID it builds on does.

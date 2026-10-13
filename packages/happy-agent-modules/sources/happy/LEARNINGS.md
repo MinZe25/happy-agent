@@ -43,7 +43,7 @@ failure notice under the same identity. The full content remains in local Histor
 events keep syncing. An optional relay projection must not permanently stall a session behind
 one message it cannot carry.
 
-## Reference tags become names on the phone
+## Reference tags and file links become plain text on the phone
 
 Agents now mention artifacts, conversations, workspaces, and projects as `<happy-KIND id="…"/>`
 tags. The phone cannot render them, and API.md requires every integration to get plain Markdown,
@@ -54,6 +54,11 @@ transaction. The module takes the artifacts and tasks modules for this; bots, pr
 workspaces, and the agent collection were already at hand. An inert reference, or a lookup
 that throws, becomes the placeholder, because naming optional context must never stall the
 outbox. History keeps the tags, so a later client still renders them as links.
+
+File links, `[label](happy-file://…)`, get the same treatment for the same reason: the phone cannot
+open another workspace's file, and a raw `happy-file` URL means nothing there. The client
+package's `renderHappyFileLinksAsText` replaces each link with its label in the same agent text and
+service notices, before tags are named. It needs no lookup, so it can never stall the outbox.
 
 ## Mobile tool wire normalization
 

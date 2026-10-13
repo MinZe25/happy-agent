@@ -56,6 +56,33 @@ describe("renderHappyMessageReferences", () => {
         ]);
         expect(asked).toEqual(["known", "gone"]);
     });
+
+    it("turns the agent's file links into their labels, alongside its tags", async () => {
+        const link = "happy-file://agents/a1b2/packages/app/Foo.tsx#L42";
+        const original = message("agent", { t: "text", text: "Nothing to rewrite." });
+        const rendered = await renderHappyMessageReferences(
+            [
+                message("agent", {
+                    t: "text",
+                    text: `See [Foo.tsx:42](${link}) in <happy-agent id="known"/>.`,
+                }),
+                message("agent", { t: "service", text: `Report: [\`a.ts\`](${link})` }),
+                message("agent", { t: "text", text: `Code: \`[Foo](${link})\`` }),
+                message("user", { t: "text", text: `[Foo](${link})` }),
+                original,
+            ],
+            async () => "Fix login",
+        );
+
+        expect(textOf(rendered)).toEqual([
+            "See Foo.tsx:42 in Fix login.",
+            "Report: `a.ts`",
+            `Code: \`[Foo](${link})\``,
+            `[Foo](${link})`,
+            "Nothing to rewrite.",
+        ]);
+        expect(rendered[4]).toBe(original);
+    });
 });
 
 describe("resolveHappyReferenceLabel", () => {

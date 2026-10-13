@@ -97,8 +97,8 @@ async function messages(client: HappyAgentClient, agentId: string): Promise<stri
     return JSON.stringify(history.runs.flatMap((run) => run.messages));
 }
 
-describe("reference tags on the phone", () => {
-    it("relays an agent's reference tags as the names they refer to", async () => {
+describe("reference tags and file links on the phone", () => {
+    it("relays an agent's reference tags as the names they refer to, and file links as their labels", async () => {
         const script: ScriptedTurn[] = [];
         const { bot, client, relay, sessionOf } = await linkedDaemon({ script });
         const { artifact } = await client.createArtifact({
@@ -107,8 +107,10 @@ describe("reference tags on the phone", () => {
             title: "Q3 *revenue* report",
             files: [{ path: "index.md", text: "# Q3 revenue\n" }],
         });
+        const fileLink = `[index.ts:3](happy-file://agents/${bot.agent.id}/src/index.ts#L3)`;
         const reply = [
             `Published <happy-artifact id="${artifact.id}"/> for <happy-agent id="${bot.agent.id}"/>.`,
+            `It starts in ${fileLink}.`,
             'The old one, <happy-artifact id="missingartifact"/>, is gone.',
             'Write tags like `<happy-artifact id="x"/>`.',
         ].join(" ");
@@ -126,15 +128,17 @@ describe("reference tags on the phone", () => {
                 const sent = JSON.stringify(relay.outgoing.get(sid) ?? []);
                 expect(sent).toContain(
                     JSON.stringify(
-                        `Published Q3 \\*revenue\\* report for ${bot.name}. The old one, an unavailable artifact, is gone. Write tags like \`<happy-artifact id="x"/>\`.`,
+                        `Published Q3 \\*revenue\\* report for ${bot.name}. It starts in index.ts:3. The old one, an unavailable artifact, is gone. Write tags like \`<happy-artifact id="x"/>\`.`,
                     ).slice(1, -1),
                 );
             },
             { timeout: 10_000 },
         );
         // The daemon's own history keeps exactly what the agent wrote.
-        expect(await messages(client, bot.agent.id)).toContain(
+        const history = await messages(client, bot.agent.id);
+        expect(history).toContain(
             JSON.stringify(`<happy-artifact id="${artifact.id}"/>`).slice(1, -1),
         );
+        expect(history).toContain(fileLink);
     }, 30_000);
 });

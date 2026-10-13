@@ -1,6 +1,7 @@
 import {
     formatHappyReferenceTag,
     parseHappyReferences,
+    renderHappyFileLinksAsText,
     renderHappyReferencesAsMarkdown,
     type HappyReference,
 } from "@slopus/happy-agent-client";
@@ -8,11 +9,12 @@ import {
 import type { HappySessionProtocolMessage } from "./HappyProtocol.js";
 
 /**
- * Replaces the reference tags in what the agent said with plain words, because the phone cannot
- * render them as links: each tag becomes its entity's current name, or the shared placeholder
- * when `label` has none. Only the agent's own text and service notices carry tags; user input
- * and tool output are relayed as they are. Each distinct reference is resolved once, one at a
- * time, so the lookups can share the caller's transaction.
+ * Replaces the reference tags and file links in what the agent said with plain words, because the
+ * phone cannot open them: each tag becomes its entity's current name, or the shared placeholder
+ * when `label` has none, and each `happy-file` link becomes its label. Only the agent's own text
+ * and service notices carry them; user input and tool output are relayed as they are. Each
+ * distinct reference is resolved once, one at a time, so the lookups can share the caller's
+ * transaction.
  */
 export async function renderHappyMessageReferences(
     messages: readonly HappySessionProtocolMessage[],
@@ -27,25 +29,26 @@ export async function renderHappyMessageReferences(
             rendered.push(message);
             continue;
         }
-        if (!ev.text.includes("<happy-")) {
-            rendered.push(message);
-            continue;
+        let text = renderHappyFileLinksAsText(ev.text);
+        if (text.includes("<happy-")) {
+            let tagged = false;
+            for (const segment of parseHappyReferences(text)) {
+                if (segment.type !== "reference") continue;
+                tagged = true;
+                const key = formatHappyReferenceTag(segment.reference);
+                if (!labels.has(key)) labels.set(key, await label(segment.reference));
+            }
+            if (tagged) {
+                text = renderHappyReferencesAsMarkdown(text, (reference) =>
+                    labels.get(formatHappyReferenceTag(reference)),
+                );
+            }
         }
-        let tagged = false;
-        for (const segment of parseHappyReferences(ev.text)) {
-            if (segment.type !== "reference") continue;
-            tagged = true;
-            const key = formatHappyReferenceTag(segment.reference);
-            if (!labels.has(key)) labels.set(key, await label(segment.reference));
-        }
-        if (!tagged) {
-            rendered.push(message);
-            continue;
-        }
-        const text = renderHappyReferencesAsMarkdown(ev.text, (reference) =>
-            labels.get(formatHappyReferenceTag(reference)),
+        rendered.push(
+            text === ev.text
+                ? message
+                : { ...message, content: { ...content, ev: { ...ev, text } } },
         );
-        rendered.push({ ...message, content: { ...content, ev: { ...ev, text } } });
     }
     return rendered;
 }

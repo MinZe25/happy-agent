@@ -48,6 +48,8 @@ addresses are rebuilt every turn from `parentOf` and `childOf`:
 
 ```
 Your Agent ID is b7c1.
+When a file you mention will be read outside your own chat (...), link it as
+[Foo.tsx:42](happy-file://agents/b7c1/<path from your workspace root>#L42-L50), ...
 You were created by agent a3f2. When you stop working, whatever you said last is reported to it
 automatically, so finish by stating your answer. Use send_agent_message only to tell it something
 before then.
@@ -58,6 +60,11 @@ for them.
 That matters because the `Message from agent ...` line ages out of history on compaction, while the
 relationship does not — an agent that could not name its creator would have no way to answer it.
 Nothing is stored to make this work; the ancestry is read from the agent collection each turn.
+
+The Agent ID also addresses the agent's files. A bare `path:line` is read against the reader's own
+workspace, so a file mentioned in a message, a report, or a relay from another workspace is written
+as a `happy-file` link through the agent (or a workspace) instead, as API.md specifies under "File
+links". Links received from other agents are copied unchanged.
 
 ### A collaborator's answer comes back on its own
 

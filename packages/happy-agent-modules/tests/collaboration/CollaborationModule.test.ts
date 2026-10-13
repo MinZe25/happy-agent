@@ -7,6 +7,7 @@ import {
     type AgentModuleHooks,
     type AgentSystemRef,
 } from "@slopus/happy-agent-base";
+import { parseHappyFileLink } from "@slopus/happy-agent-client";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it, vi } from "vitest";
 
@@ -1136,9 +1137,11 @@ describe("collaboration", () => {
             agent: { id: "parent" },
         } as never);
 
-        expect(instructions).toBe(
-            "Your Agent ID is parent.\nCollaborators you created: sibling, child. Each reports back on its own when it finishes; nothing waits for them.",
-        );
+        expect(instructions.split("\n")).toEqual([
+            "Your Agent ID is parent.",
+            expect.stringContaining("happy-file://agents/parent/"),
+            "Collaborators you created: sibling, child. Each reports back on its own when it finishes; nothing waits for them.",
+        ]);
     });
 
     it("always tells an agent its own Agent ID", async () => {
@@ -1146,9 +1149,32 @@ describe("collaboration", () => {
         const collection = new Collection();
         const { module, hooks, ctx } = await started(collection, config);
 
-        expect(await hooks.instructions!(ctx, { agent: { id: "lonely" } } as never)).toBe(
-            "Your Agent ID is lonely.",
+        const instructions = await hooks.instructions!(ctx, { agent: { id: "lonely" } } as never);
+        expect(instructions.split("\n")[0]).toBe("Your Agent ID is lonely.");
+    });
+
+    it("tells an agent to link files that are read outside its own chat through its Agent ID", async () => {
+        const config = await temporaryTestConfig(NO_CROSS_WORKSPACE_TOML);
+        const { hooks, ctx } = await started(new Collection(), config);
+
+        const instructions = await hooks.instructions!(ctx, { agent: { id: "a1b2" } } as never);
+
+        expect(instructions).toContain(
+            "link it as [Foo.tsx:42](happy-file://agents/a1b2/<path from your workspace root>#L42-L50)",
         );
+        expect(instructions).toContain("Copy happy-file links you receive unchanged.");
+        expect(instructions).toContain("Otherwise keep writing path:line.");
+        // The example the model copies, with its path filled in, is a link the shared parser accepts.
+        const example = /\(happy-file:\/\/[^)]*\)/.exec(instructions)?.[0].slice(1, -1) ?? "";
+        expect(
+            parseHappyFileLink(
+                example.replace("<path from your workspace root>", "packages/app/Foo.tsx"),
+            ),
+        ).toEqual({
+            target: { type: "agent", agentId: "a1b2" },
+            path: "packages/app/Foo.tsx",
+            lines: { start: 42, end: 50 },
+        });
     });
 
     it("explains Agent-ID messaging when cross-workspace access is enabled", async () => {

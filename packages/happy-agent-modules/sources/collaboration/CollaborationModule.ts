@@ -294,6 +294,9 @@ export class CollaborationModule implements AgentModule {
          * delivered message, but that line ages out of history on compaction — while the relationship
          * does not. Reading it from the agent collection every turn means the address is always
          * available and never stored twice.
+         *
+         * The same ID addresses this agent's files: a `path:line` is read against the reader's own
+         * workspace, so text read in another chat links files through the agent instead.
          */
         instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
             const agents = this.#requireAgents();
@@ -301,7 +304,10 @@ export class CollaborationModule implements AgentModule {
                 agents.parentOf(ctx, scope.agent.id),
                 agents.childOf(ctx, scope.agent.id),
             ]);
-            const lines: string[] = [`Your Agent ID is ${scope.agent.id}.`];
+            const lines: string[] = [
+                `Your Agent ID is ${scope.agent.id}.`,
+                `When a file you mention will be read outside your own chat (a message to another agent, a report to your creator, or files from another agent's workspace), link it as [Foo.tsx:42](happy-file://agents/${scope.agent.id}/<path from your workspace root>#L42-L50), percent-encoding spaces and other special characters. For a file elsewhere, use its agent's ID, or happy-file://workspaces/<workspace ID>/<path>. Copy happy-file links you receive unchanged. Otherwise keep writing path:line.`,
+            ];
             if (parent !== null) {
                 lines.push(
                     reportsToCreator(scope.agent.metadata)

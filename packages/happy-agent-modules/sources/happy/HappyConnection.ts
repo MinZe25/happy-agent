@@ -363,8 +363,9 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
     };
 
     /**
-     * Turns the agent's reference tags into plain names, since the phone shows text, not links.
-     * A reference that cannot be read becomes the placeholder; it never holds up the sync.
+     * Turns the agent's reference tags into plain names and its file links into their labels,
+     * since the phone cannot open them. A reference that cannot be read becomes the placeholder;
+     * it never holds up the sync.
      */
     async #renderReferences(
         ctx: Context,
