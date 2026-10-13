@@ -129,14 +129,17 @@ from the tool, ensuring an allowed bot-driven creation always produces a non-adm
 
 ## Admin bots manage roster avatars through tools
 
-Avatar selection previously targeted only the acting bot, and the roster text hid whether a bot
-had a picture. `set_bot_avatar` now accepts an optional target bot ID: active admin bots may set
-any bot's picture, including an archived bot, while non-admin bots may still set only their own.
-Omitting the ID preserves self-selection. The acting identity is captured from the tool scope,
-authority is checked before reading the image and again in the write transaction, and image paths
-remain confined to the acting bot's folder, including resolved symlinks. `list_bots` shows avatar
-status and accepts `hasAvatar: false` to find missing pictures. These are model-tool changes, not
-HTTP API or client changes.
+Avatar selection previously targeted only the acting bot, and the roster text hid whether a bot had
+a picture. `set_bot_avatar` now accepts an optional target bot ID: active admin bots may set any
+bot's picture, including an archived bot, while non-admin bots may still set only their own.
+Omitting the ID, or passing the bot's own ID, preserves self-selection. The acting identity is
+captured from the tool scope, authority is checked before reading the image and again in the write
+transaction, and image paths remain confined to the acting bot's folder, including resolved
+symlinks. A refusal names the admin bots the way `create_bot` does, so the model knows whom to ask,
+and an unknown target says so and points at `list_bots` instead of a bare not-found error. An admin
+may still picture an archived bot, matching the HTTP avatar route; an archived acting bot may not.
+`list_bots` shows avatar status and accepts `hasAvatar: false` to find missing pictures. These are
+model-tool changes, not HTTP API or client changes.
 
 ## The module holds no lock; one transaction is the whole guarantee
 

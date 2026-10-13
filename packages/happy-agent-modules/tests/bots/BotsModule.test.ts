@@ -598,6 +598,59 @@ describe("BotsModule", () => {
         }
     });
 
+    it("targets the calling bot unless an admin names another, and explains a refusal", async () => {
+        const fixture = await started("bots-avatar-target", true);
+        const ctx = fixture.database.context;
+        try {
+            const admin = await fixture.bots.create(ctx, { name: "Chief", isAdmin: true });
+            const ordinary = await fixture.bots.create(ctx, { name: "Scout" });
+            const peer = await fixture.bots.create(ctx, { name: "Peer" });
+            await writeFile(join(admin.path, "picture.png"), await png(10, 20, 30));
+            await writeFile(join(ordinary.path, "picture.png"), await png(40, 50, 60));
+            const adminTool = setBotAvatarTool(fixture.bots, admin.agentId);
+            const ordinaryTool = setBotAvatarTool(fixture.bots, ordinary.agentId);
+
+            // Omitted, the tool sets the caller's own picture and nobody else's.
+            await ordinaryTool.execute(ctx, { path: "picture.png" }, {} as never);
+            const own = await fixture.bots.get(ctx, ordinary.id);
+            expect(own).toMatchObject({ version: ordinary.version + 1, avatar: { kind: "image" } });
+            expect((await fixture.bots.get(ctx, peer.id))?.avatar).toBeUndefined();
+            expect((await fixture.bots.get(ctx, admin.id))?.avatar).toBeUndefined();
+
+            // A bot that is not an admin may name only itself; the refusal says who can.
+            const refused = ordinaryTool.execute(
+                ctx,
+                { path: "picture.png", botId: peer.id },
+                {} as never,
+            );
+            await expect(refused).rejects.toThrow(
+                [
+                    "Only an admin bot can set another bot's avatar. Omit botId, or pass your own bot ID, to set your own picture. Admin bots on this installation:",
+                    `- Chief — id ${admin.id}`,
+                ].join("\n"),
+            );
+            expect(await fixture.bots.get(ctx, peer.id)).toEqual(peer);
+            expect(await fixture.bots.get(ctx, ordinary.id)).toEqual(own);
+
+            // An admin sets another bot's picture with the same event and version as the API.
+            const before = fixture.events.length;
+            await adminTool.execute(ctx, { path: "picture.png", botId: peer.id }, {} as never);
+            const updated = await fixture.bots.get(ctx, peer.id);
+            expect(updated).toMatchObject({ version: peer.version + 1, avatar: { kind: "image" } });
+            expect(fixture.events.slice(before)).toEqual([
+                expect.objectContaining({ type: "bot_updated", bot: updated }),
+            ]);
+
+            // An ID naming no bot is explained, and nothing is written.
+            await expect(
+                adminTool.execute(ctx, { path: "picture.png", botId: "nosuchbot" }, {} as never),
+            ).rejects.toThrow("There is no bot with ID nosuchbot. Find bot IDs with list_bots.");
+            expect(fixture.events).toHaveLength(before + 1);
+        } finally {
+            await fixture.close();
+        }
+    });
+
     it("keeps admin avatar images inside the acting bot's folder", async () => {
         const fixture = await started("bots-avatar-paths", true);
         const ctx = fixture.database.context;
