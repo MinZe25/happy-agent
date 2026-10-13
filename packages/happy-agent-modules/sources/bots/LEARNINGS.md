@@ -178,6 +178,17 @@ identity is durable in the bot catalog and projected through the workspace API, 
 project workspace listings and bootstrap's workspace array. This also keeps bot routes operational
 when the optional project-workspaces feature is disabled.
 
+## Bots rename themselves, and admin bots rename others, through a tool
+
+Renaming used to be possible only through `PATCH /v0/bots/:botId`, so an admin bot that created a
+bot for a Telegram export could not follow the Telegram bot's later renames, and a bot could not
+take a better name for itself. `set_bot_name` follows `set_bot_avatar` exactly: the target defaults
+to the acting bot, only an active admin may name another bot, the refusal lists the admin bots, and
+authority is checked again in the write transaction. `BotsModule.renameForAgent` shares one rename
+with the API route, so the name rules, the title, the end of automatic naming, the version, and the
+event cannot drift apart. Like the route, it may rename an archived bot and the Chief of Staff, and
+it never touches the username. These are model-tool changes, not HTTP API or client changes.
+
 ## A bot's session is named after the bot, not by the title model
 
 A bot is one continuous conversation with an identity, so a generated chat title says nothing a

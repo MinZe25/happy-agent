@@ -1,6 +1,7 @@
 import { AsyncResource } from "node:async_hooks";
 
 import { createId } from "@paralleldrive/cuid2";
+import { botNameSchema } from "@slopus/happy-agent-client";
 import {
     currentAgentEnvironment,
     withAgentDatabase,
@@ -69,6 +70,7 @@ import { getBotSettingsTool } from "./tools/get_bot_settings.js";
 import { listBotsTool } from "./tools/list_bots.js";
 import { sendBotMessageTool } from "./tools/send_bot_message.js";
 import { setBotAvatarTool } from "./tools/set_bot_avatar.js";
+import { setBotNameTool } from "./tools/set_bot_name.js";
 import { updateBotSettingsTool } from "./tools/update_bot_settings.js";
 
 const BOT_NAME_ATTEMPTED_KEY = "bot-name-attempted";
@@ -165,10 +167,14 @@ export class BotsModule implements AgentModule {
                       sendBotMessageTool(this, scope.agent.id),
                   ]
                 : [];
-            // Bots manage their own picture; admin bots may also manage other bots' pictures.
+            // Bots manage their own picture and name; admin bots may also manage other bots'.
             const bot = await readBotByAgent(ctx, scope.agent.id);
             if (bot !== undefined) {
-                const tools: AnyAgentTool[] = [...roster, setBotAvatarTool(this, scope.agent.id)];
+                const tools: AnyAgentTool[] = [
+                    ...roster,
+                    setBotAvatarTool(this, scope.agent.id),
+                    setBotNameTool(this, scope.agent.id),
+                ];
                 // Admin bots set what every bot, and every agent under it, may reach.
                 const botSettings = this.#botSettings;
                 if (botSettings !== undefined && bot.isAdmin && bot.status === "active") {
@@ -539,14 +545,51 @@ export class BotsModule implements AgentModule {
         return await ctx.inTx(async (txCtx) => {
             const current = await this.#required(txCtx, botId);
             this.#assertVersion(current, expectedVersion);
-            if (current.name === name && current.nameConfigured) return current;
-            await this.#setAgentTitle(txCtx, current.agentId, name);
-            return await this.#change(txCtx, current, (bot) => ({
-                ...bot,
-                name,
-                nameConfigured: true,
-            }));
+            return await this.#rename(txCtx, current, name);
         });
+    }
+
+    /**
+     * Lets an active bot rename itself, or an admin rename any bot, exactly as `rename` does.
+     * Recheck the acting identity and authority in the transaction that writes the target.
+     */
+    async renameForAgent(
+        ctx: Context,
+        agentId: string,
+        name: string,
+        botId?: string,
+    ): Promise<BotRecord> {
+        if (!Value.Check(botNameSchema, name)) {
+            throw new Error(
+                "A bot name must be 1 to 256 characters, not only spaces, with no control characters.",
+            );
+        }
+        return await ctx.inTx(async (txCtx) => {
+            const acting = await readBotByAgent(txCtx, agentId);
+            if (acting === undefined) {
+                throw new BotNotFoundError("Only a bot can rename itself.");
+            }
+            if (acting.status === "archived") {
+                throw new BotConflictError("An archived bot cannot rename bots.");
+            }
+            const targetId = botId ?? acting.id;
+            if (targetId !== acting.id && !acting.isAdmin) {
+                throw new BotConflictError("Only an admin bot can rename another bot.");
+            }
+            const current = targetId === acting.id ? acting : await this.#required(txCtx, targetId);
+            return await this.#rename(txCtx, current, name);
+        });
+    }
+
+    /** Renaming also settles the conversation title and ends automatic naming for good. */
+    async #rename(ctx: Context, current: BotRecord, name: string): Promise<BotRecord> {
+        if (current.name === name && current.nameConfigured) return current;
+        await this.#setAgentTitle(ctx, current.agentId, name);
+        return await this.#change(ctx, current, (bot) => ({
+            ...bot,
+            name,
+            nameConfigured: true,
+        }));
     }
 
     /** Give an untouched placeholder bot the role-like name inferred from its first message. */

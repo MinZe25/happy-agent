@@ -19,6 +19,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AbortModule } from "../../sources/abort/index.js";
 import { listBotsTool } from "../../sources/bots/tools/list_bots.js";
 import { setBotAvatarTool } from "../../sources/bots/tools/set_bot_avatar.js";
+import { setBotNameTool } from "../../sources/bots/tools/set_bot_name.js";
 import {
     botMigrations,
     BOTS_TABLE,
@@ -651,6 +652,100 @@ describe("BotsModule", () => {
         }
     });
 
+    it("renames the calling bot unless an admin names another, exactly as the rename route", async () => {
+        const fixture = await started("bots-set-name", true);
+        const ctx = fixture.database.context;
+        try {
+            const admin = await fixture.bots.create(ctx, { name: "Chief", isAdmin: true });
+            const ordinary = await fixture.bots.create(ctx, { name: "Scout" });
+            // Unnamed, so it would still take its name from its first message.
+            const peer = await fixture.bots.create(ctx, {});
+            expect(peer.nameConfigured).toBe(false);
+            const adminTool = setBotNameTool(fixture.bots, admin.agentId);
+            const ordinaryTool = setBotNameTool(fixture.bots, ordinary.agentId);
+            expect(adminTool.shouldReviewInAutoMode({ name: "X", botId: peer.id }, ctx)).toBe(
+                false,
+            );
+            expect(adminTool.shouldRunInFullAccessInAutoMode).toBeUndefined();
+
+            // Omitted, the tool renames the caller and nobody else.
+            const renamed = await ordinaryTool.execute(ctx, { name: "Scout Two" }, {} as never);
+            expect(renamed).toMatchObject({
+                id: ordinary.id,
+                name: "Scout Two",
+                username: ordinary.username,
+                version: ordinary.version + 1,
+            });
+            expect(fixture.agents.configs.get(ordinary.agentId)?.metadata?.title).toBe("Scout Two");
+            expect(await fixture.bots.get(ctx, peer.id)).toEqual(peer);
+            expect(await fixture.bots.get(ctx, admin.id)).toEqual(admin);
+
+            // Naming itself by ID is the same as omitting it.
+            const self = await ordinaryTool.execute(
+                ctx,
+                { name: "Scout Three", botId: ordinary.id },
+                {} as never,
+            );
+            expect(self).toMatchObject({ name: "Scout Three", version: ordinary.version + 2 });
+
+            // A bot that is not an admin may not rename another; the refusal says who can.
+            await expect(
+                ordinaryTool.execute(ctx, { name: "Hijacked", botId: peer.id }, {} as never),
+            ).rejects.toThrow(
+                [
+                    "Only an admin bot can rename another bot. Omit botId, or pass your own bot ID, to rename yourself. Admin bots on this installation:",
+                    `- Chief — id ${admin.id}`,
+                ].join("\n"),
+            );
+            await expect(
+                fixture.bots.renameForAgent(ctx, ordinary.agentId, "Hijacked", peer.id),
+            ).rejects.toThrow("Only an admin bot can rename another bot.");
+            expect(await fixture.bots.get(ctx, peer.id)).toEqual(peer);
+
+            // An admin renames another bot as PATCH /v0/bots/:botId does.
+            const before = fixture.events.length;
+            const named = await adminTool.execute(
+                ctx,
+                { name: "Telegram Scout", botId: peer.id },
+                {} as never,
+            );
+            expect(named).toMatchObject({
+                id: peer.id,
+                name: "Telegram Scout",
+                nameConfigured: true,
+                username: peer.username,
+                version: peer.version + 1,
+            });
+            expect(await fixture.bots.get(ctx, peer.id)).toEqual(named);
+            expect(fixture.events.slice(before)).toEqual([
+                expect.objectContaining({ type: "bot_updated", bot: named, previousBot: peer }),
+            ]);
+            expect(fixture.agents.configs.get(peer.agentId)?.metadata?.title).toBe(
+                "Telegram Scout",
+            );
+            expect(adminTool.toLLM(named)).toEqual([
+                {
+                    type: "text",
+                    text: `The bot is now named "Telegram Scout" (id ${peer.id}, username ${peer.username}).`,
+                },
+            ]);
+
+            // An ID naming no bot, and a name the route would refuse, change nothing.
+            await expect(
+                adminTool.execute(ctx, { name: "Ghost", botId: "nosuchbot" }, {} as never),
+            ).rejects.toThrow("There is no bot with ID nosuchbot. Find bot IDs with list_bots.");
+            for (const name of ["", "   ", "Tab\tName", "x".repeat(257)]) {
+                await expect(
+                    fixture.bots.renameForAgent(ctx, admin.agentId, name, peer.id),
+                ).rejects.toThrow("A bot name must be 1 to 256 characters");
+            }
+            expect(fixture.events).toHaveLength(before + 1);
+            expect(await fixture.bots.get(ctx, peer.id)).toEqual(named);
+        } finally {
+            await fixture.close();
+        }
+    });
+
     it("keeps admin avatar images inside the acting bot's folder", async () => {
         const fixture = await started("bots-avatar-paths", true);
         const ctx = fixture.database.context;
@@ -723,6 +818,7 @@ describe("BotsModule", () => {
             await expect(fixture.tools(nonAdmin.agentId)).resolves.toEqual([
                 ...roster,
                 "set_bot_avatar",
+                "set_bot_name",
             ]);
             await expect(fixture.executeCreate(nonAdmin.agentId, "Denied Child")).rejects.toThrow(
                 "Only an admin bot can create other bots. There are no admin bots on this installation.",
@@ -740,6 +836,7 @@ describe("BotsModule", () => {
             await expect(fixture.tools(admin.agentId)).resolves.toEqual([
                 ...roster,
                 "set_bot_avatar",
+                "set_bot_name",
             ]);
             await expect(
                 fixture.executeCreate(admin.agentId, "Admin Child"),

@@ -4,9 +4,10 @@ import { isAbsolute, resolve, sep } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import { cuid2Schema, defineAgentTool } from "@slopus/happy-agent-base";
 
-import { BotNotFoundError, type BotRecord } from "../Bot.js";
+import { BotNotFoundError } from "../Bot.js";
 import { BotAvatarInputError } from "../BotAvatarInputError.js";
 import type { BotsModule } from "../BotsModule.js";
+import { formatOtherBotRefusal } from "../impl/formatOtherBotRefusal.js";
 import { MAX_BOT_AVATAR_BYTES } from "../impl/normalizeBotAvatar.js";
 
 const setBotAvatarInputSchema = Type.Object(
@@ -38,7 +39,15 @@ export function setBotAvatarTool(bots: BotsModule, botAgentId: string) {
                 throw new Error("An archived bot cannot change avatars.");
             }
             if (input.botId !== undefined && input.botId !== bot.id) {
-                if (!bot.isAdmin) throw new Error(formatAdminBotRequired(await bots.list(ctx)));
+                if (!bot.isAdmin) {
+                    throw new Error(
+                        formatOtherBotRefusal(
+                            "set another bot's avatar",
+                            "set your own picture",
+                            await bots.list(ctx),
+                        ),
+                    );
+                }
                 if ((await bots.get(ctx, input.botId)) === undefined) {
                     throw new BotNotFoundError(
                         `There is no bot with ID ${input.botId}. Find bot IDs with list_bots.`,
@@ -55,21 +64,6 @@ export function setBotAvatarTool(bots: BotsModule, botAgentId: string) {
             },
         ],
     });
-}
-
-function formatAdminBotRequired(bots: readonly BotRecord[]): string {
-    const admins = bots.filter((bot) => bot.isAdmin);
-    const own = "Omit botId, or pass your own bot ID, to set your own picture.";
-    if (admins.length === 0) {
-        return `Only an admin bot can set another bot's avatar. There are no admin bots on this installation. ${own}`;
-    }
-    return [
-        `Only an admin bot can set another bot's avatar. ${own} Admin bots on this installation:`,
-        ...admins.map(
-            (bot) =>
-                `- ${bot.name}${bot.status === "archived" ? " (archived)" : ""} — id ${bot.id}`,
-        ),
-    ].join("\n");
 }
 
 /** Reads the image while refusing paths and symlinks that leave the bot's folder. */

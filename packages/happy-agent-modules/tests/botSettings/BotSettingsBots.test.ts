@@ -369,7 +369,12 @@ describe("bot settings through the bots catalog", () => {
             }
             expect(await fixture.toolNames("tasks", worker.agentId)).toContain("create_task");
             expect(await fixture.toolNames("bots", worker.agentId)).toEqual(
-                expect.arrayContaining(["list_bots", "send_bot_message", "set_bot_avatar"]),
+                expect.arrayContaining([
+                    "list_bots",
+                    "send_bot_message",
+                    "set_bot_avatar",
+                    "set_bot_name",
+                ]),
             );
 
             await bots.updateSettings(ctx, worker.id, { crossWorkspace: false });
@@ -385,7 +390,10 @@ describe("bot settings through the bots catalog", () => {
                 expect(await fixture.toolNames("workspaces", agentId)).toEqual([]);
                 expect(await fixture.toolNames("tasks", agentId)).toEqual([]);
             }
-            expect(await fixture.toolNames("bots", worker.agentId)).toEqual(["set_bot_avatar"]);
+            expect(await fixture.toolNames("bots", worker.agentId)).toEqual([
+                "set_bot_avatar",
+                "set_bot_name",
+            ]);
             expect(await fixture.toolNames("bots", errand.agentId)).toEqual([]);
             await expect(
                 fixture.hooks.bots!.instructions?.(ctx, fixture.scope(worker.agentId)),

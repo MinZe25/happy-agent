@@ -33,8 +33,9 @@ are not loaded yet.
 | `deny_exported_bot_user`    | Turn away a person who asked, once the user said no.                                 |
 | `remove_exported_bot`       | Stop exporting a bot to Telegram (`kind: "telegram"`) and delete its token.          |
 
-You also use `list_bots`, `create_bot`, and `set_bot_avatar` with the exported bot's `botId`, and
-your shell for a few calls to Telegram that read and set the bot's name and picture.
+You also use `list_bots`, `create_bot`, `set_bot_name`, and `set_bot_avatar` with the exported
+bot's `botId`, and your shell for a few calls to Telegram that read and set the bot's name and
+picture.
 
 ## What the user does, and what you do
 
@@ -58,8 +59,9 @@ Only the user can create a Telegram bot and send it messages. Everything else is
 Call `get_exported_bot_status` first. If the bot the user means is already exported to Telegram,
 this is a change: skip to the step that applies, or to "Later changes".
 
-If the user wants an existing Happy bot other than you exported, find its ID with `list_bots`. It
-keeps its Happy name, so skip step 4, but still match the pictures in step 5.
+If the user wants an existing Happy bot other than you exported, find its ID with `list_bots` and
+skip step 4. Read the Telegram name in step 3, then call `set_bot_name` with it and the bot's
+`botId`, or ask the user which name both should carry. Still match the pictures in step 5.
 
 If the user asks to reach you yourself from Telegram, explain that the export goes on a bot of
 its own and offer to create one. You still receive its access requests.
@@ -87,8 +89,8 @@ so a token already exporting another bot is refused.
 
 ## 3. Read the Telegram bot's name
 
-Read the Telegram bot's identity before you create the Happy bot, because no tool of yours can
-rename a Happy bot later.
+Read the Telegram bot's identity before you create the Happy bot. Its username becomes the basis
+of the Happy bot's username, which names the bot's folder and can never change.
 
 ### Calling Telegram from your shell
 
@@ -158,9 +160,9 @@ Call `create_bot` with:
   lowercase letters, digits, and `_`, and must start with a letter; if that leaves nothing sensible,
   leave it out and Happy chooses one.
 
-The username names the bot's folder and can never change, and you cannot rename the bot afterwards,
-so get both right now. If the username is already in use, pick another sensible one, such as the
-first one with `_telegram` added. Note the new bot's `botId`.
+The username names the bot's folder and can never change, so get it right now; the display name can
+change later with `set_bot_name`. If the username is already in use, pick another sensible one, such
+as the first one with `_telegram` added. Note the new bot's `botId`.
 
 ## 5. Match the pictures
 
@@ -351,11 +353,11 @@ it again (`/token` in @BotFather). Delete `telegram-sync` afterwards.
   it to the Happy bot.
 - **The user wants a new picture.** Set it on the Happy bot with `set_bot_avatar` and upload it
   as in step 5, so both change together.
-- **The user renamed the Telegram bot in @BotFather.** You cannot rename a Happy bot: no tool of
-  yours does it. The Agent API can rename a bot, so the user can rename it in a Happy app that
-  offers this; otherwise the Happy bot keeps its name. If the user would rather have the Telegram
-  bot carry the Happy name, set it back, replacing `Scout` with the Happy bot's name, or ask them to
-  send `/setname` to @BotFather:
+- **The user renamed the Telegram bot in @BotFather.** Read the new name with getMe as in step 3,
+  then call `set_bot_name` with its `first_name` and the Happy bot's `botId`. Its username and
+  folder stay as they are.
+- **The user renamed the Happy bot instead.** Give the Telegram bot the same name, replacing
+  `Scout` with the Happy bot's name, or ask the user to send `/setname` to @BotFather:
 
     ```sh
     printf 'url = "https://api.telegram.org/bot%s/setMyName"\n' "$(cat telegram-sync/token)" | curl -sS -K - --data-urlencode 'name=Scout'
