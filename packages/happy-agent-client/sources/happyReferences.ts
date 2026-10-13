@@ -11,6 +11,8 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+import { skipCodeSpan, textBlocks } from "./markdownBlocks.js";
+
 /** The entity kinds clients resolve. Any other well-formed kind parses and renders as inert text. */
 export const HAPPY_REFERENCE_KINDS = [
     "artifact",
@@ -59,8 +61,6 @@ const TAG = new RegExp(
 const ATTRIBUTE = /[ \t]+([a-z][a-z0-9-]*)="([^"<>\r\n]*)"/g;
 const ID = new RegExp(`^${ID_PATTERN}$`);
 const VERSION = new RegExp(`^${VERSION_PATTERN}$`);
-const FENCE_OPEN = /^[ \t]*(?:>[ \t]?)*[ \t]*(`{3,}|~{3,})(.*)$/;
-const BLANK_LINE = /^[ \t\r]*$/;
 
 export function isKnownHappyReferenceKind(kind: string): kind is HappyReferenceKind {
     return (HAPPY_REFERENCE_KINDS as readonly string[]).includes(kind);
@@ -188,72 +188,6 @@ function scan(markdown: string, streaming: boolean): { tags: TagMatch[]; end: nu
         }
     }
     return { tags, end: markdown.length };
-}
-
-/**
- * The runs of Markdown that are neither fenced code nor blank lines, each including its line
- * endings. A code span cannot cross a blank line, so each run bounds the spans inside it. A fence
- * without a closing line runs to the end, which is also how a streaming fence reads.
- */
-function textBlocks(markdown: string): { start: number; end: number }[] {
-    const blocks: { start: number; end: number }[] = [];
-    let blockStart: number | undefined;
-    let fence: { marker: string; length: number } | undefined;
-    let lineStart = 0;
-    while (lineStart < markdown.length) {
-        const newline = markdown.indexOf("\n", lineStart);
-        const lineEnd = newline === -1 ? markdown.length : newline + 1;
-        const line = markdown.slice(lineStart, newline === -1 ? markdown.length : newline);
-        if (fence !== undefined) {
-            if (isFenceClose(line, fence)) fence = undefined;
-        } else {
-            const open = FENCE_OPEN.exec(line);
-            const marker = open?.[1];
-            const info = open?.[2] ?? "";
-            if (marker !== undefined && !(marker.startsWith("`") && info.includes("`"))) {
-                if (blockStart !== undefined) blocks.push({ start: blockStart, end: lineStart });
-                blockStart = undefined;
-                fence = { marker: marker.charAt(0), length: marker.length };
-            } else if (BLANK_LINE.test(line)) {
-                if (blockStart !== undefined) blocks.push({ start: blockStart, end: lineStart });
-                blockStart = undefined;
-            } else {
-                blockStart ??= lineStart;
-            }
-        }
-        lineStart = lineEnd;
-    }
-    if (blockStart !== undefined) blocks.push({ start: blockStart, end: markdown.length });
-    return blocks;
-}
-
-function isFenceClose(line: string, fence: { marker: string; length: number }): boolean {
-    const close = /^[ \t]*(?:>[ \t]?)*[ \t]*(`+|~+)[ \t\r]*$/.exec(line)?.[1];
-    return close !== undefined && close.charAt(0) === fence.marker && close.length >= fence.length;
-}
-
-/**
- * Skips a code span that opens at `start`, returning the index after it. Backticks with no
- * closing run of the same length are literal, except at the end of streaming text, where the
- * closing run may still arrive and everything after the opening run reads as code.
- */
-function skipCodeSpan(markdown: string, start: number, end: number, open: boolean): number {
-    const length = runLength(markdown, start, "`");
-    let index = start + length;
-    while (index < end) {
-        const next = markdown.indexOf("`", index);
-        if (next === -1 || next >= end) break;
-        const closing = runLength(markdown, next, "`");
-        if (closing === length) return next + closing;
-        index = next + closing;
-    }
-    return open ? end : start + length;
-}
-
-function runLength(text: string, start: number, character: string): number {
-    let index = start;
-    while (text[index] === character) index += 1;
-    return index - start;
 }
 
 function matchTag(text: string, start: number): TagMatch | undefined {

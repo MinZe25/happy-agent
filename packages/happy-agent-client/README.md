@@ -367,3 +367,26 @@ the daemon agree on what is a tag:
 
 Show a resolved reference as a link whose text is the live title. Indicate a busy entity on the
 link. Show unknown kinds and unresolvable references as inert placeholder text.
+
+## File links
+
+A file outside the reader's own workspace is linked as an ordinary Markdown link to a `happy-file`
+URL, as API.md specifies under "File links":
+`[Foo.tsx:42](happy-file://agents/<agentId>/packages/app/Foo.tsx#L42-L50)` or
+`[README](happy-file://workspaces/<workspaceId>/README.md)`.
+
+- `parseHappyFileLink(url)` returns a `HappyFileLink`, `{ target, path, lines? }`, or `undefined`
+  for anything malformed. `target` is `{ type: "agent", agentId }` or
+  `{ type: "workspace", workspaceId }`; `path` is decoded and relative to the workspace root;
+  `lines` is inclusive, so `#L42` is `{ start: 42, end: 42 }`.
+- `formatHappyFileLink(link)` writes the canonical URL and throws a `TypeError` for an invalid
+  link. `happyFileLinkSchema` is the TypeBox schema, and `HAPPY_FILE_LINK_SCHEME` and
+  `MAX_HAPPY_FILE_LINK_LENGTH` are the scheme and the longest URL.
+- `renderHappyFileLinksAsText(markdown)` is the fallback for surfaces that cannot open file links:
+  each inline link or image to a `happy-file` URL becomes its label. Links in code stay literal.
+  The general form is `replaceHappyFileLinks(markdown, replace)`.
+
+Resolve an agent link through `GET /v0/agents/:agentId` to its `workspaceId`, then read the file
+from that workspace. Open it read-only inside the reader's own conversation, and show the usual
+"could not open" treatment for a malformed or unresolvable link. Never hand a `happy-file` URL to
+the operating system or a browser.
