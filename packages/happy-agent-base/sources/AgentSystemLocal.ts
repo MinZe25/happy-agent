@@ -651,8 +651,9 @@ export class AgentSystemLocal<
     }
 
     /**
-     * The live agent for an ID, loading and starting it if this process has not seen it yet.
-     * Concurrent resolutions of the same ID share one load.
+     * The live agent for an ID, loading it if this process has not seen it yet and resuming it
+     * only when its store says it still owes work. Concurrent resolutions of the same ID share
+     * one load.
      */
     async resolve(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>> {
         return await this.#admit(async () => await this.#resolve(ctx, agentId));
@@ -739,7 +740,15 @@ export class AgentSystemLocal<
         return agent;
     }
 
-    /** Publish one fully loaded lifetime synchronously, before the database slot is released. */
+    /**
+     * Publish one fully loaded lifetime synchronously, before the database slot is released.
+     *
+     * `start` resumes the agent only when its store says it owes work, exactly as bringing the
+     * collection up does. Resolving an idle agent — to read or change its metadata, abort it,
+     * or deliver it a message — must not start a run: one would pass through an empty loop and
+     * settle, and every settlement hook would report work that never happened. Accepted
+     * messages, notices, and compactions start the agent through their own activation path.
+     */
     #publish(agent: Agent<AnyAgentTool, Database>, start: boolean): void {
         const existing = this.#agents.get(agent.id);
         if (existing !== undefined && existing !== agent) {
@@ -748,7 +757,7 @@ export class AgentSystemLocal<
         this.#agents.set(agent.id, agent);
         if (this.#draining) {
             this.#beginAgentDrain(agent);
-        } else if (start) {
+        } else if (start && agent.active) {
             agent.start();
         }
     }
@@ -998,7 +1007,8 @@ export class AgentSystemLocal<
     /**
      * Load one transaction-local agent through the carried database facade. Every operation in
      * the same transaction reuses it, and commit publishes it with the strongest requested start
-     * behavior; rollback drops the publication callback.
+     * behavior, which still resumes it only when it owes work; rollback drops the publication
+     * callback.
      */
     async #transactionAgent(
         ctx: Context,

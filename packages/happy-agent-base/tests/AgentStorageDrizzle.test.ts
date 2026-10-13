@@ -502,6 +502,76 @@ describe.each(databaseBackends)("AgentStorage Drizzle persistence ($label)", ({ 
         await close();
     });
 
+    it("keeps idle agents resolved in a transaction after a restart idle until they receive work", async () => {
+        const { close, database } = await open();
+        const provider = new ScriptedProvider([textTurn("before restart"), textTurn("after")]);
+        const lifecycle: string[] = [];
+        const config = {
+            modules: [
+                {
+                    name: "transactional-lifecycle-observer",
+                    beforeStart: () => ({
+                        beforeAgentLoop: (_hookCtx: Context, scope: { agent: { id: string } }) => {
+                            lifecycle.push(`${scope.agent.id}:loop`);
+                        },
+                        afterAgentSettledTransact: (
+                            _hookCtx: Context,
+                            scope: { agent: { id: string } },
+                        ) => {
+                            lifecycle.push(`${scope.agent.id}:settled`);
+                        },
+                    }),
+                },
+            ],
+            providers: providersOf(provider),
+            provider: "scripted",
+            models: [],
+        };
+        const parentId = "j12345678901234567890123";
+        const readId = "k12345678901234567890123";
+        const messagedId = "m12345678901234567890123";
+
+        const first = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            config,
+        );
+        await first.create(ctx, {}, { id: parentId });
+        const read = await first.create(ctx, {}, { id: readId, parent: parentId });
+        await first.create(ctx, {}, { id: messagedId, parent: parentId });
+        await read.send(ctx, user("before restart"));
+        await read.waitForIdle();
+        await first.close(ctx);
+        expect(lifecycle).toEqual([`${readId}:loop`, `${readId}:settled`]);
+        lifecycle.length = 0;
+
+        const second = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            config,
+        );
+        const resolved = await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+            await second.updateMetadata(txCtx, readId, { unread: null });
+            return await second.resolve(txCtx, readId);
+        });
+        await resolved.waitForIdle();
+
+        expect(resolved.active).toBe(false);
+        expect(lifecycle).toEqual([]);
+
+        const messaged = await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+            const target = await second.resolve(txCtx, messagedId);
+            await second.send(txCtx, messagedId, user("after restart"));
+            return target;
+        });
+        await messaged.waitForIdle();
+
+        expect(lifecycle).toEqual([`${messagedId}:loop`, `${messagedId}:settled`]);
+        expect(provider.sessions.flatMap((session) => session.requests)).toHaveLength(2);
+        await second.close(ctx);
+        await close();
+    });
+
     it("queues live send and steer messages inside an outer transaction and starts after commit", async () => {
         const { close, database } = await open();
         const provider = new ScriptedProvider([textTurn("steered"), textTurn("committed")]);

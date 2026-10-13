@@ -119,6 +119,18 @@ call or run state after settlement. Executions register their call lifetime, the
 it right after the commit that erases the call's state, and the call context's run KV handle is
 bounded by the same lifetime.
 
+## Resolving an idle agent must not start a run
+
+After a restart every idle agent is unloaded, and `AgentSystemLocal` resolved one — for a
+metadata update such as marking a chat read, an abort, a compaction, or a plain `resolve` — by
+loading it and calling `start()`. `start()` always opens a loop, so the idle agent ran one empty
+turn and settled it, and every settlement hook treated that as finished work: a collaborator or
+subtask with no last answer reported "stopped without answering" to its creator, which woke the
+creator for a real inference. Publishing a resolved agent, in or out of a transaction, now starts
+it only when its store says it is `active`, the same rule startup and creation already follow.
+Accepted messages, notices, and compactions start an idle agent through their own activation
+path, so nothing that owes work is stranded.
+
 ## Open: persistence failures are still survivable
 
 Master plan 08 says a database failure terminates the system, but `#enterStage` without a hook,

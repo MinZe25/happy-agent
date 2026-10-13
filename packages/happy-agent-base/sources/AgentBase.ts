@@ -1562,7 +1562,9 @@ export class AgentBase {
     /**
      * Start the loop without a new message: load the durable state and, if a turn was cut off —
      * queued messages, a dispatched tool batch without results, or an unanswered user or tool
-     * message — continue it to completion. On an idle history this loads and does nothing more.
+     * message — continue it to completion. On an idle history it still opens one loop with no
+     * inference and settles it, firing every loop, turn, and settlement hook, so an owner starts
+     * only an agent that is `active`.
      */
     start(): void {
         if (this.#closed) throw new Error("The agent has been closed.");

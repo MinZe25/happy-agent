@@ -128,6 +128,80 @@ describe("AgentSystemLocal", () => {
         await system.close(ctx);
     });
 
+    it("keeps an idle agent resolved after a restart idle until it receives work", async () => {
+        const provider = new ScriptedProvider([textTurn("before restart"), textTurn("after")]);
+        const managerPersistence = new InMemoryPersistence();
+        const persistences = new Map<string, InMemoryPersistence>();
+        const lifecycle: string[] = [];
+        const open = async () =>
+            await AgentSystemLocal.create(
+                ctx,
+                new InMemoryAgentStorage({
+                    acquireLock: inMemoryStorageLock(),
+                    kv: managerKV(managerPersistence),
+                    persistence: (id) => {
+                        const existing = persistences.get(id);
+                        if (existing !== undefined) return existing;
+                        const created = new InMemoryPersistence();
+                        persistences.set(id, created);
+                        return created;
+                    },
+                }),
+                {
+                    modules: [
+                        {
+                            name: "lifecycle-observer",
+                            beforeStart: () => ({
+                                beforeAgentLoop: (_hookCtx, scope) => {
+                                    lifecycle.push(`${scope.agent.id}:loop`);
+                                },
+                                beforeTurn: (_hookCtx, scope) => {
+                                    lifecycle.push(`${scope.agent.id}:turn`);
+                                    return undefined;
+                                },
+                                afterAgentSettledTransact: (_hookCtx, scope) => {
+                                    lifecycle.push(`${scope.agent.id}:settled`);
+                                },
+                            }),
+                        },
+                    ],
+                    providers: providersOf(provider),
+                    provider: "scripted",
+                    models: [],
+                },
+            );
+        const parentId = "idleparent12345678901234";
+        const childId = "idlechild123456789012345";
+
+        const first = await open();
+        await first.create(ctx, {}, { id: parentId });
+        const child = await first.create(ctx, {}, { id: childId, parent: parentId });
+        await child.send(ctx, user("before restart"));
+        await child.waitForIdle();
+        await first.close(ctx);
+        expect(lifecycle).toEqual([`${childId}:loop`, `${childId}:turn`, `${childId}:settled`]);
+        lifecycle.length = 0;
+
+        const second = await open();
+        await second.updateMetadata(ctx, childId, { unread: null });
+        const resolved = await second.resolve(ctx, childId);
+        await second.abort(ctx, childId);
+        await resolved.waitForIdle();
+
+        expect(resolved.active).toBe(false);
+        expect(lifecycle).toEqual([]);
+        expect(provider.sessions.flatMap((session) => session.requests)).toHaveLength(1);
+
+        await second.send(ctx, childId, user("after restart"));
+        await resolved.waitForIdle();
+
+        expect(lifecycle).toEqual([`${childId}:loop`, `${childId}:turn`, `${childId}:settled`]);
+        expect(
+            provider.sessions.flatMap((session) => session.requests).at(-1)?.context.messages,
+        ).toContainEqual(user("after restart"));
+        await second.close(ctx);
+    });
+
     it("awaits beforeStart before agents and afterStart after agents", async () => {
         const provider = new ScriptedProvider([textTurn("resumed")]);
         const managerPersistence = new InMemoryPersistence();

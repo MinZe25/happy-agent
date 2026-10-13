@@ -191,6 +191,12 @@ Modules may also observe agent creation, restoration, metadata changes, and arch
 restoration, and archival provide transactional and post-commit hook pairs with an immutable agent
 ID/metadata snapshot and module-scoped shared KV.
 
+`AgentSystemLocal` starts only agents that owe work. Startup resumes each restored agent whose
+store is active, and resolving an agent — for `resolve`, `updateMetadata`, `abort`, `compact`, or
+message delivery — loads an idle one without starting it, inside or outside a transaction. An
+idle agent starts when accepted work reaches it, so creating, reading, or relabelling an agent
+never fires loop, turn, or settlement hooks.
+
 Agent configuration may contain immutable metadata such as `title`. `updateMetadata` is available
 from `AgentBase`, `Agent`, `AgentRef`, `AgentSystem`, and `AgentSystemRef`; updates shallow-merge,
 commit before memory changes, and fire transactional and post-commit hooks. Created agents also
