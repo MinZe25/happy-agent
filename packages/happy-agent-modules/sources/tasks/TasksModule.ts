@@ -20,6 +20,7 @@ import { computePermissions, RunnerUnavailableError } from "@slopus/happy-agent-
 import { afterCommit, backoff, detach, type Context, type RootContext } from "@steve.kite/stdlib";
 
 import { AbortModule } from "../abort/index.js";
+import type { BotSettingsModule } from "../botSettings/index.js";
 import { ComputeModule } from "../compute/index.js";
 import { ConfigModule } from "../config/index.js";
 import { DurableFunctionsModule } from "../durableFunctions/index.js";
@@ -113,6 +114,7 @@ export class TasksModule implements AgentModule {
     readonly #workspaces: WorkspacesModule;
     readonly #listeners = new Set<TaskEventListener>();
     readonly #namingTasks = new Map<string, Promise<void>>();
+    readonly #botSettings: BotSettingsModule | undefined;
     #agents: AgentSystemRef | undefined;
     #closed = false;
     #lifetime: RootContext | undefined;
@@ -126,7 +128,9 @@ export class TasksModule implements AgentModule {
         runners: RunnersModule,
         compute: ComputeModule,
         durableFunctions: DurableFunctionsModule,
+        botSettings?: BotSettingsModule,
     ) {
+        this.#botSettings = botSettings;
         this.#config = config;
         this.#abort = abort;
         this.#titles = titles;
@@ -153,19 +157,28 @@ export class TasksModule implements AgentModule {
         });
     }
 
+    /**
+     * Tasks belong to the conversation a person is having, outside any one tree, so a subagent
+     * or subtask never manages them and neither does an agent whose bot keeps it inside its tree.
+     */
+    async #offersTools(ctx: Context, agentId: string): Promise<boolean> {
+        if ((await this.#requireAgents().parentOf(ctx, agentId)) !== null) return false;
+        return (await this.#botSettings?.allowsCrossWorkspace(ctx, agentId)) ?? true;
+    }
+
     readonly #hooks: AgentModuleHooks = {
         instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
             const task = await readTaskByAgent(ctx, scope.agent.id);
             if (task !== undefined) return formatTaskIdentityPrompt(task, this.ownerLabel(task));
             // Only the agents offered the task tools hear how to mention a task.
-            if ((await this.#requireAgents().parentOf(ctx, scope.agent.id)) !== null) return "";
+            if (!(await this.#offersTools(ctx, scope.agent.id))) return "";
             return TASK_REFERENCE_INSTRUCTIONS;
         },
         tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
             // A task delegates through subtasks, not through more tasks, and a subagent or
             // subtask is one pair of hands inside work it was given.
             if ((await readTaskByAgent(ctx, scope.agent.id)) !== undefined) return [];
-            if ((await this.#requireAgents().parentOf(ctx, scope.agent.id)) !== null) return [];
+            if (!(await this.#offersTools(ctx, scope.agent.id))) return [];
             return [
                 createTaskTool(this, scope.agent.id, scope.kv),
                 listTasksTool(this, scope.kv),
@@ -476,6 +489,11 @@ export class TasksModule implements AgentModule {
                 },
             };
             await agents.create(txCtx, config, { id: agentId, parent: null });
+            // A task an agent opens stays under whatever governs that agent: a bot's settings
+            // must not be escaped by working through a task the bot made.
+            if (input.creatorAgentId !== undefined) {
+                await this.#botSettings?.adoptRoot(txCtx, agentId, input.creatorAgentId);
+            }
             const task: TaskRecord = {
                 id: taskId,
                 name,

@@ -19,6 +19,7 @@ import { computePermissions, type Compute } from "@slopus/happy-agent-compute";
 import { backoff, detach, mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
 
 import { AbortModule } from "../abort/index.js";
+import type { BotSettingsModule } from "../botSettings/index.js";
 import { ConfigModule } from "../config/index.js";
 import { durableCheckpoint, DurableFunctionsModule } from "../durableFunctions/index.js";
 import { GitModule, type GitCredentialRef, type GitRepositoryFacts } from "../git/index.js";
@@ -217,6 +218,7 @@ export class WorkspacesModule implements AgentModule {
     readonly #serviceArchiveListeners = new Set<WorkspaceServiceArchiveListener>();
     readonly #removalBarriers = new Set<WorkspaceRemovalBarrier>();
     readonly #enabled: boolean;
+    readonly #botSettings: BotSettingsModule | undefined;
     #agents: AgentSystemRef | undefined;
 
     // --- The catalog's own Git and filesystem work -------------------------------------------
@@ -254,6 +256,8 @@ export class WorkspacesModule implements AgentModule {
      * them running in a checkout that is about to be deleted.
      * @param runners The machines workspace folders are on. A workspace is on its project's
      * machine, and every folder operation runs there, whether that is this one or a runner.
+     * @param botSettings Whether a bot keeps the agents it governs away from project workspaces.
+     * Without it, no bot does.
      */
     constructor(
         config: ConfigModule,
@@ -262,8 +266,10 @@ export class WorkspacesModule implements AgentModule {
         abort: AbortModule,
         durableFunctions: DurableFunctionsModule,
         runners: RunnersModule,
+        botSettings?: BotSettingsModule,
     ) {
         this.#abort = abort;
+        this.#botSettings = botSettings;
         this.#runners = runners;
         this.#config = config;
         this.#durableFunctions = durableFunctions;
@@ -380,7 +386,8 @@ export class WorkspacesModule implements AgentModule {
 
     /**
      * Workspaces belong to the conversation a person is having. A subagent is one pair of hands
-     * inside the task it was given, and stays in the workspace it was started in.
+     * inside the task it was given, and stays in the workspace it was started in. A bot that keeps
+     * its agents inside its own tree keeps them out of every project's workspaces too.
      */
     async #offersTools(ctx: Context, agentId: string): Promise<boolean> {
         if (!this.#enabled) return false;
@@ -388,7 +395,8 @@ export class WorkspacesModule implements AgentModule {
         if (agents === undefined) {
             throw new Error("The workspaces module was asked for tools before it started.");
         }
-        return (await agents.parentOf(ctx, agentId)) === null;
+        if ((await agents.parentOf(ctx, agentId)) !== null) return false;
+        return (await this.#botSettings?.allowsCrossWorkspace(ctx, agentId)) ?? true;
     }
 
     readonly beforeStart = (ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {

@@ -17,6 +17,7 @@ import { computePermissions, RunnerUnavailableError } from "@slopus/happy-agent-
 import { afterCommit, detach, type Context, type RootContext } from "@steve.kite/stdlib";
 
 import { AbortModule } from "../abort/index.js";
+import type { BotSettings, BotSettingsModule, BotSettingsPatch } from "../botSettings/index.js";
 import { ConfigModule } from "../config/index.js";
 import { ProjectsModule } from "../projects/index.js";
 import type { RunnersModule } from "../runners/index.js";
@@ -64,9 +65,11 @@ import { formatChiefOfStaffInstructions } from "./impl/formatChiefOfStaffInstruc
 import { formatTaskCreatorPrompt } from "./impl/formatTaskCreatorPrompt.js";
 import { loadChiefOfStaffAvatar } from "./impl/loadChiefOfStaffAvatar.js";
 import { createBotTool } from "./tools/create_bot.js";
+import { getBotSettingsTool } from "./tools/get_bot_settings.js";
 import { listBotsTool } from "./tools/list_bots.js";
 import { sendBotMessageTool } from "./tools/send_bot_message.js";
 import { setBotAvatarTool } from "./tools/set_bot_avatar.js";
+import { updateBotSettingsTool } from "./tools/update_bot_settings.js";
 
 const BOT_NAME_ATTEMPTED_KEY = "bot-name-attempted";
 
@@ -91,10 +94,16 @@ export class BotsModule implements AgentModule {
     readonly #titles: TitlesModule;
     readonly #runners: RunnersModule;
     readonly #tasks: TasksModule;
+    readonly #botSettings: BotSettingsModule | undefined;
     #agents: AgentSystemRef | undefined;
     #closed = false;
     #lifetime: RootContext | undefined;
 
+    /**
+     * @param botSettings The owner's restrictions on each bot. Admin bots read and change them
+     * through this catalog, and a bot kept inside its own tree loses the roster. Without it,
+     * bots have no settings.
+     */
     constructor(
         config: ConfigModule,
         abort: AbortModule,
@@ -103,7 +112,9 @@ export class BotsModule implements AgentModule {
         workspaces: WorkspacesModule,
         runners: RunnersModule,
         tasks: TasksModule,
+        botSettings?: BotSettingsModule,
     ) {
+        this.#botSettings = botSettings;
         this.#config = config;
         this.#runners = runners;
         this.#tasks = tasks;
@@ -119,13 +130,16 @@ export class BotsModule implements AgentModule {
         },
         instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
             const bot = await readBotByAgent(ctx, scope.agent.id);
+            const roster = await this.#offersRoster(ctx, scope.agent.id);
             if (bot !== undefined) {
                 const identity =
                     bot.systemKey === CHIEF_OF_STAFF_SYSTEM_KEY
                         ? formatChiefOfStaffInstructions(bot)
                         : formatBotIdentityPrompt(bot);
-                return `${identity}\n\n${BOT_REFERENCE_INSTRUCTIONS}`;
+                return roster ? `${identity}\n\n${BOT_REFERENCE_INSTRUCTIONS}` : identity;
             }
+            // A bot that keeps its agents inside its own tree gives them no other bots to mention.
+            if (!roster) return "";
             // A task a bot created reports back to that bot, which it reaches by bot ID.
             const task = await this.#tasks.forAgent(ctx, scope.agent.id);
             if (task !== undefined) {
@@ -142,15 +156,30 @@ export class BotsModule implements AgentModule {
             return BOT_REFERENCE_INSTRUCTIONS;
         },
         tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
-            const roster = [
-                listBotsTool(this),
-                createBotTool(this, scope.agent.id),
-                sendBotMessageTool(this, scope.agent.id),
-            ];
+            // A bot that keeps its agents inside its own tree keeps them away from other bots.
+            const offersRoster = await this.#offersRoster(ctx, scope.agent.id);
+            const roster = offersRoster
+                ? [
+                      listBotsTool(this),
+                      createBotTool(this, scope.agent.id),
+                      sendBotMessageTool(this, scope.agent.id),
+                  ]
+                : [];
             // Bots manage their own picture; admin bots may also manage other bots' pictures.
-            if ((await readBotByAgent(ctx, scope.agent.id)) !== undefined) {
-                return [...roster, setBotAvatarTool(this, scope.agent.id)];
+            const bot = await readBotByAgent(ctx, scope.agent.id);
+            if (bot !== undefined) {
+                const tools: AnyAgentTool[] = [...roster, setBotAvatarTool(this, scope.agent.id)];
+                // Admin bots set what every bot, and every agent under it, may reach.
+                const botSettings = this.#botSettings;
+                if (botSettings !== undefined && bot.isAdmin && bot.status === "active") {
+                    tools.push(
+                        getBotSettingsTool(this, botSettings, scope.agent.id),
+                        updateBotSettingsTool(this, botSettings, scope.agent.id),
+                    );
+                }
+                return tools;
             }
+            if (!offersRoster) return [];
             // A task talks to bots, including the one that created it, but never creates one:
             // a bot that may not create bots must not gain that through a task it created.
             if ((await this.#tasks.forAgent(ctx, scope.agent.id)) !== undefined) {
@@ -449,6 +478,14 @@ export class BotsModule implements AgentModule {
         if (bot.agentId === fromAgentId) {
             throw new BotConflictError("A bot cannot send a message to itself.");
         }
+        if (
+            this.#botSettings !== undefined &&
+            !(await this.#botSettings.mayReach(ctx, fromAgentId, bot.agentId))
+        ) {
+            throw new BotConflictError(
+                "This bot's settings let its agents reach only the bot's own agents, not other bots.",
+            );
+        }
         const agents = this.#requireAgents();
         // A bot nobody has spoken to has no model yet; the first message gives it the sender's.
         await ctx.inTx(async (txCtx) => {
@@ -699,6 +736,100 @@ export class BotsModule implements AgentModule {
         return structuredClone(await readBotAvatar(ctx, botId));
     }
 
+    /** What the bot's agent, and every agent working under it, may reach. */
+    async settings(ctx: Context, botId: string): Promise<BotSettings> {
+        const bot = await this.#required(ctx, botId);
+        return await this.#requireBotSettings().read(ctx, bot.agentId);
+    }
+
+    /**
+     * Change a bot's settings; omitted fields keep their values. This is the owner's decision,
+     * so the caller is responsible for having the authority to make it. Settings may change while
+     * the bot is archived.
+     */
+    async updateSettings(
+        ctx: Context,
+        botId: string,
+        patch: BotSettingsPatch,
+    ): Promise<BotSettingsChange> {
+        const botSettings = this.#requireBotSettings();
+        return await ctx.inTx(async (txCtx) => {
+            const bot = await this.#required(txCtx, botId);
+            const current = await botSettings.read(txCtx, bot.agentId);
+            return await this.#writeSettings(txCtx, bot, botSettings.merge(current, patch));
+        });
+    }
+
+    /** An active admin bot reads any bot's settings, its own included. */
+    async settingsForAgent(
+        ctx: Context,
+        actingAgentId: string,
+        botId: string,
+    ): Promise<{ readonly botId: string; readonly name: string; readonly settings: BotSettings }> {
+        const botSettings = this.#requireBotSettings();
+        await this.#requireActiveAdmin(ctx, actingAgentId, "read");
+        const bot = await this.#required(ctx, botId);
+        return {
+            botId: bot.id,
+            name: bot.name,
+            settings: await botSettings.read(ctx, bot.agentId),
+        };
+    }
+
+    /**
+     * An active admin bot changes any bot's settings, its own included. `previous` must still be
+     * what is stored: the change Auto decided on, from the arguments alone, is then exactly the
+     * change applied, and a concurrent edit is refused instead of overwritten.
+     */
+    async updateSettingsForAgent(
+        ctx: Context,
+        actingAgentId: string,
+        botId: string,
+        previous: BotSettings,
+        patch: BotSettingsPatch,
+    ): Promise<BotSettingsChange> {
+        const botSettings = this.#requireBotSettings();
+        return await ctx.inTx(async (txCtx) => {
+            await this.#requireActiveAdmin(txCtx, actingAgentId, "change");
+            const bot = await this.#required(txCtx, botId);
+            const current = await botSettings.read(txCtx, bot.agentId);
+            if (!botSettings.same(current, previous)) {
+                throw new BotConflictError(
+                    `The bot's settings are no longer the ones given as previous. They are now ${JSON.stringify(current)}; decide again from these.`,
+                );
+            }
+            return await this.#writeSettings(txCtx, bot, botSettings.merge(current, patch));
+        });
+    }
+
+    async #writeSettings(
+        ctx: Context,
+        bot: BotRecord,
+        settings: BotSettings,
+    ): Promise<BotSettingsChange> {
+        const written = await this.#requireBotSettings().write(ctx, bot.agentId, settings);
+        return { botId: bot.id, name: bot.name, ...written };
+    }
+
+    async #requireActiveAdmin(ctx: Context, agentId: string, action: string): Promise<void> {
+        const acting = await readBotByAgent(ctx, agentId);
+        if (acting?.isAdmin !== true || acting.status !== "active") {
+            throw new BotConflictError(`Only an active admin bot can ${action} bot settings.`);
+        }
+    }
+
+    /** Whether the agent may see and message other bots: its own bot has not kept it in. */
+    async #offersRoster(ctx: Context, agentId: string): Promise<boolean> {
+        return (await this.#botSettings?.allowsCrossWorkspace(ctx, agentId)) ?? true;
+    }
+
+    #requireBotSettings(): BotSettingsModule {
+        if (this.#botSettings === undefined) {
+            throw new Error("Bot settings are not available on this installation.");
+        }
+        return this.#botSettings;
+    }
+
     /**
      * Apply one decided change to a bot that was read in this same transaction.
      *
@@ -829,6 +960,15 @@ export class BotsModule implements AgentModule {
         if (this.#agents === undefined) throw new Error("The bots module has not started.");
         return this.#agents;
     }
+}
+
+/** One applied settings change, named by the bot it belongs to. */
+export interface BotSettingsChange {
+    readonly botId: string;
+    readonly name: string;
+    readonly previous: BotSettings;
+    readonly settings: BotSettings;
+    readonly changed: boolean;
 }
 
 interface BotInitialAvatar {

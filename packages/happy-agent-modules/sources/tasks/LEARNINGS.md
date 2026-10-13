@@ -95,3 +95,10 @@ opens, so a task is mentioned as `<happy-agent id="…"/>` with its agent ID, ne
 which no route opens as a conversation. `create_task` and `list_tasks` hand back the exact tag,
 and the agents offered the task tools are told to use it, so a model never has to work out
 which of the two IDs goes in it.
+
+## A task stays governed by the bot that opened it
+
+Tasks are root agents, so working through a task would have escaped the opening bot's settings.
+A task created by an agent is linked to its creator's tree in the creation transaction, and the bot
+settings module treats it as part of that tree from then on. A bot kept inside its own tree is also
+not offered the task tools, since tasks belong outside any one tree.

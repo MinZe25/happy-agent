@@ -308,7 +308,8 @@ describe("SecretsModule boundary contracts", () => {
     });
 
     it("takes no constructor options and mints valid identities on its own", async () => {
-        expect(SecretsModule.length).toBe(0);
+        // The one optional argument is the bot settings module, never an options object.
+        expect(SecretsModule.length).toBe(1);
 
         await withDatabase("secrets-boundary-factories", async (database) => {
             const module = new SecretsModule();

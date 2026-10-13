@@ -213,3 +213,14 @@ Like tasks, a bot is mentioned in chat as `<happy-agent id="…"/>` with the bot
 its bot ID, because the tag names the conversation a client opens. `create_bot` and `list_bots`
 give the exact tag, and every agent offered the bot tools, task agents included, is told to use
 it.
+
+## Admin bots manage bot settings; a restricted bot loses the roster
+
+Bot settings are the owner's restrictions on a bot and every agent under it. Only active admin bots
+are offered `get_bot_settings` and `update_bot_settings`, and the catalog checks admin status again
+inside the change. The update carries `previous`, the settings it replaces, and is applied only
+while they are still stored, so Auto can tell narrowing from widening from the arguments alone and
+a concurrent edit is refused rather than overwritten. Narrowing skips review; widening is reviewed
+with each widening named. A bot kept inside its own tree is not offered `list_bots`, `create_bot`,
+or `send_bot_message`, its tasks lose them too, and `sendMessage` refuses it; it keeps
+`set_bot_avatar` for its own picture.

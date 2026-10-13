@@ -148,6 +148,7 @@ The tools exist only when both are true:
   setting defaults to on; explicitly setting it to `false` removes the tools.
 - The agent is somebody's own conversation. A subagent works inside the task it
   was handed and is given no view of the catalog.
+- The agent's bot, if any, has not kept it inside the bot's own tree.
 
 When the tools are absent, a model has no project tools at all rather than a tool
 that fails when it is called. When they are present, the agent is also told to

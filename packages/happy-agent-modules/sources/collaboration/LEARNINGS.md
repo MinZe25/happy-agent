@@ -67,3 +67,11 @@ gives a module that creates such an agent itself the same `reportToCreator: fals
 `createAgent` records, so its settlement never reaches the creator. The creator line in the
 instructions now follows that decision: an unreported agent is told to use `send_agent_message`
 when its creator needs to hear from it, rather than that its final words are reported.
+
+## A bot can keep its agents' messages inside its own tree
+
+`features.cross_workspace` remains the installation switch, and a bot setting can only narrow it.
+When a bot keeps its agents inside its own tree, `send_agent_message` reaches only agents of that
+tree, the cross-workspace instruction is withheld, and the tool describes itself without
+cross-workspace reach. Direct parent and child messages are always allowed. The tool hook became
+asynchronous because the answer depends on the agent's bot.

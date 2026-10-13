@@ -42,7 +42,7 @@ const updateSecretResultSchema = Type.Object(
 type UpdateSecretInput = Static<typeof updateSecretInputSchema>;
 
 /** Replace one global secret from reviewed inline values or a host-side dotenv source. */
-export function updateSecretTool(secrets: SecretsModule) {
+export function updateSecretTool(secrets: SecretsModule, agentId: string) {
     return defineAgentTool({
         name: "update_secret",
         defer: true,
@@ -69,6 +69,7 @@ export function updateSecretTool(secrets: SecretsModule) {
         shouldReviewInAutoMode: () => true,
         shouldRunInFullAccessInAutoMode: ({ dotenvFile }) => dotenvFile !== undefined,
         execute: async (ctx, input: UpdateSecretInput) => {
+            await secrets.assertSecretAllowedForAgent(ctx, agentId, input.secretId);
             const environment = await secretEnvironment(input.environment, input.dotenvFile);
             return await ctx.inTx(async (txCtx) => {
                 const current = await secrets.catalogSecret(txCtx, input.secretId);

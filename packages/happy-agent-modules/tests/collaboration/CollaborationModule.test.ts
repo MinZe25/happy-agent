@@ -12,6 +12,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AbortModule } from "../../sources/abort/index.js";
 import {
+    botSettingsMigrations,
+    BotSettingsModule,
+    DEFAULT_BOT_SETTINGS,
+} from "../../sources/botSettings/index.js";
+import {
     CollaborationModule,
     createAgentTool,
     interruptAgentTool,
@@ -22,6 +27,7 @@ import { SecretsModule } from "../../sources/secrets/index.js";
 import { HistoryModule } from "../../sources/history/index.js";
 import { testConfig } from "../support/computeModule.js";
 import { temporaryTestConfig } from "../support/configModule.js";
+import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const MODELS: readonly AgentModel[] = [
@@ -166,6 +172,7 @@ class Collection {
 async function started(
     collection: Collection,
     config = testConfig,
+    botSettings?: { readonly module: BotSettingsModule; readonly ctx: Context },
 ): Promise<{
     module: CollaborationModule;
     hooks: AgentModuleHooks;
@@ -179,8 +186,10 @@ async function started(
     const history = new HistoryModule();
     vi.spyOn(history, "toolSpawnPresentation").mockResolvedValue(undefined);
     vi.spyOn(history, "recordToolSpawnPresentation").mockResolvedValue(undefined);
-    const module = new CollaborationModule(config, abort, history);
-    const ctx = withAgentConfig(createRootContext().named("collaboration-test"), {
+    const module = new CollaborationModule(config, abort, history, botSettings?.module);
+    botSettings?.module.beforeStart(botSettings.ctx, collection.asRef());
+    const base = botSettings?.ctx ?? createRootContext().named("collaboration-test");
+    const ctx = withAgentConfig(base, {
         environment: {
             osVersion: "test",
             platform: "darwin",
@@ -946,6 +955,94 @@ describe("collaboration", () => {
             ),
         ).rejects.toThrow('Agent "missing" does not exist.');
         expect(collection.delivered).toHaveLength(0);
+    });
+
+    it("keeps the agents of a bot that restricts reach to the bot's own tree", async () => {
+        const database = moduleDatabase(botSettingsMigrations, "collaboration-bot-reach");
+        await database.ready;
+        try {
+            const botSettings = new BotSettingsModule();
+            const collection = new Collection();
+            collection.seed("botagent", null);
+            collection.seed("child", "botagent");
+            collection.seed("grandchild", "child");
+            collection.seed("stranger", null);
+            const { module, hooks, ctx } = await started(collection, testConfig, {
+                module: botSettings,
+                ctx: database.context,
+            });
+            await botSettings.write(ctx, "botagent", {
+                ...DEFAULT_BOT_SETTINGS,
+                crossWorkspace: false,
+            });
+
+            await expect(
+                module.sendMessage(ctx, "grandchild", { toAgentId: "stranger", text: "Hi." }, "m1"),
+            ).rejects.toThrow(
+                "This bot's settings let agent \"grandchild\" message only the bot's own agents",
+            );
+            // Inside the bot's tree, agents still reach one another by ID.
+            await module.sendMessage(
+                ctx,
+                "grandchild",
+                { toAgentId: "botagent", text: "Done." },
+                "m2",
+            );
+            await module.sendMessage(ctx, "child", { toAgentId: "grandchild", text: "Go." }, "m3");
+            // The restriction is the bot's own reach; an agent it does not govern may write in.
+            await module.sendMessage(ctx, "stranger", { toAgentId: "child", text: "Hello." }, "m4");
+            expect(collection.delivered.map((delivery) => delivery.toAgentId)).toEqual([
+                "botagent",
+                "grandchild",
+                "child",
+            ]);
+
+            const instructions = await hooks.instructions!(ctx, {
+                agent: { id: "child" },
+            } as never);
+            expect(instructions).not.toContain("Cross-workspace agent messaging is enabled");
+            const tools = await hooks.tools!(ctx, {
+                agent: { id: "child", provider: "codex" },
+            } as never);
+            expect(
+                tools.find((tool) => tool.name === "send_agent_message")?.description,
+            ).not.toContain("any existing agent by its Agent ID");
+            await expect(
+                hooks.instructions!(ctx, { agent: { id: "stranger" } } as never),
+            ).resolves.toContain("Cross-workspace agent messaging is enabled");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("never widens reach past the installation setting for a bot that allows it", async () => {
+        const database = moduleDatabase(botSettingsMigrations, "collaboration-bot-narrow-only");
+        await database.ready;
+        try {
+            const config = await temporaryTestConfig(NO_CROSS_WORKSPACE_TOML);
+            const botSettings = new BotSettingsModule();
+            const collection = new Collection();
+            collection.seed("botagent", null);
+            collection.seed("child", "botagent");
+            collection.seed("stranger", null);
+            const { module, hooks, ctx } = await started(collection, config, {
+                module: botSettings,
+                ctx: database.context,
+            });
+            await botSettings.write(ctx, "botagent", {
+                ...DEFAULT_BOT_SETTINGS,
+                allowedSecretIds: [],
+            });
+
+            await expect(
+                module.sendMessage(ctx, "child", { toAgentId: "stranger", text: "Hi." }, "m1"),
+            ).rejects.toThrow('Agent "child" is not authorized to send to agent "stranger".');
+            await expect(
+                hooks.instructions!(ctx, { agent: { id: "child" } } as never),
+            ).resolves.not.toContain("Cross-workspace agent messaging is enabled");
+        } finally {
+            database.close();
+        }
     });
 
     it("refuses sibling and grandchild messages because authorization is direct ancestry only", async () => {

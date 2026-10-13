@@ -35,7 +35,7 @@ const createSecretResultSchema = Type.Object(
 type CreateSecretInput = Static<typeof createSecretInputSchema>;
 
 /** Create one global secret from reviewed inline values or a host-side dotenv source. */
-export function createSecretTool(secrets: SecretsModule) {
+export function createSecretTool(secrets: SecretsModule, agentId: string) {
     return defineAgentTool({
         name: "create_secret",
         defer: true,
@@ -62,6 +62,7 @@ export function createSecretTool(secrets: SecretsModule) {
         shouldReviewInAutoMode: () => true,
         shouldRunInFullAccessInAutoMode: ({ dotenvFile }) => dotenvFile !== undefined,
         execute: async (ctx, input: CreateSecretInput) => {
+            await secrets.assertMayCreateForAgent(ctx, agentId);
             const environment = await secretEnvironment(input.environment, input.dotenvFile);
             const secret = await secrets.createCatalogSecret(ctx, {
                 ...(input.id === undefined ? {} : { id: input.id }),

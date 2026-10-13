@@ -135,3 +135,9 @@ project, and Desktop bootstrap queries while health continued to respond. Every 
 enters the caller-composable database transaction before acquiring the module lock. A gated
 child-process regression exercises both entry paths together and requires unrelated database
 reads to finish as well.
+
+## A bot can keep its agents out of project workspaces
+
+A bot whose owner keeps it inside its own tree is not offered the workspace tools, on its own agent
+or on tasks it opened. Opening or browsing another project's workspaces is the reach the setting
+removes; the bot's own dedicated folder is unaffected.

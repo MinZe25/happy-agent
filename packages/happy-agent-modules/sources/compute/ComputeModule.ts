@@ -37,6 +37,7 @@ import {
     type MapAsyncLock,
 } from "@steve.kite/stdlib";
 
+import type { BotSettingsModule } from "../botSettings/index.js";
 import type { ConfigModule } from "../config/index.js";
 import type { RunnersModule } from "../runners/index.js";
 import { FileReadLog } from "../impl/FileReadLog.js";
@@ -260,6 +261,7 @@ export class ComputeModule implements AgentModule {
     readonly #config: ConfigModule;
     readonly #secrets: SecretsModule;
     readonly #runners: RunnersModule | undefined;
+    readonly #botSettings: BotSettingsModule | undefined;
     /** Present only for the named alternate construction used by scripted machines. */
     #provider: HostComputeProvider | undefined;
     readonly #computes = new Map<string, CachedCompute>();
@@ -290,11 +292,20 @@ export class ComputeModule implements AgentModule {
     /**
      * @param runners Where an agent's folder is when it is not on this machine. An agent whose
      * configuration names a runner gets a machine there; without this module, it gets none.
+     * @param botSettings Where a bot runs the agents it governs. A bot that chooses Docker gets
+     * each governed agent's machine built in a container of its image, on the machine that holds
+     * the agent's folder. Without this module, no agent's machine is chosen by a bot.
      */
-    constructor(config: ConfigModule, secrets: SecretsModule, runners?: RunnersModule) {
+    constructor(
+        config: ConfigModule,
+        secrets: SecretsModule,
+        runners?: RunnersModule,
+        botSettings?: BotSettingsModule,
+    ) {
         this.#config = config;
         this.#secrets = secrets;
         this.#runners = runners;
+        this.#botSettings = botSettings;
         this.#provider = undefined;
     }
 
@@ -311,12 +322,13 @@ export class ComputeModule implements AgentModule {
         secrets: SecretsModule,
         provider: HostComputeProvider,
         runners?: RunnersModule,
+        botSettings?: BotSettingsModule,
     ): ComputeModule {
         const candidate = { id: provider.id, create: provider.create };
         if (!Value.Check(hostComputeProviderSchema, candidate)) {
             throw new Error("The host compute provider is invalid.");
         }
-        const module = new ComputeModule(config, secrets, runners);
+        const module = new ComputeModule(config, secrets, runners, botSettings);
         module.#provider = provider;
         return module;
     }
@@ -360,10 +372,13 @@ export class ComputeModule implements AgentModule {
                     return existing.compute;
                 }
 
+                // A bot's compute setting is read only while the machine is built: a running
+                // machine is never moved, so a change reaches it the next time it starts.
+                const effective = await this.#withBotCompute(lockCtx, config, agentId);
                 const created =
-                    config.runnerId === undefined && config.docker === undefined
-                        ? await this.#createHere(lockCtx, config, agentId)
-                        : await this.#createElsewhere(lockCtx, config, agentId);
+                    effective.runnerId === undefined && effective.docker === undefined
+                        ? await this.#createHere(lockCtx, effective, agentId)
+                        : await this.#createElsewhere(lockCtx, effective, agentId);
                 const { compute } = created;
                 if (this.#closed) {
                     await compute.dispose(lockCtx);
@@ -879,6 +894,24 @@ export class ComputeModule implements AgentModule {
                 ]),
             ],
         };
+    }
+
+    /**
+     * The agent's own configuration with its bot's compute choice applied. A workspace that
+     * already runs in Docker keeps its own image; otherwise a bot that chooses Docker puts the
+     * agent's folder in a container of the bot's image, on whichever machine holds that folder.
+     */
+    async #withBotCompute(
+        ctx: Context,
+        config: AgentComputeConfig,
+        agentId: string,
+    ): Promise<AgentComputeConfig> {
+        if (this.#botSettings === undefined || config.docker !== undefined) return config;
+        if (agentDatabase(ctx) === undefined) {
+            throw new Error("Compute cannot read the governing bot's settings without a database.");
+        }
+        const setting = await this.#botSettings.compute(ctx, agentId);
+        return setting.type === "docker" ? { ...config, docker: { image: setting.image } } : config;
     }
 
     /** An agent's machine on this computer, refused once runners are configured. */

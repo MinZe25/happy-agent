@@ -43,3 +43,13 @@ The authenticated HTTP API is a different trusted input boundary: create and upd
 carry raw environment values directly, including values loaded by a client from dotenv. Those
 values are write-only. Responses, conflict bodies, catalog filters, attachment objects, bootstrap
 state, and mutation events contain only safe metadata.
+
+## A bot's allowlist bounds every agent-facing path and every command
+
+A bot's owner may allow its agents only certain secrets. The allowlist is enforced here, not in
+the prompt: `list_secrets` and `reference_secret` show only allowed secrets, `attach_secret`,
+`detach_secret`, and `update_secret` refuse any other, and `create_secret` is refused under any
+allowlist because a new secret is outside it. Command resolution is the boundary that matters,
+since a command also inherits project and workspace attachments: the default selection drops what
+the bot does not allow, and an explicit selection outside the allowlist is refused, wherever the
+secret was attached. The owner's API catalog is never narrowed by a bot.

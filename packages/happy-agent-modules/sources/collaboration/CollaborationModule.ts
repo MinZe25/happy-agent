@@ -18,6 +18,7 @@ import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
 import { AbortModule } from "../abort/index.js";
+import type { BotSettingsModule } from "../botSettings/index.js";
 import { HistoryModule } from "../history/index.js";
 import type { ConfigModule } from "../config/index.js";
 import { senderAgentIdMetadata } from "../impl/messageOrigin.js";
@@ -64,13 +65,24 @@ export class CollaborationModule implements AgentModule {
     readonly #config: ConfigModule;
     readonly #history: HistoryModule;
     readonly #crossWorkspace: boolean;
+    readonly #botSettings: BotSettingsModule | undefined;
     #agents: AgentSystemRef | undefined;
     #toolCreationTail: Promise<void> = Promise.resolve();
 
-    constructor(config: ConfigModule, abort: AbortModule, history: HistoryModule) {
+    /**
+     * @param botSettings Whether a bot keeps the agents it governs inside its own tree. A bot
+     * setting only narrows `features.cross_workspace`; without this module, no bot narrows it.
+     */
+    constructor(
+        config: ConfigModule,
+        abort: AbortModule,
+        history: HistoryModule,
+        botSettings?: BotSettingsModule,
+    ) {
         this.#config = config;
         this.#abort = abort;
         this.#history = history;
+        this.#botSettings = botSettings;
         this.#crossWorkspace = config.configuration.values.features.crossWorkspace;
     }
 
@@ -302,7 +314,7 @@ export class CollaborationModule implements AgentModule {
                     `Collaborators you created: ${children.join(", ")}. Each reports back on its own when it finishes; nothing waits for them.`,
                 );
             }
-            if (this.#crossWorkspace) {
+            if (await this.#reachesAcrossWorkspaces(ctx, scope.agent.id)) {
                 lines.push(
                     "Cross-workspace agent messaging is enabled. You can use send_agent_message to text any existing agent when you know its Agent ID. Agent IDs are unguessable, so the user or another agent must share the recipient ID with you.",
                 );
@@ -346,7 +358,7 @@ export class CollaborationModule implements AgentModule {
          * The tool surface is fixed for one collection's models, so a model sees the same capabilities
          * on every turn and provider prompt caching still applies.
          */
-        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
+        tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
             const settings = this.#config.configuration.values.settings;
             return [
                 createAgentTool(
@@ -357,7 +369,11 @@ export class CollaborationModule implements AgentModule {
                     settings.maxCollaborators,
                     settings.maxCollaborationDepth,
                 ),
-                sendMessageTool(this, scope.agent.id, this.#crossWorkspace),
+                sendMessageTool(
+                    this,
+                    scope.agent.id,
+                    await this.#reachesAcrossWorkspaces(ctx, scope.agent.id),
+                ),
                 interruptAgentTool(this, scope.agent.id),
             ];
         },
@@ -547,11 +563,25 @@ export class CollaborationModule implements AgentModule {
             if ((await agents.config(ctx, targetAgentId)) === undefined) {
                 throw new Error(`Agent "${targetAgentId}" does not exist.`);
             }
+            if (
+                this.#botSettings !== undefined &&
+                !(await this.#botSettings.mayReach(ctx, actingAgentId, targetAgentId))
+            ) {
+                throw new Error(
+                    `This bot's settings let agent "${actingAgentId}" message only the bot's own agents, and agent "${targetAgentId}" is not one of them.`,
+                );
+            }
             return;
         }
         throw new Error(
             `Agent "${actingAgentId}" is not authorized to send to agent "${targetAgentId}".`,
         );
+    }
+
+    /** Whether this agent may message agents outside its ancestry: the installation and its bot agree. */
+    async #reachesAcrossWorkspaces(ctx: Context, agentId: string): Promise<boolean> {
+        if (!this.#crossWorkspace) return false;
+        return (await this.#botSettings?.allowsCrossWorkspace(ctx, agentId)) ?? true;
     }
 
     /** Enforce the model-facing tool's limits within its independently owned agent tree. */

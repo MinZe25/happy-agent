@@ -275,3 +275,8 @@ gets a machine on that runner in its workspace folder, optionally inside a conta
 with only an image, a container on this machine. Commands that select attached secrets are refused
 on runners and in containers, with a message saying so, until secrets can be delivered there.
 `runnerOf(config)` tells other modules which runner an agent's folder is on.
+
+A bot's settings may choose a Docker image for every agent under the bot. When an agent's own
+configuration names no image, its machine is built in a container of the bot's image, on this
+machine or its runner, with only its folder mounted. The setting is read only while a machine is
+built: a running machine keeps its compute until the agent is next started.

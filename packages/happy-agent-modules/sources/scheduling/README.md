@@ -5,10 +5,13 @@ arms its own timers, and when one fires it delivers the message itself through t
 collection. Nothing outside the module holds an alarm or performs a delivery.
 
 ```ts
-const scheduling = new SchedulingModule();
+const scheduling = new SchedulingModule(botSettings);
 ```
 
-The constructor takes nothing. Scheduling reads the clock, mints its own cuid2-shaped identities,
+The constructor takes only the optional bot settings module. A bot that keeps its agents inside
+its own tree has a message for an agent outside it refused when it is scheduled, and again when it
+falls due, so a message promised before the restriction does not go out after it; the refused
+message stays undelivered with the reason. Scheduling reads the clock, mints its own cuid2-shaped identities,
 and holds its own timers; its bounds are module constants rather than knobs —
 `MAX_SCHEDULING_WAIT_DURATION` and `MAX_SCHEDULING_HORIZON` are 24 hours, `SCHEDULING_PAGE_SIZE` is
 50, `SCHEDULING_OUTPUT_CHARACTERS` is 8,000, and a scheduled message may be up to

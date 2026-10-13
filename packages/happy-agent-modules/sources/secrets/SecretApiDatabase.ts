@@ -168,10 +168,12 @@ export interface SecretApiDatabase {
         ownerId: string,
         secretId: string,
     ) => Promise<SecretApiRecord | undefined>;
+    /** `allowedIds`, when given, is the complete set of secrets the page may contain. */
     readonly list: (
         ctx: Context,
         ownerId: string,
         query: SecretApiListQuery,
+        allowedIds?: readonly string[],
     ) => Promise<SecretApiPage>;
     readonly create: (
         ctx: Context,
@@ -243,9 +245,20 @@ export function createSecretApiDatabase(): SecretApiDatabase {
             const row = await rowFor(ctx, ownerId, secretId);
             return row === undefined || !publicRowAvailable(row) ? undefined : publicRecord(row);
         },
-        list: async (ctx, ownerId, query) => {
+        list: async (ctx, ownerId, query, allowedIds) => {
+            if (allowedIds !== undefined && allowedIds.length === 0) {
+                return { secrets: [], nextCursor: null };
+            }
             const cursor = await cursorPosition(ctx, ownerId, query.cursor, SECRETS_TABLE);
             const clauses = [sql`s.owner_agent_id = ${ownerId}`, sql`s.public_version IS NOT NULL`];
+            if (allowedIds !== undefined) {
+                clauses.push(
+                    sql`s.id IN (${sql.join(
+                        allowedIds.map((id) => sql`${id}`),
+                        sql`, `,
+                    )})`,
+                );
+            }
             if (cursor !== undefined) {
                 clauses.push(
                     sql`(s.created_at > ${cursor.createdAt} OR

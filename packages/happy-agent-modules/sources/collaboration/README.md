@@ -138,7 +138,10 @@ When `features.cross_workspace` is enabled, an agent may also message any existi
 unguessable Agent ID has been shared with it. Agent Base resolves that ID from its own durable
 collection, so this needs no second roster and works for roots in different workspaces. The prompt
 states the current agent's own ID and explains the routing rule. Unknown IDs are refused. This
-broader access applies only to messaging; interruption remains direct-ancestry-only.
+broader access applies only to messaging; interruption remains direct-ancestry-only. A bot's
+settings can narrow it for the bot's agents: a bot kept inside its own tree lets them message only
+agents of that tree, and they are not told about cross-workspace messaging. No bot setting enables
+it when `features.cross_workspace` is off.
 
 ### What a collaborator runs on
 

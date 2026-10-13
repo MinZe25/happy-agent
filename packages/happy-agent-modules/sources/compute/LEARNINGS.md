@@ -182,3 +182,11 @@ each later request replays, so one large screenshot made the conversation fail p
 enough images accumulated. Read now decodes the image and scales a longer side down to 2000 pixels,
 as Claude Code does, and tells the model the original and shown sizes. A file that does not decode
 as an image is refused rather than sent. Codex `view_image` still shows images as stored.
+
+## A bot's compute choice applies when the machine is built
+
+A bot's owner may run its agents in a Docker container of a chosen image. The choice is read only
+while an agent's machine is built, because a running machine is never moved: new agents get it at
+once and running agents after a restart. The bot's image is applied on whichever machine holds the
+folder — this computer or the agent's runner — and a workspace that already runs in Docker keeps
+its own image. Docker machines still refuse attached secrets.

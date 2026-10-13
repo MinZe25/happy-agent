@@ -264,7 +264,10 @@ One task, however many hands, is one workspace.
 The workspace tools appear only in a **primary session** (never in a subagent)
 and only when `features.workspaces` is enabled — it is on by default.
 `list_projects` additionally requires `features.cross_workspace`; when that is
-off, the tool is not offered at all rather than failing when it is called.
+off, the tool is not offered at all rather than failing when it is called. A
+bot's owner can also keep one bot and every agent under it away from projects and
+workspaces, whatever this setting says; see
+[Restrict a bot with bot settings](recipe/bot-settings.md).
 
 Relevant configuration keys:
 

@@ -13,6 +13,8 @@ Bot or task
 
 Active bots and active tasks are the roots of subtask trees. The two-level limit counts ancestry
 below that root, not siblings. Ordinary agents cannot create subtasks.
+A bot whose settings keep it inside its own tree may create only shared-folder subtasks; a
+workspace-bound request is refused before any workspace is made.
 Creation commits the agent, optional workspace association, and Durable Functions startup intent
 together. Initial delivery waits for workspace readiness and uses the agent ID as its durable
 message identity. Every full API agent includes its active direct subtasks recursively, including

@@ -197,3 +197,9 @@ The unused managed-root API previously allowed a parent-managed agent in a proje
 That creation path and its project attachment method are removed. Project attachment accepts only
 parentless agents; user-interactive delegation uses subtasks and their dedicated child workspaces.
 Existing stored associations remain readable and are not rewritten.
+
+## A bot can keep its agents out of the project catalog
+
+The project tools already required a root agent and `features.cross_workspace`. A bot whose owner
+keeps it inside its own tree loses them too, on its own agent and on tasks it opened, because
+seeing every project on the machine is exactly the reach the setting removes.

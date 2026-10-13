@@ -39,6 +39,7 @@ import {
     senderAgentIdOf,
 } from "../impl/messageOrigin.js";
 import { decodeRequestProfile } from "../impl/requestProfile.js";
+import type { BotSettingsModule } from "../botSettings/index.js";
 import type { EventsModule } from "../events/index.js";
 import { queryToolCallMessage } from "./persistence/queryToolCallMessage.js";
 import { queryRecordToolSpawnPresentation } from "./persistence/queryToolSpawnPresentation.js";
@@ -203,6 +204,7 @@ export type HistoryToolSpawnListener = (
 export class HistoryModule implements AgentModule {
     readonly name = "history";
     readonly #events: EventsModule | undefined;
+    readonly #botSettings: BotSettingsModule | undefined;
 
     /** Who is watching the archive: the live subscriptions this module supervises. */
     readonly #appendListeners = new Set<HistoryAppendListener>();
@@ -210,8 +212,13 @@ export class HistoryModule implements AgentModule {
     readonly #pendingListeners = new Set<HistoryPendingListener>();
     readonly #toolSpawnListeners = new Set<HistoryToolSpawnListener>();
 
-    constructor(events?: EventsModule) {
+    /**
+     * @param botSettings Whether a bot keeps the agents it governs from reading the history of
+     * agents outside its own tree. Without it, any agent may read any agent's history.
+     */
+    constructor(events?: EventsModule, botSettings?: BotSettingsModule) {
         this.#events = events;
+        this.#botSettings = botSettings;
         // Compile during module construction, not while the first history request owns the
         // database transaction. The cache contains fixed schemas, never transcript content.
         for (const schema of [
@@ -1066,10 +1073,11 @@ export class HistoryModule implements AgentModule {
      * Agent ID to read: its own, or another's. A target that exists nowhere is still a valid
      * request and simply has an empty archive — reading grants nothing and reaches nothing
      * outside the collection's own store. Anything that is not a well-formed Agent ID is refused
-     * rather than guessed at.
+     * rather than guessed at. The exception is an agent whose bot keeps it inside the bot's own
+     * tree: it may read only the history of the bot's own agents.
      */
     async resolveTarget(
-        _ctx: Context,
+        ctx: Context,
         requesterAgentId: string,
         requestedTarget: string,
     ): Promise<string> {
@@ -1082,6 +1090,14 @@ export class HistoryModule implements AgentModule {
         if (requestedTarget === requesterAgentId) return requestedTarget;
         if (!Value.Check(historyAgentIdSchema, requestedTarget)) {
             throw new Error(`Target '${requestedTarget}' is not an Agent ID.`);
+        }
+        if (
+            this.#botSettings !== undefined &&
+            !(await this.#botSettings.mayReach(ctx, requesterAgentId, requestedTarget))
+        ) {
+            throw new Error(
+                "This bot's settings let its agents read the history of only the bot's own agents.",
+            );
         }
         return requestedTarget;
     }

@@ -15,7 +15,7 @@ const listSecretsInputSchema = Type.Object(
 type ListSecretsInput = Static<typeof listSecretsInputSchema>;
 
 /** List bounded safe metadata; this tool never asks the module to resolve values. */
-export function listSecretsTool(secrets: SecretsModule) {
+export function listSecretsTool(secrets: SecretsModule, agentId: string) {
     return defineAgentTool({
         name: "list_secrets",
         defer: true,
@@ -28,7 +28,8 @@ export function listSecretsTool(secrets: SecretsModule) {
         durable: true,
         reloadable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, query: ListSecretsInput) => await secrets.listCatalog(ctx, query),
+        execute: async (ctx, query: ListSecretsInput) =>
+            await secrets.listCatalogForAgent(ctx, agentId, query),
         toLLM: (page) => [
             {
                 type: "text" as const,

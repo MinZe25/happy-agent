@@ -153,3 +153,9 @@ UserInput and are combined by the consumer rather than being faked as history.
 `startedAt` is the accepted message's durable submission time, or the maintenance operation's
 creation time. A later loop or provider event is not a second start clock. Keeping the timestamp on
 the History run makes live events, elapsed-time UI, restart recovery, and paged history agree.
+
+## A restricted bot reads only its own agents' history
+
+Any agent may otherwise read any agent's history by ID. A bot whose owner keeps it inside its own
+tree may read only the history of agents in that tree, so `resolveTarget` asks the bot settings
+module and refuses other targets. An agent's own history is always readable.

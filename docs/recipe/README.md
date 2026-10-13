@@ -68,6 +68,13 @@ people whose access requests reach it. Changes apply at once, without a reload. 
 a guest whose messages never count as the user's instructions, but the bot works for them with
 whatever it can reach, so let each one in only once the user says so.
 
+## Bot settings
+
+Read [Restrict a bot with bot settings](bot-settings.md) when the user wants a bot limited to
+certain secrets, kept away from other projects, workspaces, and agents, or run in Docker. An admin
+bot changes them with `update_bot_settings`, passing the value `get_bot_settings` returned as
+`previous`; a change that widens access is reviewed.
+
 ## Happy teams
 
 Read [Create and deploy a Happy team](deploy-happy-team.md) for the complete shared-server workflow:

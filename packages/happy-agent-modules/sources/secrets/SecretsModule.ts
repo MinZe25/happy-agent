@@ -9,6 +9,8 @@ import { Type, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
 
+import type { BotSettingsModule } from "../botSettings/index.js";
+
 import {
     GITHUB_SECRET_ID,
     PROJECT_GIT_SECRET_ID,
@@ -132,10 +134,20 @@ export class SecretsModule implements AgentModule {
 
     readonly #store: SecretDatabase = createSecretDatabase();
     readonly #apiStore: SecretApiDatabase = createSecretApiDatabase();
+    readonly #botSettings: BotSettingsModule | undefined;
 
     /** Subscribers taken after construction, inside and after the committing transaction. */
     readonly #transactionalListeners = new Set<SecretEventListener>();
     readonly #postCommitListeners = new Set<SecretEventListener>();
+
+    /**
+     * @param botSettings Which secrets a bot allows the agents it governs. Its allowlist bounds
+     * every agent-facing read and mutation and every command's resolution, whatever project,
+     * workspace, or agent attachments say. Without it, no agent is restricted by a bot.
+     */
+    constructor(botSettings?: BotSettingsModule) {
+        this.#botSettings = botSettings;
+    }
 
     /**
      * Watch the catalog inside the transaction that commits the change.
@@ -171,6 +183,58 @@ export class SecretsModule implements AgentModule {
     async catalogSecret(ctx: Context, secretId: string): Promise<SecretApiRecord | undefined> {
         this.#assertApiInput(secretApiIdSchema, secretId, "catalog secret ID");
         return await this.#apiStore.get(ctx, GLOBAL_SECRET_OWNER_ID, secretId);
+    }
+
+    /** The catalog as one agent may see it: only what its bot allows, when its bot restricts. */
+    async listCatalogForAgent(
+        ctx: Context,
+        agentId: string,
+        query: Partial<SecretApiListQuery> = {},
+    ): Promise<SecretApiPage> {
+        const normalized = { ...structuredClone(query), limit: query.limit ?? 50 };
+        this.#assertApiInput(secretApiListQuerySchema, normalized, "catalog list");
+        const allowed = await this.#allowedSecretIds(ctx, agentId);
+        return await this.#apiStore.list(
+            ctx,
+            GLOBAL_SECRET_OWNER_ID,
+            normalized,
+            allowed ?? undefined,
+        );
+    }
+
+    /** One catalog record an agent may see; a secret its bot does not allow is not there for it. */
+    async catalogSecretForAgent(
+        ctx: Context,
+        agentId: string,
+        secretId: string,
+    ): Promise<SecretApiRecord | undefined> {
+        this.#assertApiInput(secretApiIdSchema, secretId, "catalog secret ID");
+        const allowed = await this.#allowedSecretIds(ctx, agentId);
+        if (allowed !== null && !allowed.includes(secretId)) return undefined;
+        return await this.#apiStore.get(ctx, GLOBAL_SECRET_OWNER_ID, secretId);
+    }
+
+    /** Refuse an agent-driven action on a secret the agent's bot does not allow. */
+    async assertSecretAllowedForAgent(
+        ctx: Context,
+        agentId: string,
+        secretId: string,
+    ): Promise<void> {
+        const allowed = await this.#allowedSecretIds(ctx, agentId);
+        if (allowed !== null && !allowed.includes(secretId)) {
+            throw new Error(`Secret ${JSON.stringify(secretId)} is not available to this bot.`);
+        }
+    }
+
+    /** A bot that allows only certain secrets cannot add new ones to the catalog. */
+    async assertMayCreateForAgent(ctx: Context, agentId: string): Promise<void> {
+        if ((await this.#allowedSecretIds(ctx, agentId)) !== null) {
+            throw new Error("This bot allows only certain secrets, so it cannot create secrets.");
+        }
+    }
+
+    async #allowedSecretIds(ctx: Context, agentId: string): Promise<readonly string[] | null> {
+        return (await this.#botSettings?.allowedSecretIds(ctx, agentId)) ?? null;
     }
 
     /** Create one user-owned catalog record. Existing IDs are conflicts, never replacements. */
@@ -437,8 +501,18 @@ export class SecretsModule implements AgentModule {
                     effective.add(legacyId);
                 }
             }
-            const selected = normalizedSecretIds ?? [...effective].sort();
+            // The agent's bot bounds every grant, inherited project and workspace ones included.
+            const allowed =
+                agentTarget === undefined
+                    ? null
+                    : await this.#allowedSecretIds(txCtx, agentTarget.id);
+            const selected =
+                normalizedSecretIds ??
+                [...effective].filter((id) => allowed === null || allowed.includes(id)).sort();
             for (const secretId of selected) {
+                if (allowed !== null && !allowed.includes(secretId)) {
+                    throw new Error(`Secret '${secretId}' is not available to this bot.`);
+                }
                 if (!effective.has(secretId)) {
                     throw new Error(`Secret '${secretId}' is not attached to this agent.`);
                 }
@@ -923,13 +997,13 @@ export class SecretsModule implements AgentModule {
 
     readonly #hooks: AgentModuleHooks = {
         /** Common provider-neutral tools over the installation-wide catalog. */
-        tools: (_ctx: Context, _scope: AgentModuleScope): readonly AnyAgentTool[] => [
-            listSecretsTool(this),
-            referenceSecretTool(this),
-            createSecretTool(this),
-            updateSecretTool(this),
-            attachSecretTool(this, _scope.agent.id),
-            detachSecretTool(this, _scope.agent.id),
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
+            listSecretsTool(this, scope.agent.id),
+            referenceSecretTool(this, scope.agent.id),
+            createSecretTool(this, scope.agent.id),
+            updateSecretTool(this, scope.agent.id),
+            attachSecretTool(this, scope.agent.id),
+            detachSecretTool(this, scope.agent.id),
         ],
 
         /** Tell the model how safe references become one command's host-only environment. */

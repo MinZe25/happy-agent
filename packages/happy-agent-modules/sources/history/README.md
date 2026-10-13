@@ -49,7 +49,8 @@ Base transaction it happened inside, so the record and the thing recorded stay i
 ### `read_agent_history`
 
 The only tool the module exposes. It reads or searches the durable history for the calling agent,
-or for any other agent when `target` is given — history is readable by every agent.
+or for any other agent when `target` is given — history is readable by every agent, except that
+an agent whose bot keeps it inside the bot's own tree reads only that tree's history.
 Reading changes nothing and reaches nothing outside the agent's own store, so the tool is
 `durable: true`, `transactional: true`, and `shouldReviewInAutoMode` always returns `false` —
 there is nothing to review. Agent Base owns the page-read and result transaction.

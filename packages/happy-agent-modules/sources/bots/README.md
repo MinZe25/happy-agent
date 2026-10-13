@@ -62,6 +62,24 @@ shared `/v0/workspaces` HTTP and model-tool surfaces, while bot creation, listin
 agent messaging remain usable. When workspace routes are enabled, a bot's unlisted dedicated
 workspace is addressable by ID for files, terminals, and the workspace proxy.
 
+## Bot settings
+
+Each bot carries the owner's settings, stored by the bot settings module against the bot's agent:
+a secret allowlist, whether its agents keep the installation's reach or stay inside the bot's own
+tree, and whether they run on the host or in a Docker image. They govern the bot's agent and every
+agent working under it, and each owning module enforces its part.
+
+Active admin bots are offered `get_bot_settings` and `update_bot_settings`, both taking `botId`;
+the catalog checks admin status again in `settingsForAgent` and `updateSettingsForAgent`.
+`update_bot_settings` takes `previous`, exactly what `get_bot_settings` returned, plus only the
+fields to change, and applies the change only while `previous` is still stored, otherwise it
+raises `BotConflictError` with the current value. The tool needs Auto or Full access. In Auto, a
+change that only narrows is not reviewed; one that widens is, and the review names each widening.
+`updateSettings` is the owner's direct path and merges a patch into whatever is stored.
+
+A bot kept inside its own tree is offered neither the roster tools nor the bot reference
+instructions, its tasks lose them too, and `sendMessage` refuses it. It keeps `set_bot_avatar`.
+
 ## Tasks
 
 Bots create tasks through the tasks module's `create_task`; bot and task identities are reserved

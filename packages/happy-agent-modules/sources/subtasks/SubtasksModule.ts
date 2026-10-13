@@ -12,6 +12,7 @@ import { backoff, type Context } from "@steve.kite/stdlib";
 
 import { BotsModule } from "../bots/index.js";
 import { AbortModule } from "../abort/index.js";
+import type { BotSettingsModule } from "../botSettings/index.js";
 import { CollaborationModule } from "../collaboration/index.js";
 import { ComputeModule } from "../compute/index.js";
 import { DurableFunctionsModule } from "../durableFunctions/index.js";
@@ -57,8 +58,14 @@ export class SubtasksModule implements AgentModule {
     readonly #compute: ComputeModule;
     readonly #durableFunctions: DurableFunctionsModule;
     readonly #workspaces: WorkspacesModule;
+    readonly #botSettings: BotSettingsModule | undefined;
     #agents: AgentSystemRef | undefined;
 
+    /**
+     * @param botSettings Whether a bot keeps its subtasks in its own folder. A bot that keeps its
+     * agents inside its own tree may still create subtasks that share a folder, but none in a
+     * project workspace. Without it, no bot restricts where its subtasks work.
+     */
     constructor(
         bots: BotsModule,
         tasks: TasksModule,
@@ -67,7 +74,9 @@ export class SubtasksModule implements AgentModule {
         durableFunctions: DurableFunctionsModule,
         abort: AbortModule,
         compute: ComputeModule,
+        botSettings?: BotSettingsModule,
     ) {
+        this.#botSettings = botSettings;
         this.#bots = bots;
         this.#tasks = tasks;
         this.#abort = abort;
@@ -284,6 +293,15 @@ export class SubtasksModule implements AgentModule {
                 return { agentId, ...(workspaceId === undefined ? {} : { workspaceId }) };
             }
             const parent = await this.#assertCanCreate(txCtx, parentAgentId);
+            if (
+                requestedWorkspace !== undefined &&
+                this.#botSettings !== undefined &&
+                !(await this.#botSettings.allowsCrossWorkspace(txCtx, parentAgentId))
+            ) {
+                throw new SubtaskInputError(
+                    "This bot's settings keep its subtasks in the bot's own folder, so a subtask cannot work in a project workspace.",
+                );
+            }
             const selection = this.#collaboration.selectModel(task, currentProviderId);
             const resolvedInput = { ...input, ...selection };
             const workspace =

@@ -60,7 +60,8 @@ removes a membership.
 ## Tools
 
 Offered to every root agent that is not a task, which means bots and human-owned roots. Tasks and
-subagents receive none: a task delegates through subtasks.
+subagents receive none: a task delegates through subtasks. A bot kept inside its own tree by its
+settings receives none either, and a task an agent creates stays governed by that agent's bot.
 
 - `create_task` — `{ name, text? }`. Creates the task owned by the current sender, with the acting
   agent as `creatorAgentId`. `text` is delivered from the creator as the task's first message in

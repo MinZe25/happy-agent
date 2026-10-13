@@ -11,6 +11,7 @@ import { type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, detach, type Context } from "@steve.kite/stdlib";
 
+import type { BotSettingsModule } from "../botSettings/index.js";
 import { senderAgentIdMetadata } from "../impl/messageOrigin.js";
 import {
     MAX_SCHEDULING_FAILURE_LENGTH,
@@ -72,6 +73,10 @@ export const SCHEDULING_PAGE_SIZE = 50;
 /** The character budget every model-facing scheduling result is trimmed to fit. */
 export const SCHEDULING_OUTPUT_CHARACTERS = 8_000;
 
+/** Why a governed agent's message for an agent outside its bot does not go. */
+const OUTSIDE_BOT_REFUSAL =
+    "This bot's settings let its agents schedule messages only for the bot's own agents.";
+
 /**
  * Waiting, and messages that arrive later.
  *
@@ -101,8 +106,18 @@ export class SchedulingModule implements AgentModule {
     readonly #alarms = new Map<string, SchedulingAlarm>();
     readonly #delivering = new Set<string>();
 
+    readonly #botSettings: BotSettingsModule | undefined;
     #agents: AgentSystemRef | undefined;
     #deliveryCtx: Context | undefined;
+
+    /**
+     * @param botSettings Whether a bot keeps the agents it governs from scheduling messages for
+     * agents outside its own tree. It is checked when a message is scheduled and again when it is
+     * due, so a bot restricted in between does not deliver what it promised before.
+     */
+    constructor(botSettings?: BotSettingsModule) {
+        this.#botSettings = botSettings;
+    }
 
     /**
      * Take the agent collection, then re-arm everything the last process left pending.
@@ -222,6 +237,9 @@ export class SchedulingModule implements AgentModule {
         }
         const targetAgentId = input.targetAgentId ?? agentId;
         this.#assertAgentId(targetAgentId, "target agent");
+        if (!(await this.#mayReach(ctx, agentId, targetAgentId))) {
+            throw new Error(OUTSIDE_BOT_REFUSAL);
+        }
         const schedule = await ctx.inTx(async (txCtx) => {
             const id = input.id ?? this.#newId();
             const existing = await this.#readSchedule(txCtx, id);
@@ -548,6 +566,13 @@ export class SchedulingModule implements AgentModule {
 
     /** Hand the message over, and return why it did not arrive when it did not. */
     async #send(ctx: Context, schedule: SchedulingScheduledMessage): Promise<string | undefined> {
+        try {
+            if (!(await this.#mayReach(ctx, schedule.senderAgentId, schedule.targetAgentId))) {
+                return OUTSIDE_BOT_REFUSAL;
+            }
+        } catch (error: unknown) {
+            return boundedFailure(error);
+        }
         const introduction =
             schedule.senderAgentId === schedule.targetAgentId
                 ? "A message you scheduled for now:"
@@ -576,6 +601,10 @@ export class SchedulingModule implements AgentModule {
         } catch (error: unknown) {
             return boundedFailure(error);
         }
+    }
+
+    async #mayReach(ctx: Context, senderAgentId: string, targetAgentId: string): Promise<boolean> {
+        return (await this.#botSettings?.mayReach(ctx, senderAgentId, targetAgentId)) ?? true;
     }
 
     async #readWait(

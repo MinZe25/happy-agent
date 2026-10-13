@@ -31,6 +31,9 @@ export * from "./bots/index.js";
 // Exported bots: Happy bots people reach from Telegram or a bridge, one subtask per guest.
 export * from "./exportedBots/index.js";
 
+// Bot settings: the owner's restrictions on each bot and every agent working under it.
+export * from "./botSettings/index.js";
+
 // Tasks: persistent owned conversations with dedicated folders, roots of their own subtasks.
 export * from "./tasks/index.js";
 

@@ -137,6 +137,9 @@ disarms the project watch when its last ready workspace disappears.
 
 ## Tools it provides to the model
 
+They are offered to root agents while `features.workspaces` is on, except to an agent whose bot
+keeps it inside the bot's own tree.
+
 Every agent offered these tools is also told to mention a workspace as
 `<happy-workspace id="…"/>`, and the two creation tools return that exact tag. Clients show the
 workspace's live name as a link in its place.

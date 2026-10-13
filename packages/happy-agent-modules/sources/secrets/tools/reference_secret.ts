@@ -19,7 +19,7 @@ type ReferenceSecretInput = Static<typeof referenceSecretInputSchema>;
 type ReferenceSecretResult = Static<typeof referenceSecretResultSchema>;
 
 /** Look up one bounded safe reference without exposing its values. */
-export function referenceSecretTool(secrets: SecretsModule) {
+export function referenceSecretTool(secrets: SecretsModule, agentId: string) {
     return defineAgentTool({
         name: "reference_secret",
         defer: true,
@@ -33,7 +33,7 @@ export function referenceSecretTool(secrets: SecretsModule) {
         reloadable: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: ReferenceSecretInput): Promise<ReferenceSecretResult> => ({
-            secret: (await secrets.catalogSecret(ctx, input.id)) ?? null,
+            secret: (await secrets.catalogSecretForAgent(ctx, agentId, input.id)) ?? null,
         }),
         toLLM: ({ secret }) => [
             {

@@ -92,3 +92,10 @@ stored beside the subtask's own fields, which always win. The calling module del
 message itself. The subtask is marked `subtaskConversation`, and its instructions say it holds a
 conversation for its parent instead of telling it to report its progress there, which would have
 sent every chat to the bot.
+
+## A restricted bot's subtasks share its folder
+
+A workspace-bound subtask opens a workspace in a project, which a bot kept inside its own tree may
+not reach. Such a request is refused with an input error before any workspace is made. Subtasks
+that share the bot's folder, and exported-bot conversations, are the bot's own work and are not
+gated, so `#assertCanCreate` itself stays independent of reach.

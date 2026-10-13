@@ -48,6 +48,7 @@ export function attachSecretTool(secrets: SecretsModule, agentId: string) {
                 `attaching secret reference ${JSON.stringify(secretId)} to scope ${JSON.stringify(agentId)}. This grants that exact agent access to the secret for later host operations`,
             shouldReviewInAutoMode: () => true,
             execute: async (ctx, input: AttachSecretInput): Promise<AttachSecretResult> => {
+                await secrets.assertSecretAllowedForAgent(ctx, agentId, input.secretId);
                 const secret = await secrets.catalogSecret(ctx, input.secretId);
                 if (secret === undefined) throw new Error("That global secret is not registered.");
                 const { attachment } = await secrets.attachCatalogSecret(ctx, input.secretId, {

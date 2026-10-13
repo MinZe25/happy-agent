@@ -35,6 +35,7 @@ import { AutoModule } from "../auto/index.js";
 import { BotsModule } from "../bots/index.js";
 import { BridgesModule } from "../bridges/index.js";
 import { ExportedBotsModule } from "../exportedBots/index.js";
+import { BotSettingsModule } from "../botSettings/index.js";
 import { CollaborationModule } from "../collaboration/index.js";
 import { SubtasksModule } from "../subtasks/index.js";
 import { CompactionsModule } from "../compactions/index.js";
@@ -142,6 +143,7 @@ export interface HappyAgentRuntimeModules {
     readonly auto: AutoModule;
     readonly bots: BotsModule;
     readonly bridges: BridgesModule;
+    readonly botSettings: BotSettingsModule;
     readonly chatMedia: ChatMediaModule;
     readonly exportedBots: ExportedBotsModule;
     readonly collaboration: CollaborationModule;
@@ -397,13 +399,16 @@ export async function startHappyAgentRuntime(
             backgroundTasks.set(task, name);
         };
 
-        const secrets = new SecretsModule();
+        // Every module that enforces part of a bot's settings asks this one which bot governs an
+        // agent, so it is built before all of them.
+        const botSettings = new BotSettingsModule();
+        const secrets = new SecretsModule(botSettings);
         const runners = new RunnersModule(config);
         registerShutdown("runners", async () => await runners.close());
         const suppliedCompute = options.compute;
         const computeModule =
             suppliedCompute === undefined
-                ? new ComputeModule(config, secrets, runners)
+                ? new ComputeModule(config, secrets, runners, botSettings)
                 : ComputeModule.withProvider(
                       config,
                       secrets,
@@ -413,6 +418,7 @@ export async function startHappyAgentRuntime(
                               (await suppliedCompute(computeCtx, computeConfig)) as HostCompute,
                       },
                       runners,
+                      botSettings,
                   );
         const durableFunctions = new DurableFunctionsModule();
         const globalSkills = new GlobalSkillsModule(config, durableFunctions);
@@ -427,7 +433,7 @@ export async function startHappyAgentRuntime(
         });
 
         const events = new EventsModule();
-        const history = new HistoryModule(events);
+        const history = new HistoryModule(events, botSettings);
         history.onAppend(observation.recordHistory);
         const presence = new PresenceModule(config);
         const systemPrompt = new SystemPromptModule(config, compute.computeModule);
@@ -455,7 +461,14 @@ export async function startHappyAgentRuntime(
         const permissions = new PermissionsModule(compute.computeModule, autoModule);
         const abort = new AbortModule(compute.computeModule);
         const git = new GitModule(config, runners);
-        const projects = new ProjectsModule(config, git, abort, durableFunctions, runners);
+        const projects = new ProjectsModule(
+            config,
+            git,
+            abort,
+            durableFunctions,
+            runners,
+            botSettings,
+        );
         const workspaces = new WorkspacesModule(
             config,
             projects,
@@ -463,6 +476,7 @@ export async function startHappyAgentRuntime(
             abort,
             durableFunctions,
             runners,
+            botSettings,
         );
         const titles = new TitlesModule(config, history, workspaces);
         const tasks = new TasksModule(
@@ -474,8 +488,18 @@ export async function startHappyAgentRuntime(
             runners,
             compute.computeModule,
             durableFunctions,
+            botSettings,
         );
-        const bots = new BotsModule(config, abort, titles, projects, workspaces, runners, tasks);
+        const bots = new BotsModule(
+            config,
+            abort,
+            titles,
+            projects,
+            workspaces,
+            runners,
+            tasks,
+            botSettings,
+        );
         const artifacts = new ArtifactsModule(
             config,
             durableFunctions,
@@ -514,7 +538,7 @@ export async function startHappyAgentRuntime(
             "artifact-data",
             async (shutdownCtx) => await artifactData.close(shutdownCtx),
         );
-        const collaboration = new CollaborationModule(config, abort, history);
+        const collaboration = new CollaborationModule(config, abort, history, botSettings);
         const subtasks = new SubtasksModule(
             bots,
             tasks,
@@ -523,8 +547,9 @@ export async function startHappyAgentRuntime(
             durableFunctions,
             abort,
             compute.computeModule,
+            botSettings,
         );
-        const scheduling = new SchedulingModule();
+        const scheduling = new SchedulingModule(botSettings);
         const userInput = new UserInputModule(presence);
         const mcp = new McpModule(config, userInput, workspaces, runners, compute.computeModule);
         registerShutdown("mcp", async () => await mcp.close());
@@ -648,6 +673,7 @@ export async function startHappyAgentRuntime(
             auto: autoModule,
             bots,
             bridges,
+            botSettings,
             chatMedia,
             exportedBots,
             collaboration,
@@ -730,6 +756,7 @@ export async function startHappyAgentRuntime(
             ...(team.enabled ? [] : [profile]),
             git,
             durableFunctions,
+            botSettings,
             globalSkills,
             live,
             bots,

@@ -79,8 +79,8 @@ describe("SecretsModule", () => {
         }
     });
 
-    it("takes no construction arguments at all", () => {
-        expect(SecretsModule.length).toBe(0);
+    it("takes nothing but the optional bot settings module", () => {
+        expect(SecretsModule.length).toBe(1);
         const module = new SecretsModule();
         expect(module.name).toBe("secrets");
         expect(module.migrations).toBe(secretsMigrations);

@@ -24,4 +24,4 @@ export {
     type BotUnsubscribe,
 } from "./BotEvent.js";
 export { botMigrations, BOTS_TABLE, BOT_AVATARS_TABLE } from "./BotMigrations.js";
-export { BotsModule } from "./BotsModule.js";
+export { BotsModule, type BotSettingsChange } from "./BotsModule.js";

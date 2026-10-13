@@ -20,6 +20,7 @@ import {
 import { backoff, mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
 
 import { AbortModule } from "../abort/index.js";
+import type { BotSettingsModule } from "../botSettings/index.js";
 import { ConfigModule } from "../config/index.js";
 import { durableCheckpoint, DurableFunctionsModule } from "../durableFunctions/index.js";
 import { LocalExecutionDisabledError, type RunnersModule } from "../runners/index.js";
@@ -223,6 +224,7 @@ export class ProjectsModule implements AgentModule {
     readonly #store: ProjectStore;
     readonly #mutations: ProjectMutations;
     readonly #crossWorkspace: boolean;
+    readonly #botSettings: BotSettingsModule | undefined;
     #agents: AgentSystemRef | undefined;
 
     // --- The catalog's own Git and filesystem work -------------------------------------------
@@ -242,6 +244,8 @@ export class ProjectsModule implements AgentModule {
      * than leaving them running in a checkout that is about to be removed.
      * @param runners The machines project folders are on. Every folder operation runs on the
      * machine it asks for: this one, or a runner once runners are configured.
+     * @param botSettings Whether a bot keeps the agents it governs out of the catalog. A bot
+     * setting only narrows `features.cross_workspace`; without this module, no bot narrows it.
      */
     constructor(
         config: ConfigModule,
@@ -249,8 +253,10 @@ export class ProjectsModule implements AgentModule {
         abort: AbortModule,
         durableFunctions: DurableFunctionsModule,
         runners: RunnersModule,
+        botSettings?: BotSettingsModule,
     ) {
         this.#abort = abort;
+        this.#botSettings = botSettings;
         this.#runners = runners;
         this.#config = config;
         this.#durableFunctions = durableFunctions;
@@ -328,8 +334,9 @@ export class ProjectsModule implements AgentModule {
 
     /**
      * The catalog spans every project on the machine, which is exactly what looking outside the
-     * current one means, so the user's setting decides whether it exists at all. A subagent works
-     * inside the task it was handed and never gets it.
+     * current one means, so the user's setting decides whether it exists at all, and a bot can
+     * keep the agents it governs out of it. A subagent works inside the task it was handed and
+     * never gets it.
      */
     async #offersTools(ctx: Context, agentId: string): Promise<boolean> {
         if (!this.#crossWorkspace) return false;
@@ -337,7 +344,8 @@ export class ProjectsModule implements AgentModule {
         if (agents === undefined) {
             throw new Error("The projects module was asked for tools before it started.");
         }
-        return (await agents.parentOf(ctx, agentId)) === null;
+        if ((await agents.parentOf(ctx, agentId)) !== null) return false;
+        return (await this.#botSettings?.allowsCrossWorkspace(ctx, agentId)) ?? true;
     }
 
     readonly #hooks: AgentModuleHooks = {

@@ -39,6 +39,7 @@ export function detachSecretTool(secrets: SecretsModule, agentId: string) {
             `detaching secret reference ${JSON.stringify(secretId)} from scope ${JSON.stringify(agentId)}. This revokes that exact agent's direct access to the secret for later host operations`,
         shouldReviewInAutoMode: () => true,
         execute: async (ctx, input: DetachSecretInput): Promise<DetachSecretResult> => {
+            await secrets.assertSecretAllowedForAgent(ctx, agentId, input.secretId);
             const attachment = await secrets.detachCatalogSecret(ctx, input.secretId, {
                 type: "agent",
                 id: agentId,
