@@ -278,7 +278,9 @@ workspace, which a client reaches only through a task.
 
 Reference tags in agent text, described under "Message content", are additive and do not
 increment the protocol version. Request and response schemas are unchanged; a client that does not
-render them shows the tag text as written.
+render them shows the tag text as written. File links, described in the same section, are additive
+on the same terms; a client that does not know them treats them as Markdown links with an unknown
+scheme.
 
 Artifacts are additive and do not increment the protocol version. Clients detect them through
 `GET /v0/artifacts`: `404` means the daemon has no artifacts, not that the catalog is empty. The
@@ -4733,6 +4735,114 @@ tag.
 Reference tags are additive and do not increment the protocol version. Request and response
 schemas are unchanged. A client that does not know about reference tags shows the tag text as
 written.
+
+#### File links
+
+A bare `path:line` is read against the workspace of the conversation that shows it. That is the
+wrong workspace whenever the text is read somewhere else: a subtask's report relayed by its
+parent, or a message from an agent that works in another folder. A **file link** names the
+workspace explicitly. It is not a reference tag but an ordinary Markdown inline link whose
+destination is a `happy-file` URL:
+
+```markdown
+The loop starts in [Foo.tsx:42](happy-file://agents/a1b2c3d4/packages/app/Foo.tsx#L42-L50).
+The setup steps are in [README](happy-file://workspaces/k2h4j5l6/README.md).
+```
+
+The label is ordinary Markdown that the agent writes. As with reference tags, the daemon stores
+and returns message text exactly as written, and no route rewrites it. An agent keeps writing
+plain `path:line` for a file in the reader's own workspace. The scheme is `happy-file`, not
+`happy`, because the Happy mobile app registers `happy://` for its deep links.
+
+**Grammar.** In ABNF, with `ALPHA`, `DIGIT`, and `HEXDIG` as in RFC 5234:
+
+```text
+file-link   = "happy-file://" target "/" path [ "#" lines ]
+target      = "agents/" id / "workspaces/" id
+id          = 1*128( ALPHA / DIGIT / "_" / "-" )
+path        = segment *( "/" segment )
+segment     = 1*( unreserved / pct-encoded / "!" / "$" / "&" / "'" / "*" / "+" / "," / ";" /
+                  "=" / ":" / "@" )
+unreserved  = ALPHA / DIGIT / "-" / "." / "_" / "~"
+pct-encoded = "%" HEXDIG HEXDIG
+lines       = "L" line [ "-L" line ]
+line        = %x31-39 *8DIGIT
+```
+
+- A link is at most 4,096 characters.
+- Matching is case-sensitive. `happy-file://`, `agents/`, `workspaces/`, and `L` are written
+  exactly as shown. Only the hex digits of `pct-encoded` may be either case.
+- `agents/<id>` names an agent, and the file lives in that agent's workspace, its `workspaceId`.
+  `workspaces/<id>` names a workspace directly. A project's files are linked through its root
+  workspace's ID, as under "Files".
+- `path` is relative to that workspace's root. Each segment is percent-decoded on its own, and
+  its bytes must be valid UTF-8. A decoded segment must not be `.` or `..` and must not contain
+  `/`, `\`, or a control character (U+0000–U+001F or U+007F–U+009F). An encoded `%2F` is never a
+  separator. There is no leading or trailing `/` and no empty segment.
+- Every character outside the grammar is percent-encoded as UTF-8: spaces, parentheses, `?`, `#`,
+  `[`, `]`, a `%` that does not start an escape, and every non-ASCII character. Literal
+  parentheses are excluded so a link never needs Markdown escaping.
+- `#L12` selects line 12 and `#L12-L20` lines 12 through 20. Lines count from 1, a line number has
+  no leading zeros and at most nine digits, and the end is never before the start. `#L12-L12`
+  equals `#L12`.
+- Anything else makes the link malformed: a query, an empty or other fragment, a missing path, an
+  invalid escape, or a broken rule above. A malformed link is never partly interpreted. It is
+  unresolvable as a whole.
+- The canonical form percent-encodes every byte of a segment except `unreserved`, writes
+  uppercase hex digits, and writes a single line as `#L12`. Readers accept every well-formed link,
+  canonical or not.
+
+A file link inside an inline code span or a fenced code block is literal text, as in Markdown.
+
+**Resolution.** A file link resolves through routes that already exist:
+
+1. For `agents/<agentId>`, `GET /v0/agents/:agentId` gives the agent's `workspaceId`. An unknown
+   agent, or one whose `archivedAt` is not `null`, makes the link unresolvable.
+2. `GET /v0/workspaces/:workspaceId` must answer with a workspace whose `status` is `"active"`.
+   An unknown workspace, or one that is archiving or archived, makes the link unresolvable.
+3. `GET /v0/workspaces/:workspaceId/file` with the decoded `path` reads the file. Any answer other
+   than `200`, such as a missing file or a path escaping the root, makes the link unresolvable.
+
+A link is resolved only when it is opened. A client does not have to check every link it renders.
+
+**Rendering.** A client that renders file links shows each one as an ordinary Markdown link with
+the agent's label. Opening it shows the file read-only, from the linked workspace, inside the
+reader's own conversation. The reader does not move to the other agent or workspace. When `lines`
+is present, the client shows those lines and SHOULD highlight them. A range past the end of the
+file shows the file without a selection. When a link is malformed or unresolvable, the client
+shows its usual "could not open" treatment. A client never hands a `happy-file` URL to the
+operating system or a browser.
+
+**Fallback.** A surface that cannot open file links gets plain Markdown in which each inline link
+whose destination starts with `happy-file:`, in any letter case and whether or not it is
+well-formed, is replaced by its label. The label stays as the Markdown written between the
+brackets. An image, `![alt](happy-file://…)`, is replaced by its alt text the same way. When the
+label is empty or blank, the link becomes its decoded path, escaped as literal text, or nothing
+when the link is malformed. An inline link here is `[label](destination)` or
+`[label](<destination>)` with an optional title, as in CommonMark. Its label may hold balanced
+brackets, code spans, and backslash escapes, and it cannot cross a blank line. A link in a code
+span or fenced code block, or one whose `[` is backslash-escaped, is left alone. The daemon
+applies this fallback, together with the reference-tag fallback, to the agent text it relays to
+the Happy mobile app.
+
+**One implementation.** `@slopus/happy-agent-client` exports the grammar, parser, formatter, and
+fallback: `HAPPY_FILE_LINK_SCHEME`, `MAX_HAPPY_FILE_LINK_LENGTH`, `happyFileLinkSchema` with its
+`HappyFileLink` type, `parseHappyFileLink`, `formatHappyFileLink`, `replaceHappyFileLinks`, and
+`renderHappyFileLinksAsText`. A parsed link has this shape, with `path` decoded:
+
+```ts
+{
+    target: { type: "agent"; agentId: string } | { type: "workspace"; workspaceId: string };
+    path: string; // "packages/app/Foo.tsx"
+    lines?: { start: number; end: number }; // #L42 is { start: 42, end: 42 }
+}
+```
+
+Clients and the daemon use these rather than their own parsers, so every surface agrees on exactly
+what a file link names.
+
+File links are additive and do not increment the protocol version. Request and response schemas
+are unchanged.
 
 ### `POST /v0/agents/:agentId/send`
 
