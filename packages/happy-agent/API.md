@@ -238,6 +238,10 @@ daemon answers `GET /v0/runners` with `404` and never returns a runner compute. 
 a compute `type` it does not recognize treats the folder as being on another machine and offers no
 local-path actions for it.
 
+Account provenance, configuration history blocks, and structured error details are additive output
+and do not increment the protocol version. Clients tolerate their absence and older clients keep
+their existing text rendering. Existing sends and idle-only compaction remain unchanged.
+
 The global skills catalog, parsed skill documents, enablement, file reads, and live
 `skills.updated` invalidations are additive and do not increment the protocol version. Clients
 detect this feature through `GET /v0/skills`: `404` or `501` means skill management is unavailable,
@@ -4168,6 +4172,31 @@ Response — `200`:
 
 `mode` is `null` before the first message. `404` when no such agent exists.
 
+An execution `MessageMode` in configuration history or structured error details may additionally
+carry `account: { "id": "...", "label": "..." } | null` beside `providerId`. Account provenance
+is output-only and is absent from requested modes, pending and accepted user-message modes,
+drafts, and this mode endpoint. `id` is an opaque, installation-local account identity, not a token, token
+hash, credential path, or provider-native account identifier. It is a nonempty string of at most
+256 characters. `label` is optional, nonempty human-readable text of at most 256 characters. The daemon
+resolves this provenance from the credential actually used. Execution snapshots may also carry
+`providerType`, the canonical configured provider family at the time of that attempt, as a
+nonempty string of at most 128 characters. It is output-only too, and remains absent when unknown.
+Clients omit `account` and `providerType` from outbound
+message and slash-command modes and saved drafts so reusing a snapshot remains compatible with older daemons. A
+caller-supplied provenance field is never an account selector or evidence of identity and is ignored.
+`null` means the account has not been
+established at this point. Absence means the daemon supplied no account provenance. Clients show
+an unknown account honestly rather than deriving an identity from a provider alias or token.
+
+Pending modes describe the requested configuration, not a promise about the eventual account or
+fallback route. Configuration history and error details below carry actual execution snapshots.
+Captured snapshots are durable and are not reconstructed from today's credentials or settings.
+In a submitted message, pending message, or composer mode, `providerId` remains the requested
+provider or routing-group alias. In a configuration block's `before`/`after` and an error's `mode`,
+`providerId` is the concrete provider entry actually selected for that execution attempt. These
+execution snapshots do not overwrite the stored requested mode. A routing alias is never evidence
+of an account identity; `account.id` is supplied only from observed identity.
+
 ### Slash commands
 
 Modules may contribute slash commands for an agent alongside the instructions and tools they
@@ -4426,9 +4455,184 @@ See `send` for its context-reset semantics.
 - `service` — typed operational records the model never saw: compaction, aborts, and similar
   housekeeping. Human-readable text never carries compaction lifecycle meaning.
 
+#### Configuration history
+
+A configuration record is an ordinary durable `service` message with one `configuration` block:
+
+```json
+{
+    "type": "configuration",
+    "before": {
+        "providerId": "codex",
+        "account": { "id": "account-default", "label": "Default account" },
+        "modelId": "openai/gpt-6-astra",
+        "effort": "high",
+        "serviceTier": null,
+        "permissionMode": "auto"
+    },
+    "after": {
+        "providerId": "claude",
+        "account": null,
+        "modelId": "anthropic/opus-5-5",
+        "effort": "high",
+        "serviceTier": null,
+        "permissionMode": "auto"
+    },
+    "beforeMessageId": "tz4a98xxat96iws9zmbrgj3a"
+}
+```
+
+`before` and `after` are complete `MessageMode` snapshots, with `before: null` only for the first
+resolved execution configuration. The first record establishes the durable baseline but is not
+shown as a change. `beforeMessageId` is an existing message identity or `null`. A non-null value
+must name a committed, visible message in this same history run, placing the record immediately
+before that message, normally the first message affected by the
+change. `null` keeps its ordinary chronological append position when there is no suitable user
+message to anchor, such as a mid-run account switch or compaction. The enclosing message ID
+is the configuration record's identity; no separate change ID, revision, event family, or incident
+store is introduced. The ordinary history and `message.created` transport carry the same record.
+Clients preserve the anchor when its message is outside the loaded history page instead of
+guessing another position. Desktop may place the row by its anchor. An append-only terminal must
+not move or rewrite stable transcript rows to insert it; it appends the configuration row at the
+next safe chronological position when the anchor is already rendered.
+
+Resolve the actual provider, model, and observed account before comparing with the previous
+execution snapshot. A same-configuration execution emits no change record. A token refresh for
+the same known account does not count as a change, nor does a display-label refresh. Several
+requested changes before one execution coalesce to the configuration actually used: A → B → C
+with no execution on B records A → C. A route change after output has begun belongs before the
+next affected message, never retroactively before output produced by the old route. The baseline
+survives compaction and restart. These records are display history, never model input or a reason
+to reset provider context.
+
+An unknown account becoming known, or a previously known account becoming unavailable, does not
+prove an account switch. Such enrichment updates the comparison baseline without emitting a change
+solely for that uncertainty. Two different observed account IDs do prove an account change.
+
+Clients resolve human-readable model names from the existing model catalog. Provider family is
+the snapshot's `providerType`, not
+a provider ID prefix, routing alias, model ID prefix, or guessed model vendor. Bedrock is the
+Bedrock provider family even when its models come from different model vendors; model names still
+come from the model catalog independently. Do not reconstruct historical family from a changed
+or removed provider in today's catalog. If a provider's type is unavailable, its family is
+unknown and clients do not invent an account-only transition. They display an
+account-only change when the before and after providers belong to the same known provider family;
+when the family changes, the model change is sufficient and the account transition is hidden.
+Missing labels or unknown identities never become invented account names.
+
+A concrete `providerId` change within one known family remains a meaningful configured-connection
+change even when both snapshots have `account: null`. Clients show that connection change using
+available configured display labels or the exact provider-route identifiers, clearly presented
+as connections rather than verified vendor accounts. They do not suppress it merely because
+vendor identity is unknown. A native account change behind an unchanged provider entry requires
+observed account identities; an unknown identity cannot prove such a change. No extra identity
+field is needed: the existing `providerId` and optional `account` describe these distinct facts.
+
+#### Structured error details
+
+An ordinary error `service` message retains its existing full, user-safe text blocks and may
+add an `error` object alongside `content` and `metadata`:
+
+```json
+{
+    "code": "authentication",
+    "mode": {
+        "providerId": "claude_work",
+        "account": { "id": "account-work", "label": "Work" },
+        "modelId": "anthropic/opus-5-5",
+        "effort": "high",
+        "serviceTier": null,
+        "permissionMode": "auto"
+    },
+    "credentialSource": {
+        "kind": "environment",
+        "location": "CLAUDE_CODE_OAUTH_TOKEN",
+        "host": "Mac mini"
+    },
+    "recovery": {
+        "steps": [
+            "Replace the expired token in this daemon's environment and reload that environment.",
+            "Then send a new continuation. Signing into the native assistant alone does not replace this environment override."
+        ],
+        "actions": ["ask_chief"],
+        "commands": []
+    }
+}
+```
+
+All existing messages remain valid without `error`. When present:
+
+- `code` is a nonempty stable machine-readable string of at most 128 characters. The set grows;
+  clients treat unknown codes as generic failures and never classify errors by matching prose.
+- `mode` is the actual failed attempt's complete `MessageMode`, or `null` when unavailable. It
+  names the concrete attempted route, not a requested routing pool or a later successful retry.
+- `credentialSource` is `null` when unknown or not authorized for this caller. Otherwise its
+  `kind` is a nonempty string of at most 64 characters. Current kinds are `native_login`,
+  `configuration`, and `environment`; future kinds are additive. Clients tolerate an unknown kind
+  and show generic source information without inferring a native login or other remedy.
+  `location` is a nonempty safe
+  descriptor of at most 256 characters, such as a native assistant's sign-in, a configuration
+  key, or an environment-variable name. `host` is a human-readable host label of at most 256
+  characters, or `null` when unavailable or not authorized. These fields never contain token
+  values, token fragments or hashes, credential-file paths, credential-file contents, or raw
+  authorization headers. They are captured from the actual credential source, not guessed from
+  current configuration after the failure.
+- `recovery.steps` is an ordered array of at most eight user-safe instructions, each nonempty
+  and at most 2,048 characters. Advice must match the observed source: native sign-in, configured
+  credentials, and an environment override need different remedies. Unknown sources get honest
+  diagnostic guidance, not an asserted cause. Authentication failure describes this attempt,
+  not proof that a login was lost or that refresh cannot recover. An expired `401` alone never
+  demands sign-in: the provider's normal recovery runs first. A terminal failure may suggest
+  retrying this chat, then conditional manual recovery if retry still fails.
+- `recovery.commands` is an optional array of at most eight copyable manual commands. Each entry
+  has a nonempty `label` of at most 128 characters and a nonempty `command` of at most 2,048
+  characters. Commands are safe daemon-curated instructions for the observed source, never
+  provider diagnostics, token values, or shell text assembled from untrusted labels. Clients
+  show the exact command and a Copy control; copying never runs it. Missing means no supplied
+  commands, not permission to invent one from error text.
+
+    For the default native Claude Code login only, the fallback command is `claude auth login`.
+    Its steps explain: retry the same chat first; if that still fails, run the command on the
+    daemon's machine, complete the browser sign-in, then retry the same chat. The command and steps
+    remain usable with no working AI credentials. An explicit configured token, API key, environment
+    override, or custom native configuration directory must not receive that default-login command.
+    Custom native sources receive guidance to sign in using their selected configuration; configured
+    and environment credentials receive guidance naming the safe configuration key or variable.
+    Unknown sources receive inspection guidance without an asserted repair command.
+
+- `recovery.actions` is a duplicate-free array of at most eight nonempty action names, each at
+  most 64 characters. The current daemon emits only its closed allowlist, `ask_chief`;
+  the wire set may grow additively. Clients ignore unknown action names rather than
+  guessing their behavior, parsing them as commands, or rejecting the error message. Recognized
+  actions are suggestions requiring a person to invoke them, never automatic execution.
+
+Clients preserve paragraphs and newlines, wrap the full user-safe error text, and do not use a
+single-line scroller or clip it to a fixed-height row. Details supplement that text; they never
+replace it with a shortened diagnostic. Existing history text bounds and credential redaction
+still apply. The message's existing ID identifies the failure across history, events, restart,
+and recovery; there is no separate incident database.
+
+Every displayed error, including an unknown code, a legacy error without structured details, a
+failed tool, or an API request failure, may expose manual inspection/copying and the same scoped
+Chief of Staff help. These generic actions do not assert a cause or require invented metadata.
+Clients use a failed tool's existing ID or the API failure's safe request context as the reference
+when no error-message ID exists. They never classify those failures by matching error prose or
+mistake a daemon authentication failure for a provider-account failure.
+
+`ask_chief` resolves an active bot whose `systemKey` is `chief_of_staff` on the same daemon.
+It may open a diagnostic draft for the person to review and send; a direct send requires an
+explicit request and uses the existing `send` endpoint on the bot's embedded agent. The client
+preserves the destination's existing draft and model choice. A sent diagnostic has one stable new
+message ID reused if the response is lost. It names the source agent and error message and includes
+only authorized, user-safe diagnostic data, quoted as evidence rather than instructions or broader
+permission. No new bot endpoint is introduced. Normal tool permissions remain in force;
+interactive login may still need the person. Manual instructions stay available when the bot is
+absent, archived, cannot authenticate, or cannot perform the repair.
+
 **Blocks** say what is in a message:
 
 - `text` — `{ "type": "text", "text": "..." }`
+- `configuration` — the before/after execution snapshot described above, only in a service message.
 - `image` — `{ "type": "image", "mimeType": "...", "data": "<base64>" }`
 - `tool_call_request` — an explicit request in a user message for Agent Base to execute one
   ordinary tool before inference:
