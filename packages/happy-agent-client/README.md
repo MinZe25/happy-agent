@@ -271,7 +271,7 @@ and `WorkspacePortBridgeClientMessage` define the port bridge's JSON control mes
 Forwarding a local port into a workspace uses `workspaceProxyUrl()` with a nested `CONNECT`. All of
 these work through `client.connection(id)`.
 
-`HAPPY_AGENT_PROTOCOL_VERSION` is 25; `HAPPY_AGENT_MIN_PROTOCOL_VERSION` is 22. The range
+`HAPPY_AGENT_PROTOCOL_VERSION` is 26; `HAPPY_AGENT_MIN_PROTOCOL_VERSION` is 22. The range
 is additive, so clients should not require exact protocol equality for existing features.
 Creating a bot without `name` requires a daemon advertising protocol 24 or newer. With
 an older compatible daemon, supply a deliberate name or leave unnamed creation unavailable.
@@ -307,6 +307,37 @@ new version from the latest one's files, adding, replacing, or removing paths, a
 `deleteArtifact()` leaves a tombstone; both take the artifact's `version` as `ifMatch`.
 `listArtifactVersions()` reads the history. Follow `artifact.created`, `artifact.updated`, and
 `artifact.deleted`.
+
+`MessageMode.account` is optional server-resolved provenance only in configuration/error execution
+snapshots, not an account selector. It is absent from user-message/composer modes and drafts.
+`null` means unestablished; a known account has an opaque local ID and optional human-readable label.
+`MessageMode.providerType` optionally records the canonical configured provider family for that
+execution. The client omits both output-only fields from sends, slash-command request modes, and
+saved drafts without mutating the caller's snapshot, preserving compatibility with older daemons.
+Configuration service messages carry actual before/after execution modes, where `providerId`
+is the concrete route rather than the requested routing alias. Their `beforeMessageId` anchor
+is nullable: null retains chronological append placement. Desktop can honor an anchor; an
+append-only terminal appends when inserting it would move already-stable history.
+The initial `before: null` record is a hidden baseline. Render model names from the catalog and
+account-only changes within the same known provider family, preserving unknown identities honestly.
+Family comes from the persisted snapshot's `providerType`; Bedrock remains Bedrock regardless of
+the model vendor. Never derive historical family from the current catalog or provider/model ID prefixes.
+A same-family concrete provider change still shows a configured-connection change when vendor
+account IDs are unknown. Use configured labels or exact route identifiers, without presenting
+those connection names as verified vendor identity.
+
+Error service messages retain full multiline text and may carry `error: MessageError` with the
+actual failed mode, a safe credential-source descriptor, manual steps, recovery actions, and optional
+copy-only recovery commands. Commands are typed `{ label, command }` values, never extracted from
+error text or executed automatically. Manual recovery remains available without another AI credential.
+Source kinds and action names are extensible strings. Use `knownCredentialSourceKindSchema`
+and `knownErrorRecoveryActionSchema` for recognized semantics; ignore unknown actions and do not
+guess a source-specific remedy for an unknown kind. The current action allowlist is `ask_chief`.
+Details supplement text rather than replacing or clipping it. The Chief of Staff action uses the
+existing bot catalog's `systemKey` to open a diagnostic draft for review, preserving existing draft
+text and model selection. Sending requires an explicit user request and ordinary `sendMessage()`;
+normal tool permissions and manual instructions remain intact. No credentials or credential-file
+paths belong in those details. Older messages without this metadata remain valid.
 
 Global skill management is additive without a protocol bump. Detect support through
 `listGlobalSkills()`: `404` or `501` means unavailable; protocol 25 alone does not guarantee support.

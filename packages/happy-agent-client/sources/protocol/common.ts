@@ -61,14 +61,26 @@ export const permissionModeSchema = Type.Union([
 ]);
 export type PermissionMode = Static<typeof permissionModeSchema>;
 
+/** Installation-local identity observed from the credential actually used, never a token. */
+export const messageAccountSchema = Type.Object({
+    id: Type.String({ minLength: 1, maxLength: 256 }),
+    label: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+});
+export type MessageAccount = Static<typeof messageAccountSchema>;
+
 /** The model selection and permission mode a message runs with. */
 export const messageModeSchema = Type.Object({
-    effort: effortSchema,
-    modelId: Type.String(),
-    permissionMode: permissionModeSchema,
+    /** Requested route in composer/user modes; actual concrete route in execution snapshots. */
     providerId: Type.String(),
+    /** Output-only canonical family captured at execution, not today's provider catalog. */
+    providerType: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    /** Only in configuration/error execution snapshots; absent from requested/user modes. */
+    account: Type.Optional(Nullable(messageAccountSchema)),
+    modelId: Type.String(),
+    effort: effortSchema,
     /** `null` means the provider's default tier. */
     serviceTier: Nullable(serviceTierSchema),
+    permissionMode: permissionModeSchema,
 });
 export type MessageMode = Static<typeof messageModeSchema>;
 

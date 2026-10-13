@@ -4464,6 +4464,7 @@ A configuration record is an ordinary durable `service` message with one `config
     "type": "configuration",
     "before": {
         "providerId": "codex",
+        "providerType": "codex",
         "account": { "id": "account-default", "label": "Default account" },
         "modelId": "openai/gpt-6-astra",
         "effort": "high",
@@ -4472,6 +4473,7 @@ A configuration record is an ordinary durable `service` message with one `config
     },
     "after": {
         "providerId": "claude",
+        "providerType": "claude",
         "account": null,
         "modelId": "anthropic/opus-5-5",
         "effort": "high",
@@ -4538,6 +4540,7 @@ add an `error` object alongside `content` and `metadata`:
     "code": "authentication",
     "mode": {
         "providerId": "claude_work",
+        "providerType": "claude",
         "account": { "id": "account-work", "label": "Work" },
         "modelId": "anthropic/opus-5-5",
         "effort": "high",
@@ -4551,8 +4554,8 @@ add an `error` object alongside `content` and `metadata`:
     },
     "recovery": {
         "steps": [
-            "Replace the expired token in this daemon's environment and reload that environment.",
-            "Then send a new continuation. Signing into the native assistant alone does not replace this environment override."
+            "Retry this chat first.",
+            "If it still fails, check CLAUDE_CODE_OAUTH_TOKEN in this daemon's environment, replace it if needed, and reload that environment. Then retry this chat. Signing into the native assistant alone does not replace this environment override."
         ],
         "actions": ["ask_chief"],
         "commands": []
@@ -4593,7 +4596,9 @@ All existing messages remain valid without `error`. When present:
 
     For the default native Claude Code login only, the fallback command is `claude auth login`.
     Its steps explain: retry the same chat first; if that still fails, run the command on the
-    daemon's machine, complete the browser sign-in, then retry the same chat. The command and steps
+    machine hosting the agent as the same operating-system user that runs the daemon, complete the
+    browser sign-in, then retry the same chat. A remote daemon's machine is not necessarily the
+    client's machine; the UI uses the supplied host label and never invents an SSH command. The command and steps
     remain usable with no working AI credentials. An explicit configured token, API key, environment
     override, or custom native configuration directory must not receive that default-login command.
     Custom native sources receive guidance to sign in using their selected configuration; configured

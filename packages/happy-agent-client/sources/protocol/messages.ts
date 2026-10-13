@@ -10,6 +10,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import {
     cuid2Schema,
     eventCursorSchema,
+    messageModeSchema,
     Nullable,
     timestampSchema,
     type Cuid2,
@@ -288,6 +289,69 @@ export const clientMetadataSchema = Type.Record(Type.String(), clientMetadataVal
 /** Freeform JSON supplied by a client and durably attached to one user message. */
 export type ClientMetadata = Static<typeof clientMetadataSchema>;
 
+/** One execution configuration transition, anchored or kept in its chronological append position. */
+export const configurationBlockSchema = Type.Object({
+    type: Type.Literal("configuration"),
+    /** Null establishes the initial baseline and is not displayed as a change. */
+    before: Nullable(messageModeSchema),
+    after: messageModeSchema,
+    /** Null when there is no suitable message anchor, such as a mid-run account switch. */
+    beforeMessageId: Nullable(cuid2Schema),
+});
+export type ConfigurationBlock = Static<typeof configurationBlockSchema>;
+
+/** Source kinds with understood semantics; unknown wire kinds are still readable. */
+export const knownCredentialSourceKindSchema = Type.Union([
+    Type.Literal("native_login"),
+    Type.Literal("configuration"),
+    Type.Literal("environment"),
+]);
+export type KnownCredentialSourceKind = Static<typeof knownCredentialSourceKindSchema>;
+
+/** A safe description of the actual source, never credential values or file paths. */
+export const credentialSourceSchema = Type.Object({
+    /** Extensible wire value. Unknown kinds never imply a known source-specific remedy. */
+    kind: Type.String({ minLength: 1, maxLength: 64 }),
+    location: Type.String({ minLength: 1, maxLength: 256 }),
+    /** Human-readable host label; null when unavailable or not authorized. */
+    host: Nullable(Type.String({ minLength: 1, maxLength: 256 })),
+});
+export type CredentialSource = Static<typeof credentialSourceSchema>;
+
+/** Closed allowlist of actions this client knows how to offer; every one requires a click. */
+export const knownErrorRecoveryActionSchema = Type.Literal("ask_chief");
+export type KnownErrorRecoveryAction = Static<typeof knownErrorRecoveryActionSchema>;
+
+/** Extensible wire value. Ignore unrecognized actions instead of executing or guessing them. */
+export const errorRecoveryActionSchema = Type.String({ minLength: 1, maxLength: 64 });
+export type ErrorRecoveryAction = Static<typeof errorRecoveryActionSchema>;
+
+/** A daemon-curated manual command to display and copy, never execute automatically. */
+export const errorRecoveryCommandSchema = Type.Object({
+    label: Type.String({ minLength: 1, maxLength: 128 }),
+    command: Type.String({ minLength: 1, maxLength: 2_048 }),
+});
+export type ErrorRecoveryCommand = Static<typeof errorRecoveryCommandSchema>;
+
+/** Bounded, source-specific manual guidance alongside the existing full error text. */
+export const errorRecoverySchema = Type.Object({
+    steps: Type.Array(Type.String({ minLength: 1, maxLength: 2_048 }), { maxItems: 8 }),
+    actions: Type.Array(errorRecoveryActionSchema, { maxItems: 8, uniqueItems: true }),
+    commands: Type.Optional(Type.Array(errorRecoveryCommandSchema, { maxItems: 8 })),
+});
+export type ErrorRecovery = Static<typeof errorRecoverySchema>;
+
+/** Optional diagnostic data on an ordinary error service message. */
+export const messageErrorSchema = Type.Object({
+    /** Stable and extensible; never classify failures by matching display text. */
+    code: Type.String({ minLength: 1, maxLength: 128 }),
+    /** The actual failed attempt, not a later route or current composer selection. */
+    mode: Nullable(messageModeSchema),
+    credentialSource: Nullable(credentialSourceSchema),
+    recovery: errorRecoverySchema,
+});
+export type MessageError = Static<typeof messageErrorSchema>;
+
 /** An explicit request in a user message for Agent Base to execute one tool before inference. */
 export const toolCallRequestBlockSchema = Type.Object(
     {
@@ -308,6 +372,7 @@ export type MessageBlock =
     | ToolCallRequestBlock
     | ReasoningBlock
     | ToolCallBlock
+    | ConfigurationBlock
     | CompactionBlock;
 
 /** Plain text. */
@@ -494,6 +559,13 @@ export interface ServiceMessage {
     createdAt: Timestamp;
     content: MessageBlock[];
     metadata: MessageMetadata;
+    /** Supplementary diagnostics; the original full user-safe text remains in content. */
+    error?: MessageError;
+}
+
+/** One durable execution configuration transition, never model input. */
+export interface ConfigurationMessage extends Omit<ServiceMessage, "content"> {
+    content: [ConfigurationBlock];
 }
 
 /** The exact durable message shape used for one compaction attempt. */

@@ -1,4 +1,4 @@
-import type { Cuid2 } from "./protocol/common.js";
+import type { Cuid2, MessageMode } from "./protocol/common.js";
 import { Value } from "@sinclair/typebox/value";
 import {
     connectionIdSchema,
@@ -2062,6 +2062,7 @@ export class HappyAgentClient {
      * The message is pending until inference accepts it; the acceptance travels
      * inside a `run.started` or `run.boundary` event, and the `runId` it brings
      * is the handle for `abortAgent`.
+     * Execution provenance is omitted from outbound modes.
      */
     async sendMessage(
         agentId: Cuid2,
@@ -2071,7 +2072,7 @@ export class HappyAgentClient {
         return await this.#json({
             method: "POST",
             path: `v0/agents/${encodeURIComponent(agentId)}/send`,
-            json: request,
+            json: { ...request, mode: requestedMode(request.mode) },
             signal: options.signal,
         });
     }
@@ -2221,7 +2222,7 @@ export class HappyAgentClient {
         return await this.#json({
             method: "POST",
             path: `v0/agents/${encodeURIComponent(agentId)}/slash-commands/${encodeURIComponent(name)}`,
-            json: request,
+            json: { ...request, mode: requestedMode(request.mode) },
             signal: options.signal,
         });
     }
@@ -2305,7 +2306,10 @@ export class HappyAgentClient {
         return await this.#json({
             method: "PUT",
             path: `v0/agents/${encodeURIComponent(agentId)}/draft`,
-            json: request,
+            json: {
+                ...request,
+                draft: request.draft === null ? null : requestedMode(request.draft),
+            },
             signal: options.signal,
         });
     }
@@ -2541,6 +2545,12 @@ function toolCallMediaPath(agentId: Cuid2, toolCallId: Cuid2, index: number): st
 function rangeHeader(range: ByteRange): string {
     if (range.suffix !== undefined) return `bytes=-${String(range.suffix)}`;
     return `bytes=${String(range.start)}-${range.end === undefined ? "" : String(range.end)}`;
+}
+
+/** Provenance is output-only, and older compatible daemons reject it in request modes. */
+function requestedMode<T extends MessageMode>(mode: T): Omit<T, "account" | "providerType"> {
+    const { account: _account, providerType: _providerType, ...requested } = mode;
+    return requested;
 }
 
 function secretAttachmentPath(secretId: Cuid2, target: SecretAttachmentTarget): string {
