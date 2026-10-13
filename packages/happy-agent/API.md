@@ -3860,6 +3860,7 @@ guarding the whole row. The version exists for event chaining and newer-copy com
     "title": "Fix the login redirect loop",
     "titleStatus": "ready",
     "status": "idle",
+    "wait": null,
     "subagents": { "total": 2, "running": 0 },
     "processes": { "running": 1 },
     "pendingQuestionId": null,
@@ -3926,6 +3927,20 @@ Fields:
     compaction only from the typed compaction block in history.
     Status is orthogonal to archival, which is `archivedAt`.
 
+- `wait` — optional additive object, always emitted by current daemons. `null` means no active
+  scheduled wait; otherwise `{ "startedAt": <Unix milliseconds>, "dueAt": <Unix milliseconds> }`
+  is the interval owned by Scheduling for an active `wait` or `wait_until`. Waiting remains run
+  work and does not make `status` idle. Every full agent object carries this field, including
+  activity, owner responses, desktop and agent bootstrap, and nested subtasks. Older daemons may
+  omit it, meaning wait information is unavailable; clients never reconstruct it from tool names,
+  arguments, or transcript text.
+  The interval appears when the durable wait starts and is replaced or cleared when it elapses
+  or is interrupted by a message, abort, or archival. Restart preserves the original interval
+  while the same durable wait remains active. With concurrent waits, expose the one due first,
+  breaking ties by earliest `startedAt`, then ascending wait ID; its completion exposes the next
+  active interval or `null`. `startedAt` never exceeds `dueAt`. Questions remain represented
+  independently by `pendingQuestionId`. A scheduled message awaiting delivery does not make its
+  sender or recipient a waiting agent.
 - `subagents` — how many child agents, including subtasks, this agent has spawned over its life (`total`) and how many
   are running right now (`running`). Changes to either count are `agent.updated` events. The
   subagents themselves are listed by `GET /v0/agents/:agentId/activity`.
@@ -7555,10 +7570,15 @@ surface and are not part of bootstrap.
 - `agent.updated` — any change to the agent object. This is the agent **state-change** event:
   every `status` move between `"idle"`, `"thinking"`, `"working"`, `"generating_tools"`, and
   `"running_tools"` is one of these, as is every change to the `subagents` and `processes`
-  counts, `pendingQuestionId`, title generation, unread, reorder, subtask reorder, archive
+  counts, `wait`, `pendingQuestionId`, title generation, unread, reorder, subtask reorder, archive
   and unarchive. `changes` carries exactly the fields that moved — a status flip is
   `{ "status": "running_tools", "updatedAt": ... }`, nothing more.
     - `agentId` (ID string), `previousVersion`, `version`, `changes`.
+
+    A wait transition carries the complete replacement `wait` object or `null`, plus `updatedAt`,
+    on the existing agent version chain, published only after the durable transition commits.
+    Replaying a transition that leaves the projected interval unchanged emits no extra wait update.
+    Full snapshots and incremental updates use the same Scheduling-owned state.
 
 Nested `subtasks` are a composed snapshot of independently versioned agents, not additional
 identities or copies of their durable state. Creating, archiving, unarchiving, or updating a

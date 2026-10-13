@@ -50,6 +50,62 @@ const MODE_B: MessageMode = {
 };
 
 describe("HappyReducer agent synchronization", () => {
+    it("retains scheduled waits from bootstrap and replaces them on versioned updates", async () => {
+        const harness = new AgentReducerHarness();
+        const reducer = new HappyReducer(harness.client);
+        reducer.agentVisible(AGENT_A);
+        reducer.start();
+        harness.connect();
+        await vi.waitFor(() => expect(harness.startedAgentIds).toEqual([AGENT_A]));
+        const wait = { startedAt: 10, dueAt: 100 };
+        harness.completeBootstrap(
+            AGENT_A,
+            agentBootstrap(AGENT_A, {
+                agent: agent(AGENT_A, { parentAgentId: null, version: CURSOR_1, wait }),
+                processes: [],
+                subagents: [],
+            }),
+        );
+        await vi.waitFor(() => expect(reducer.getState().agents[AGENT_A]?.wait).toEqual(wait));
+
+        const replacement = { startedAt: 20, dueAt: 200 };
+        const update: HappyAgentEvent = {
+            cursor: CURSOR_2,
+            occurredAt: 20,
+            type: "agent.updated",
+            payload: {
+                agentId: AGENT_A,
+                previousVersion: CURSOR_1,
+                version: CURSOR_2,
+                changes: { wait: replacement, updatedAt: 20 },
+            },
+        };
+        harness.stream.push(eventUpdate(update));
+        await vi.waitFor(() =>
+            expect(reducer.getState().agents[AGENT_A]?.wait).toEqual(replacement),
+        );
+        harness.stream.push(
+            eventUpdate({
+                cursor: CURSOR_3,
+                occurredAt: 30,
+                type: "agent.updated",
+                payload: {
+                    agentId: AGENT_A,
+                    previousVersion: CURSOR_2,
+                    version: CURSOR_3,
+                    changes: { wait: null, updatedAt: 30 },
+                },
+            }),
+        );
+        await vi.waitFor(() => expect(reducer.getState().agents[AGENT_A]?.wait).toBeNull());
+        const settled = reducer.getState();
+        harness.stream.push(eventUpdate(update));
+        await Promise.resolve();
+        expect(reducer.getState()).toBe(settled);
+        expect(harness.startedAgentIds).toEqual([AGENT_A]);
+        reducer.stop();
+    });
+
     it("loads a visible agent from one bootstrap request", async () => {
         const harness = new AgentReducerHarness();
         const reducer = new HappyReducer(harness.client);

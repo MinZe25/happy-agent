@@ -62,6 +62,13 @@ export const agentStatusSchema = Type.Union([
 ]);
 export type AgentStatus = Static<typeof agentStatusSchema>;
 
+/** The interval of an active durable scheduling wait. */
+export const agentWaitSchema = Type.Object({
+    startedAt: Type.Integer({ minimum: 0 }),
+    dueAt: Type.Integer({ minimum: 0 }),
+});
+export type AgentWait = Static<typeof agentWaitSchema>;
+
 /** Why the agent has something the person has not looked at. */
 export const agentUnreadSchema = Type.Object({
     reason: Type.String(),
@@ -116,6 +123,8 @@ export const agentSchema = Type.Recursive((agent) =>
         /** Whether this agent belongs to a project or workspace's visible root-agent series. */
         userVisible: Type.Optional(Type.Boolean()),
         version: resourceVersionSchema,
+        /** Scheduling-owned wait interval, null when cleared; absent on older daemons. */
+        wait: Type.Optional(Nullable(agentWaitSchema)),
         /** The workspace the agent runs in; its commands and edits land there. */
         workspaceId: cuid2Schema,
     }),

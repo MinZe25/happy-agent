@@ -102,6 +102,7 @@ export function createHappyReducerAgentReplica(
         previousState.processes === processes &&
         previousState.question === question &&
         previousState.status === rootAgent.status &&
+        previousState.wait === rootAgent.wait &&
         previousState.subagents === subagents
             ? previousState
             : {
@@ -112,6 +113,7 @@ export function createHappyReducerAgentReplica(
                   processes,
                   question,
                   status: rootAgent.status,
+                  ...(rootAgent.wait === undefined ? {} : { wait: rootAgent.wait }),
                   subagents,
               };
     const nextFieldCursors: HappyReducerAgentFieldCursors = {
@@ -155,7 +157,7 @@ export function reduceHappyReducerAgentEvent(
     if (event.type === "agent.created") {
         if (event.payload.agent.id === agent.id && event.payload.agent.version > agent.version) {
             agent = event.payload.agent;
-            state = withStatus(state, agent.status);
+            state = withActivity(state, agent);
             if (event.cursor > fieldCursors.question) {
                 if (agent.pendingQuestionId === null) {
                     state = withQuestion(state, null);
@@ -181,7 +183,7 @@ export function reduceHappyReducerAgentEvent(
             agent = result.value;
             dirty ||= result.dirty;
             if (!result.dirty && agent !== previousAgent) {
-                state = withStatus(state, agent.status);
+                state = withActivity(state, agent);
                 if (
                     Object.hasOwn(event.payload.changes, "pendingQuestionId") &&
                     event.cursor > fieldCursors.question
@@ -487,12 +489,14 @@ function withQuestion(
     return { ...state, question };
 }
 
-function withStatus(
-    state: HappyReducerAgentState,
-    status: Agent["status"],
-): HappyReducerAgentState {
-    if (state.status === status) return state;
-    return { ...state, status };
+function withActivity(state: HappyReducerAgentState, agent: Agent): HappyReducerAgentState {
+    if (state.status === agent.status && state.wait === agent.wait) return state;
+    const { wait: _wait, ...previous } = state;
+    return {
+        ...previous,
+        status: agent.status,
+        ...(agent.wait === undefined ? {} : { wait: agent.wait }),
+    };
 }
 
 function withSubagents(

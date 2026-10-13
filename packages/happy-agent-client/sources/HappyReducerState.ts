@@ -25,6 +25,8 @@ export interface HappyReducerAgentState {
     readonly question: Question | null;
     /** The agent's current inference or tool-execution phase. */
     readonly status: AgentStatus;
+    /** Scheduling-owned interval; absent when the daemon does not expose wait state. */
+    readonly wait?: Agent["wait"];
     /** Full process objects, newest first, including exited processes. */
     readonly processes: readonly BackgroundProcess[];
     /** Full direct subagent objects, newest first, including finished subagents. */
