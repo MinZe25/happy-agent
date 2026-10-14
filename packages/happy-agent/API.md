@@ -6462,7 +6462,8 @@ Active ordering, creation retry IDs, and history are isolated to their Surface.
   that order with the same within-group ordering. The cursor precedes snapshot reads.
 - `POST` accepts `{ "text": "Pick up groceries", "id": "...", "mutationId": "..." }`. `id`
   and `mutationId` are optional. Creation records the authenticated caller as `authorUserId`
-  (`null` in standalone mode), appends an active todo, and returns
+  (`null` in standalone mode), inserts an active todo at the top of the active list with a new
+  fractional key before its first item (without changing existing keys), and returns
   `201 { "todo": {...} }`, emitting shared `todo.created`. A repeated supplied ID returns the current todo
   unchanged with `201`, even after deletion or restart, and emits no event; other valid fields
   are ignored. This ID is the creation retry key; `mutationId` remains only an echo. HTTP request
@@ -6508,6 +6509,8 @@ They call the same strict typed operations as the API.
 `create_todo` requires an explicit `authorUserId` parameter: an installation-local Happy user ID
 or `null`. The model must supply it; the daemon never infers it from the execution context.
 It sets the todo's immutable author, not the revision actor.
+New todos are inserted at the top, as with HTTP creation. Returning an inactive todo to active
+still appends at the end; it is not a new creation.
 Todo mutation tools supply the current version they read, and receive an explicit conflict on a
 stale version rather than silently overwriting. `list_surfaces` lists instance IDs, types, names,
 and nested members. Active admin bots additionally receive the type-specific `create_todo_surface`

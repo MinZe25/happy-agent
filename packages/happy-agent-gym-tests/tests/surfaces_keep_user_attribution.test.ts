@@ -43,7 +43,7 @@ it("keeps standalone attribution null and requires explicit creation-tool attrib
     await gym.send("Create a todo with no attributed user.", { permissionMode: "full_access" });
     const todos = (await gym.client.listTodos(surface.id)).todos;
     expect(todos).toHaveLength(2);
-    const authored = todos[1]!;
+    const authored = todos.find((todo) => todo.id !== original.id)!;
     expect(authored.authorUserId).toBeNull();
     expect((await gym.client.listTodoVersions(surface.id, authored.id)).versions).toMatchObject([
         { todo: { authorUserId: null }, actor: { userId: null, agentId: gym.defaultSessionId } },

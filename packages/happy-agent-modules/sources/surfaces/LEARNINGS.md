@@ -37,6 +37,10 @@ shared utility used by tasks, bots, connections, subtasks, projects, workspaces,
 preserving its decimal format. New projects append fractional keys too; existing keys and
 released migrations remain untouched.
 
+New todos enter at the top through both HTTP and model tools, using a fractional key before the
+first active item without rewriting its neighbours. Reactivating an existing todo remains a
+different operation: it appends at the end with a fresh key, preserving the restoration rule.
+
 ## Nothing historical is destroyed
 
 The legacy list hard-deleted todos and allowed reorder to revive completed items. Every change

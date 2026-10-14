@@ -82,9 +82,9 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             name: "create_todo",
             defer: true,
             capabilities: ["Add a todo to a shared Surface."],
-            searchKeywords: ["create todo", "add checklist item", "append reminder"],
+            searchKeywords: ["create todo", "add checklist item", "new reminder"],
             description:
-                "Append a plain-text todo to one shared Surface. Explicitly supply authorUserId as a local Happy user ID, or null for no attribution; only null is allowed in standalone mode. The author is immutable and separate from the revision's audit actor. This never creates a chat or joins anyone to the Surface.",
+                "Add a plain-text todo at the top of one shared Surface. Explicitly supply authorUserId as a local Happy user ID, or null for no attribution; only null is allowed in standalone mode. The author is immutable and separate from the revision's audit actor. This never creates a chat or joins anyone to the Surface.",
             parameters: Type.Object(
                 {
                     surfaceId: surfaceIdSchema,

@@ -353,7 +353,10 @@ export class SurfacesModule implements AgentModule {
                 text: input.text,
                 authorUserId,
                 status: "active",
-                orderKey: await this.#todoTail(tx, surfaceId),
+                orderKey: surfaceOrderKey(
+                    null,
+                    (await this.listTodos(tx, surfaceId))[0]?.orderKey ?? null,
+                ),
                 createdAt: now,
                 updatedAt: now,
                 completedAt: null,

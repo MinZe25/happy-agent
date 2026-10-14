@@ -202,8 +202,8 @@ describe("Surface instances through the real daemon", () => {
         ).todo;
         expect((await client.listTodos(surface.id)).todos.map((todo) => todo.id)).toEqual([
             first.id,
-            second.id,
             third.id,
+            second.id,
         ]);
         expect(
             (
@@ -279,7 +279,7 @@ describe("Surface instances through the real daemon", () => {
         expect(retried.todo).toEqual(changed);
     });
 
-    it("serializes concurrent appends and grants one winner for a shared version", async () => {
+    it("serializes concurrent insertions and grants one winner for a shared version", async () => {
         const gym = await start();
         const client = gym.client;
         const surface = (await client.createSurface({ type: "todo", name: "Concurrent" })).surface;

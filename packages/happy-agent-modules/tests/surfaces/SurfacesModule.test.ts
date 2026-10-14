@@ -243,7 +243,7 @@ describe("installation-owned Surface state", () => {
                 kv: f.kv.scoped("null-todo-call"),
             } as never,
         );
-        const [todo, unattributed] = await f.surfaces.listTodos(ctx, surface!.id);
+        const [unattributed, todo] = await f.surfaces.listTodos(ctx, surface!.id);
         expect(todo!.authorUserId).toBe("bob");
         expect(unattributed!.authorUserId).toBeNull();
         for (const item of [todo!, unattributed!]) {
