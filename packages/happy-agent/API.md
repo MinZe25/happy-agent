@@ -6314,7 +6314,8 @@ Response — `200`: `{ "bot": { ... } }` with `avatar` `null`.
 
 A Surface is an instance of a predefined feature with its own typed API. Every instance has a
 CUID2 ID and a human name. Multiple independent Surfaces of each type may exist, with separate
-content, history, and members. Supported types are `todo`, `separator`, and `document`; calendars
+content, history, and members. Supported types are `todo`, `separator`, `document`, `artifact`,
+`bot`, and `task`; calendars
 are a future type, not a current endpoint. The catalog initially has no instances.
 All onboarded authenticated people may read and modify Surface data, whether
 or not they joined. Joining and leaving control only the person's sidebar. No Surface operation
@@ -6322,7 +6323,7 @@ creates a workspace, agent, or chat.
 
 ### Surface catalog and members
 
-A Surface object has `id` (CUID2), `type` (`todo`, `separator`, or `document`; future types are additive),
+A Surface object has `id` (CUID2), `type` (one of the predefined types above; future types are additive),
 `name` (human display text), `image` (`null` or `{ "thumbhash": "..." }`), `members`,
 `version` (UUIDv7), and `updatedAt` (epoch milliseconds).
 Surface IDs always use the daemon generator's 24-character CUID2 form: a lowercase letter
@@ -6679,6 +6680,76 @@ shared-data Auto review with no filesystem elevation. Active admin bots addition
 `text`, and optional absolute `imagePath`. Its authority, attribution, creator join rules, image
 handling, and permission boundaries match `create_todo_surface`. No document operation joins
 anyone automatically other than the explicit creator rule during Surface creation.
+
+### Reference Surfaces
+
+An `artifact`, `bot`, or `task` Surface points to exactly one existing entity. It does not clone
+the target, move it out of its existing catalog, create a new conversation, or change its access.
+The Bots and Tasks catalogs remain unchanged. Opening an available reference uses the existing
+artifact viewer or the referenced bot/task's existing agent conversation.
+
+`POST /v0/surfaces` accepts one of these bodies, with optional `id`, `image`, and `mutationId`
+following the catalog rules:
+
+- `{ "type": "artifact", "name": "Design reference", "artifactId": "..." }`
+- `{ "type": "bot", "name": "Research assistant", "botId": "..." }`
+- `{ "type": "task", "name": "Launch work", "taskId": "..." }`
+
+The target ID is required for its type and is immutable; other target-ID fields are invalid.
+`name` is an explicit immutable Surface label, not a copied or synchronized target title. The
+optional managed Surface image is independent of the target's image. Current target display
+fields are resolved when the Surface is read, rather than stored twice. Clients show that live
+target name while available and use the stored Surface name as the unavailable fallback.
+
+Creation validates that the target exists, is active, and is readable by the authenticated
+caller. Missing, inactive, or inaccessible targets all return `404 not_found`, without creating
+anything or revealing why lookup failed. HTTP uses the ordinary creator/join rule. A repeated
+supplied Surface ID returns the existing Surface unchanged, including if its original target
+later becomes unavailable; it never changes the binding or retries target creation.
+
+Reference Surfaces have an optional additive `target` projection. Current daemons include it on
+caller-facing catalog, bootstrap, and single-Surface mutation responses for reference types;
+other Surface types omit it, and older daemons may omit it. An available projection is one of:
+
+- `{ "type": "artifact", "state": "available", "artifactId": "...", "name": "Current title",
+"hasImage": true, "version": "..." }`
+- `{ "type": "bot", "state": "available", "botId": "...", "name": "Current name",
+"hasImage": true, "version": "..." }`
+- `{ "type": "task", "state": "available", "taskId": "...", "name": "Current name",
+"hasImage": false, "version": "..." }`
+
+`version` is the current target resource version, not the Surface version. `name` comes from the
+artifact title or bot/task name. `hasImage` is true for an image or image-series artifact, true
+for a bot with a non-null avatar, and false for tasks. It does not supply bytes, paths, or URLs;
+clients use the existing target image/viewer routes, with their existing authentication.
+
+An unavailable projection is only `{ "type": "artifact", "state": "unavailable" }` (or `bot`
+or `task`), without a target ID, live name, image flag, or version. Missing/deleted artifacts,
+archived bots/tasks, and targets the current caller cannot read all use that same form. The
+Surface, its stored label/image, memberships, and immutable binding remain; resolution does
+not return an error or delete anything. Restoring target availability makes the reference usable
+again. Neither Surface membership nor knowing a Surface ID grants any target permission.
+In particular, task archival still follows `canArchive` and the existing owner/team-owner rules.
+
+Target resolution is caller-relative and is not part of the Surface's stored version chain.
+It must be checked on every read; never reuse one person's resolved projection for another.
+Shared `surface.created` events omit `target`, avoiding publication of caller-relative metadata.
+Clients refetch the catalog to resolve newly created references. Existing `artifact.updated`,
+`artifact.deleted`, `bot.updated`, and `task.updated` events trigger a fresh resolution for
+affected references, including unavailable ones that may become available. No title or avatar
+is copied into the Surface record and no synthetic Surface mutation is emitted for target
+changes. Clients reconcile target metadata using the target's own version and must not discard
+a fresh resolution merely because the Surface version stayed the same.
+
+Active admin bots receive `create_artifact_surface`, `create_bot_surface`, and
+`create_task_surface`. Each requires `name`, explicit `creatorUserId`, and its type's target ID;
+each accepts optional absolute `imagePath`. The creator must be able to read an active target
+when non-null, and execution must independently satisfy the target's existing access rules.
+Missing/inactive/inaccessible targets return `not_found` without side effects. Authority,
+creator attribution, creator joins, image handling, durable replay, and Auto permission
+boundaries match other typed Surface creation tools. `list_surfaces` resolves targets for the
+trusted current execution identity and returns unavailable when access cannot be established.
+The reference never joins anyone to the target's own task list or changes its existing rights.
 
 ## Tasks
 

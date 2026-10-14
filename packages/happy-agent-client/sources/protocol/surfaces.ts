@@ -31,6 +31,56 @@ export const surfaceMemberSchema = Type.Object({
 });
 export type SurfaceMember = Static<typeof surfaceMemberSchema>;
 
+export const surfaceNameSchema = Type.String({
+    minLength: 1,
+    maxLength: 256,
+    pattern: "^(?=.*\\S)[^\\x00-\\x1f\\x7f]+$",
+});
+
+const availableSurfaceTargetFields = {
+    state: Type.Literal("available"),
+    name: surfaceNameSchema,
+    hasImage: Type.Boolean(),
+    version: resourceVersionSchema,
+};
+
+/** A caller-relative projection; unavailable targets disclose no target identity or metadata. */
+export const surfaceTargetSchema = Type.Union([
+    Type.Object({
+        ...availableSurfaceTargetFields,
+        type: Type.Literal("artifact"),
+        artifactId: cuid2Schema,
+        botId: Type.Optional(Type.Never()),
+        taskId: Type.Optional(Type.Never()),
+    }),
+    Type.Object({
+        ...availableSurfaceTargetFields,
+        type: Type.Literal("bot"),
+        botId: cuid2Schema,
+        artifactId: Type.Optional(Type.Never()),
+        taskId: Type.Optional(Type.Never()),
+    }),
+    Type.Object({
+        ...availableSurfaceTargetFields,
+        type: Type.Literal("task"),
+        taskId: cuid2Schema,
+        hasImage: Type.Literal(false),
+        artifactId: Type.Optional(Type.Never()),
+        botId: Type.Optional(Type.Never()),
+    }),
+    Type.Object({
+        type: Type.Union([Type.Literal("artifact"), Type.Literal("bot"), Type.Literal("task")]),
+        state: Type.Literal("unavailable"),
+        artifactId: Type.Optional(Type.Never()),
+        botId: Type.Optional(Type.Never()),
+        taskId: Type.Optional(Type.Never()),
+        name: Type.Optional(Type.Never()),
+        hasImage: Type.Optional(Type.Never()),
+        version: Type.Optional(Type.Never()),
+    }),
+]);
+export type SurfaceTarget = Static<typeof surfaceTargetSchema>;
+
 export const surfaceSchema = Type.Object({
     /** Immutable creator; null means unattributed or standalone. Older daemons omit it. */
     creatorUserId: Type.Optional(Nullable(userIdSchema)),
@@ -38,7 +88,8 @@ export const surfaceSchema = Type.Object({
     image: Nullable(Type.Object({ thumbhash: Type.String() })),
     type: Type.String({ minLength: 1 }),
     members: Type.Array(surfaceMemberSchema),
-    name: Type.String({ minLength: 1, maxLength: 256, pattern: "^(?=.*\\S)[^\\x00-\\x1f\\x7f]+$" }),
+    name: surfaceNameSchema,
+    target: Type.Optional(surfaceTargetSchema),
     updatedAt: timestampSchema,
     version: resourceVersionSchema,
 });
@@ -93,10 +144,40 @@ export const createDocumentSurfaceRequestSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+export const createArtifactSurfaceRequestSchema = Type.Object(
+    {
+        ...surfaceCreationFields,
+        image: Type.Optional(surfaceImageInputSchema),
+        type: Type.Literal("artifact"),
+        artifactId: cuid2Schema,
+    },
+    { additionalProperties: false },
+);
+export const createBotSurfaceRequestSchema = Type.Object(
+    {
+        ...surfaceCreationFields,
+        image: Type.Optional(surfaceImageInputSchema),
+        type: Type.Literal("bot"),
+        botId: cuid2Schema,
+    },
+    { additionalProperties: false },
+);
+export const createTaskSurfaceRequestSchema = Type.Object(
+    {
+        ...surfaceCreationFields,
+        image: Type.Optional(surfaceImageInputSchema),
+        type: Type.Literal("task"),
+        taskId: cuid2Schema,
+    },
+    { additionalProperties: false },
+);
 export const createSurfaceRequestSchema = Type.Union([
     createTodoSurfaceRequestSchema,
     createSeparatorSurfaceRequestSchema,
     createDocumentSurfaceRequestSchema,
+    createArtifactSurfaceRequestSchema,
+    createBotSurfaceRequestSchema,
+    createTaskSurfaceRequestSchema,
 ]);
 export type CreateSurfaceRequest = Static<typeof createSurfaceRequestSchema>;
 
