@@ -59,3 +59,12 @@ shared managed-image function, while each module owns permissions, persistence, 
 Shared capability text and missing keywords obscured the differences between Surface tools.
 Every definition now declares its own concise capability and search terms directly, so listing,
 editing, history, and administration can be found independently without a metadata wrapper.
+
+## Auto review requires an action description on the tool
+
+Surface mutation tools requested Auto review without describing their permission action, so
+the runtime refused them before the reviewer ran. Every reviewed Surface tool now describes
+its shared-data or membership write boundary. A structural check covers directly reviewable
+module tools, and the real daemon gym proves that an approved edit commits while a denied edit
+leaves the todo and its history unchanged. Review requirements and filesystem elevation remain
+unchanged.

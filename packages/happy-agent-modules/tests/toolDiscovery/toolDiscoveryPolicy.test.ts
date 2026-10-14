@@ -17,6 +17,21 @@ interface ToolDefinition {
 }
 
 describe("tool discovery policy", () => {
+    it("declares an action description on every directly reviewable module tool", () => {
+        const definitions = collectToolDefinitions(sourcesRoot);
+        expect(definitions.length).toBeGreaterThan(0);
+        for (const definition of definitions) {
+            const review = definition.properties.get("shouldReviewInAutoMode");
+            if (review === undefined || review === "() => false") continue;
+            expect
+                .soft(
+                    definition.properties.has("describeAutoPermissionAction"),
+                    `${definition.file}:${String(definition.line)}`,
+                )
+                .toBe(true);
+        }
+    });
+
     it("is explicit on every directly defined module tool", () => {
         const definitions = collectToolDefinitions(sourcesRoot);
 
@@ -79,6 +94,13 @@ function collectToolDefinitions(root: string): readonly ToolDefinition[] {
             const properties = new Map<string, string>();
             for (const property of ["defer", "capabilities", "searchKeywords"] as const) {
                 const value = new RegExp(`\\b${property}\\s*:\\s*([^,\\n]+)`).exec(header)?.[1];
+                if (value !== undefined) properties.set(property, value.trim());
+            }
+            for (const property of [
+                "shouldReviewInAutoMode",
+                "describeAutoPermissionAction",
+            ] as const) {
+                const value = new RegExp(`\\b${property}\\s*:\\s*([^,\\n]+)`).exec(call)?.[1];
                 if (value !== undefined) properties.set(property, value.trim());
             }
             if (

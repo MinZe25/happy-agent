@@ -163,6 +163,15 @@ describe("installation-owned Surface state", () => {
             expect(tool.shouldRunInFullAccessInAutoMode).toBeUndefined();
         }
         const tools = await f.hooks.tools!(ctx, { agent: { id: "admin" } } as AgentModuleScope);
+        for (const tool of tools) {
+            if (await tool.shouldReviewInAutoMode!({}, ctx)) {
+                expect(typeof tool.describeAutoPermissionAction, tool.name).toBe("function");
+                expect(
+                    tool.describeAutoPermissionAction!({}, ctx)?.length,
+                    tool.name,
+                ).toBeGreaterThan(0);
+            }
+        }
         const create = tools.find((tool) => tool.name === "create_todo_surface")!;
         const add = tools.find((tool) => tool.name === "add_surface_user")!;
         expect(create.shouldReviewInAutoMode!({}, ctx)).toBe(true);

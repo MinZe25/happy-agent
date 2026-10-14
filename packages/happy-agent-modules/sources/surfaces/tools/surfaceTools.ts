@@ -98,6 +98,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             transactional: true,
             requiresAutoOrFullAccess: true,
             shouldReviewInAutoMode: () => true,
+            describeAutoPermissionAction: ({ surfaceId }) =>
+                `adding a todo to shared Surface ${JSON.stringify(surfaceId)}. Access: shared data write`,
             execute: async (ctx, input, call) =>
                 surfaces.createTodo(
                     ctx,
@@ -128,6 +130,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             transactional: true,
             requiresAutoOrFullAccess: true,
             shouldReviewInAutoMode: () => true,
+            describeAutoPermissionAction: ({ surfaceId, todoId }) =>
+                `editing todo ${JSON.stringify(todoId)} in shared Surface ${JSON.stringify(surfaceId)}. Access: shared data write`,
             execute: async (ctx, { surfaceId, todoId, version, ...edit }) =>
                 surfaces.mutateTodo(
                     ctx,
@@ -156,6 +160,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             transactional: true,
             requiresAutoOrFullAccess: true,
             shouldReviewInAutoMode: () => true,
+            describeAutoPermissionAction: ({ surfaceId, todoId }) =>
+                `moving todo ${JSON.stringify(todoId)} in shared Surface ${JSON.stringify(surfaceId)}. Access: shared data write`,
             execute: async (ctx, input) =>
                 surfaces.mutateTodo(
                     ctx,
@@ -181,6 +187,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             transactional: true,
             requiresAutoOrFullAccess: true,
             shouldReviewInAutoMode: () => true,
+            describeAutoPermissionAction: ({ surfaceId, todoId }) =>
+                `deleting todo ${JSON.stringify(todoId)} from shared Surface ${JSON.stringify(surfaceId)} while preserving its history. Access: shared data write`,
             execute: async (ctx, input) =>
                 surfaces.mutateTodo(
                     ctx,
@@ -293,6 +301,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             transactional: true,
             requiresAutoOrFullAccess: true,
             shouldReviewInAutoMode: () => true,
+            describeAutoPermissionAction: ({ surfaceId, userId }) =>
+                `adding ${userId === null ? "the standalone person" : `user ${JSON.stringify(userId)}`} to shared Surface ${JSON.stringify(surfaceId)}. Access: shared membership and sidebar write`,
             execute: async (ctx, input) => {
                 await surfaces.requireAdmin(ctx, scope.agent.id);
                 return surfaces.changeMember(ctx, input.surfaceId, input.userId, "join");
@@ -315,6 +325,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             transactional: true,
             requiresAutoOrFullAccess: true,
             shouldReviewInAutoMode: () => true,
+            describeAutoPermissionAction: ({ surfaceId, userId }) =>
+                `removing ${userId === null ? "the standalone person" : `user ${JSON.stringify(userId)}`} from shared Surface ${JSON.stringify(surfaceId)} without deleting its data. Access: shared membership and sidebar write`,
             execute: async (ctx, input) => {
                 await surfaces.requireAdmin(ctx, scope.agent.id);
                 return surfaces.changeMember(ctx, input.surfaceId, input.userId, "leave");
