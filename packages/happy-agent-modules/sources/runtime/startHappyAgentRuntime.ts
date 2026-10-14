@@ -1,6 +1,7 @@
 import { ensurePrivateDirectory } from "@slopus/happy-agent-compute";
 import { chmod, mkdir } from "node:fs/promises";
 import { ConnectionsModule } from "../connections/index.js";
+import { PeerMessagingModule } from "../peerMessaging/index.js";
 import { RunnersModule } from "../runners/index.js";
 
 import {
@@ -155,6 +156,7 @@ export interface HappyAgentRuntimeModules {
     readonly compute: ComputeModule;
     readonly config: ConfigModule;
     readonly connections: ConnectionsModule;
+    readonly peerMessaging: PeerMessagingModule;
     readonly runners: RunnersModule;
     readonly contextWindow: ContextWindowModule;
     readonly durableFunctions: DurableFunctionsModule;
@@ -573,6 +575,11 @@ export async function startHappyAgentRuntime(
         const cloud = new CloudModule(durableFunctions);
         const happyTeams = new HappyTeamsModule(cloud, bots);
         const connections = new ConnectionsModule(config, bots, cloud, tailcat, durableFunctions);
+        const peerMessaging = new PeerMessagingModule(config, bots, durableFunctions);
+        registerShutdown(
+            "peer-messaging",
+            async (shutdownCtx) => await peerMessaging.close(shutdownCtx),
+        );
         registerShutdown(
             "connections",
             async (shutdownCtx) => await connections.close(shutdownCtx),
@@ -690,6 +697,7 @@ export async function startHappyAgentRuntime(
             config,
             contextWindow,
             connections,
+            peerMessaging,
             runners,
             durableFunctions,
             events,
@@ -776,6 +784,7 @@ export async function startHappyAgentRuntime(
             ...(team.enabled ? [] : [happyTeams]),
             connections,
             projects,
+            peerMessaging,
             titles,
             workspaces,
             files,

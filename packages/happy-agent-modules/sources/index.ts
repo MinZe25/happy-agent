@@ -49,6 +49,7 @@ export * from "./userSettings/index.js";
 // Tailcat: stable account-free internet exposure, controlled only by active admin bots.
 export * from "./tailcat/index.js";
 export * from "./connections/index.js";
+export * from "./peerMessaging/index.js";
 export * from "./runners/index.js";
 export * from "./node/index.js";
 

@@ -97,6 +97,11 @@ import {
     type ServiceTierOption,
 } from "@slopus/happy-agent-client";
 import { resolveDefaultNodeName } from "./impl/resolveDefaultNodeName.js";
+import {
+    peerMessagingConfigSchema,
+    validatePeerMessagingConfig,
+    type PeerMessagingConfig,
+} from "./PeerMessagingConfig.js";
 
 const MAX_PATH_LENGTH = 4_096;
 const MAX_CONFIG_STRING_LENGTH = 16_384;
@@ -455,6 +460,7 @@ const partialValuesSchema = Type.Object(
             ),
         ),
         connections: Type.Optional(remoteConnectionsConfigSchema),
+        peer_messaging: Type.Optional(peerMessagingConfigSchema),
         runners: Type.Optional(runnersConfigSchema),
         execution: Type.Optional(executionConfigSchema),
         docker: Type.Optional(dockerInputSchema),
@@ -798,6 +804,7 @@ const resolvedValuesSchema = Type.Object(
             ),
         ),
         connections: Type.Optional(remoteConnectionsConfigSchema),
+        peer_messaging: Type.Optional(peerMessagingConfigSchema),
         runners: Type.Optional(runnersConfigSchema),
         execution: Type.Optional(executionConfigSchema),
         docker: Type.Optional(
@@ -1399,6 +1406,7 @@ export class ConfigModule implements AgentModule {
     #sourceProviders: AgentProviders | undefined;
     #tailcatEnabled: boolean;
     #connections: Record<string, RemoteConnectionEntry>;
+    #peerMessaging: PeerMessagingConfig;
     readonly #accountUsageListeners = new Set<(usage: ProviderUsage) => void>();
     #resolvedScripted: ConfigInferenceOverride | undefined;
     #scriptedModelSnapshot: readonly AgentModel[] | undefined;
@@ -1651,6 +1659,7 @@ export class ConfigModule implements AgentModule {
         this.#environment = environment;
         this.#tailcatEnabled = configuration.values.feature.tailcat.enabled;
         this.#connections = structuredClone(configuration.values.connections ?? {});
+        this.#peerMessaging = structuredClone(configuration.values.peer_messaging ?? {});
         for (const id of Object.keys(configuration.values.providers)) {
             this.#providerEnabled.set(id, this.configuredProviderOverride(id) ?? false);
         }
@@ -2005,6 +2014,25 @@ export class ConfigModule implements AgentModule {
 
     get remoteConnectionEntrySchema() {
         return remoteConnectionEntrySchema;
+    }
+
+    get peerMessaging(): PeerMessagingConfig {
+        return structuredClone(this.#peerMessaging);
+    }
+
+    validatePeerMessaging(settings: PeerMessagingConfig): void {
+        validatePeerMessagingConfig(settings);
+    }
+
+    async updateRuntimePeerMessaging(ctx: Context, settings: PeerMessagingConfig): Promise<void> {
+        validatePeerMessagingConfig(settings);
+        await this.#runtimeLock.runInLock(ctx, async () => {
+            const next = structuredClone(this.#runtimeValues);
+            next.peer_messaging = structuredClone(settings);
+            await writeRuntimeConfigurationFile(this.configuration.paths.runtimeConfigPath, next);
+            this.#runtimeValues = next;
+            this.#peerMessaging = structuredClone(settings);
+        });
     }
 
     async updateRuntimeConnection(
@@ -3095,6 +3123,7 @@ export function parseHappyAgentConfigToml(source: string): {
         "skill_enablement",
         "api",
         "connections",
+        "peer_messaging",
         "defaults",
         "docker",
         "runners",
@@ -3150,6 +3179,7 @@ export function parseHappyAgentConfigToml(source: string): {
         ...(table.profile === undefined ? {} : { profile: table.profile }),
         ...(table.api === undefined ? {} : { api: table.api }),
         ...(table.connections === undefined ? {} : { connections: table.connections }),
+        ...(table.peer_messaging === undefined ? {} : { peer_messaging: table.peer_messaging }),
         ...(runners === undefined ? {} : { runners }),
         ...(execution === undefined ? {} : { execution }),
         ...(defaults === undefined ? {} : { defaults }),
@@ -3360,6 +3390,13 @@ function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigVal
         if (partial.api !== undefined) merged.api = { ...merged.api, ...partial.api };
         if (partial.connections !== undefined)
             merged.connections = { ...merged.connections, ...partial.connections };
+        if (partial.peer_messaging !== undefined) {
+            merged.peer_messaging = {
+                ...merged.peer_messaging,
+                ...partial.peer_messaging,
+                peers: { ...merged.peer_messaging?.peers, ...partial.peer_messaging.peers },
+            };
+        }
         if (partial.runners !== undefined) {
             merged.runners = {
                 ...(merged.runners?.default === undefined
@@ -3466,6 +3503,7 @@ function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigVal
     }
     if (merged.runners !== undefined) merged.runners = validateRunners(merged.runners, merged);
     if (merged.execution !== undefined) validateExecution(merged);
+    if (merged.peer_messaging !== undefined) validatePeerMessagingConfig(merged.peer_messaging);
     if (!Value.Check(happyAgentConfigValuesSchema, merged)) {
         throw new Error("The merged Happy Agent configuration is invalid.");
     }
@@ -3991,6 +4029,7 @@ function withoutProjectMachineSettings(values: PartialValues): PartialValues {
         // The Bot API server receives every bot token, so a checked-in file must not choose it.
         telegram: _telegram,
         connections: _connections,
+        peer_messaging: _peerMessaging,
         runners: _runners,
         // Which Linux user runs this machine's work is the machine owner's decision alone: a
         // checked-in file that picked the user would pick what every command may reach.

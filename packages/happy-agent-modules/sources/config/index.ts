@@ -38,3 +38,10 @@ export {
     type ExecutionConfig,
 } from "./ExecutionConfig.js";
 export { VoiceCredentialPoolError } from "./VoiceCredentialPoolError.js";
+export {
+    peerNodeIdSchema,
+    peerConnectionSchema,
+    peerMessagingConfigSchema,
+    type PeerMessagingConfig,
+    type PeerConnection,
+} from "./PeerMessagingConfig.js";
