@@ -48,7 +48,8 @@ Some settings apply without a restart. Network policy is reread before every san
 and MCP servers are reloaded online with `reload_mcp_servers` (see [MCP](MCP.md)). The daemon
 reads everything else in the user `happy.toml` only at startup. That includes providers and
 their accounts, `hidden`, smart providers, the `[gemini]` key, the Telegram Bot API server,
-Ethan mode, heap snapshots, and the Tailcat port. Reload the daemon after changing any of these:
+Ethan mode, heap snapshots, the Tailcat port, runners, and the Linux users work runs as. Reload the
+daemon after changing any of these:
 
 ```sh
 happy-agent reload
@@ -232,6 +233,57 @@ there earlier stay listed so they can be archived, and their work fails with
 nothing falls back to the daemon. A runner project can run its workspaces in containers on the
 runner by setting `defaultWorkspaceCompute` to `{ "type": "docker", "image": "..." }`; the runner
 needs Docker. Attached secrets and sandboxed services are not available on runners yet.
+
+## Work as separate Linux users
+
+On Linux and macOS, the daemon can run this machine's work as other Linux users, so the account
+that holds the configuration, database, and provider credentials never runs what agents do.
+[Harden a node with separate Linux users](recipe/harden-node.md) walks through the accounts, the
+sudo rule, and the checks.
+
+```toml
+[execution]
+user = "happy-work"
+# executable = "/usr/local/bin/happy-agent"
+
+[execution.bots.k3x9q2w7e5r1t8y4u6i0o3pa]
+user = "happy-guest"
+```
+
+`user` is the workload user. For it, and for each bot user, the daemon starts a runner with
+`sudo -n -u <user> -- <executable> runner --stdio` and speaks the [runner](#runners) protocol over
+its standard input and output. Agent file tools and commands, Git, workspace checkouts and setup,
+terminals, file browsing, previews, MCP stdio servers, and the automatic permission reviewer's
+reads all run there, in the normal sandbox; nothing of this machine's work runs in the daemon
+process. The home project is the workload user's home, and new bot, task, project, and workspace
+folders are placed under it as on a runner; `HAPPY_AGENT_WORKSPACES_DIRECTORY` and
+`HAPPY_AGENT_PROJECTS_DIRECTORY` no longer move them. Folders already created elsewhere keep their
+paths.
+
+`[execution.bots.<botId>]` gives one bot, named by the bot ID `list_bots` reports, a user of its
+own: every agent the bot governs runs its files and commands as that user. Stdio MCP servers stay
+with the workload user and are not offered to such a bot; product work on its folder, such as
+terminals and Git checkouts, also stays with the workload user. A bot ID that names no bot is
+logged and ignored.
+
+`executable` defaults to the daemon's own executable and must be an absolute path that the
+workload users can run, matching the sudoers rule exactly. User names are a lowercase letter or
+`_`, then up to 31 lowercase letters, digits, `_`, or `-`; `root` is refused, and so is the user
+the daemon runs as. The daemon starts the runner with only `PATH` in its environment.
+
+A runner that cannot start — no sudo rule, an unknown user, a missing executable — fails closed:
+the daemon still starts and logs the reason, and every piece of work that needs that user fails
+with it, through the API as `503 runner_unavailable`. Nothing falls back to the daemon's own user.
+A runner that stops after it was connected is started again, and machines it held are rebuilt in
+the same folders, as after a runner restart.
+
+It is machine configuration only: a project `happy.toml` cannot set it. It cannot be combined with
+`[runners]`, since nothing runs on this machine once runners are configured; give each runner its
+own unprivileged user on its own machine instead. Restart the daemon after changing it. As on
+runners, commands that select attached secrets are refused, sandboxed services are unavailable,
+and live Git state is not tracked for these folders. Docker workspaces and a bot's Docker compute
+are started by the workload user's runner, which then needs Docker access — root-equivalent on that
+host, and therefore the end of this separation.
 
 ## Team deployment mode
 

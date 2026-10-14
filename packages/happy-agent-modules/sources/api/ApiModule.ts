@@ -2154,7 +2154,9 @@ export class ApiModule implements AgentModule {
             this.#assertSocketReady();
             const { runnerId } = await this.#resolveWorkspaceScope(ctx, match[1] as string);
             const runners = this.#runners;
-            if (runnerId === undefined || runners === undefined) {
+            // The native fast path connects from this process; a workload user's previews are
+            // reached through that user's runner, like a runner's are.
+            if (runners === undefined || runners.native(runnerId)) {
                 runners?.assertLocalExecution();
                 return { handled: true };
             }
@@ -6143,8 +6145,14 @@ export class ApiModule implements AgentModule {
         if (git !== null && request.method === "GET") {
             const workspaceId = git[1] as string;
             const { root, runnerId } = await this.#resolveWorkspaceScope(ctx, workspaceId);
-            // Live Git state is read only for folders on this machine.
-            if (runnerId !== undefined) throw notFound("Git state is not tracked on runners.");
+            // Live Git state is read only for folders this process reads itself.
+            if (this.#runners !== undefined && !this.#runners.native(runnerId)) {
+                throw notFound(
+                    runnerId === undefined
+                        ? "Git state is not tracked while work runs as a separate Linux user."
+                        : "Git state is not tracked on runners.",
+                );
+            }
             const snapshot = await this.#git.snapshot(root, workspaceId);
             sendJson(response, 200, { git: this.#git.resource(snapshot) });
             return true;
@@ -6170,8 +6178,9 @@ export class ApiModule implements AgentModule {
         for (const workspaceId of body.workspaceIds) {
             const { projectId, childWorkspaceId, root, runnerId } =
                 await this.#resolveWorkspaceScope(ctx, workspaceId);
-            // A folder on a runner has no live Git state; it is simply absent from the answer.
-            if (runnerId !== undefined) continue;
+            // A folder on a runner, or a workload user's, has no live Git state; it is simply
+            // absent from the answer.
+            if (this.#runners !== undefined && !this.#runners.native(runnerId)) continue;
             const entity = {
                 path: root,
                 projectId,

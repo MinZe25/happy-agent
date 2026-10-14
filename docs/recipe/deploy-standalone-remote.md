@@ -85,6 +85,12 @@ sudo install -d -m 0700 -o happy-agent -g happy-agent \
   /var/lib/happy-agent/projects
 ```
 
+When this node runs its own agent work rather than a [dedicated runner](add-runner.md), offer to
+[harden it with separate Linux users](harden-node.md) as well: agent commands then run as a
+workload user that cannot read this account's configuration, database, or credentials. Decide
+before the daemon first starts, because that recipe places every project and workspace folder in
+the workload user's home and installs the binary root-owned in `/usr/local/bin`.
+
 Unless the user pinned a version, resolve the latest stable Happy Agent release from GitHub at
 deployment time. Filter for Happy Agent's `v<version>` tags, not library releases;
 do not reuse a version remembered from a previous deployment. Match `uname -m` to `linux-x64` or

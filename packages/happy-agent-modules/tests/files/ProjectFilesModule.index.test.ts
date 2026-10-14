@@ -162,12 +162,14 @@ describe("ProjectFilesModule index", () => {
                 return () => undefined;
             },
         } as unknown as GitModule;
+        // Search on this machine's folders never asks for a machine, only whether it is native.
+        const runners = new RunnersModule(await temporaryTestConfig());
+        runnerModules.add(runners);
         const files = new ProjectFilesModule(
             {} as ProjectsModule,
             {} as WorkspacesModule,
             git,
-            // Search on this machine's folders never asks for a machine.
-            {} as RunnersModule,
+            runners,
         );
         modules.add(files);
         const resolvedRoot = await fileRoot(root);

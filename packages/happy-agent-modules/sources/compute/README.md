@@ -276,6 +276,12 @@ with only an image, a container on this machine. Commands that select attached s
 on runners and in containers, with a message saying so, until secrets can be delivered there.
 `runnerOf(config)` tells other modules which runner an agent's folder is on.
 
+When machine `happy.toml` names `[execution]` users, an agent with no runner never gets a host
+compute: it gets a machine on the local runner of the Linux user `RunnersModule.userFor` chooses —
+its bot's own user, or the default — optionally in a container there. Commands that select
+attached secrets are refused there too. The permission reviewer's machine runs as the default
+user. Work for a user whose runner will not start fails; it never runs as the daemon's user.
+
 A bot's settings may choose a Docker image for every agent under the bot. When an agent's own
 configuration names no image, its machine is built in a container of the bot's image, on this
 machine or its runner, with only its folder mounted. The setting is read only while a machine is

@@ -217,6 +217,14 @@ export class BotSettingsModule implements AgentModule {
     }
 
     /**
+     * The agent at the root of this agent's tree, whether or not any settings are stored for it.
+     * For every agent a bot governs, this is the bot's own agent.
+     */
+    async root(ctx: Context, agentId: string): Promise<string> {
+        return await this.#treeRoot(ctx, agentId);
+    }
+
+    /**
      * Keep a new root agent inside the tree it was created from. Call it in the transaction that
      * creates the root, so the root is never briefly ungoverned.
      */

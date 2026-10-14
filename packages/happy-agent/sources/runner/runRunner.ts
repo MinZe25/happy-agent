@@ -1,13 +1,12 @@
-import { hostname } from "node:os";
-
-import { createRunnerMachine, RunnerHost } from "@slopus/happy-agent-compute";
 import { openTailcatRemote } from "@slopus/happy-agent-modules/tailcat";
-import { createRootContext, withLogger, type Context } from "@steve.kite/stdlib";
+import { createRootContext, withLogger } from "@steve.kite/stdlib";
 
-import { getDaemonIdentity } from "../lifecycle/getDaemonIdentity.js";
 import { connectRunnerWebSocket, RunnerConnectError } from "./connectRunnerWebSocket.js";
+import { createRunnerHostFor } from "./createRunnerHostFor.js";
 import { createRunnerLogger } from "./createRunnerLogger.js";
+import { disposeHost } from "./disposeHost.js";
 import { readRunnerOptions } from "./readRunnerOptions.js";
+import { runStdioRunner } from "./runStdioRunner.js";
 
 const FIRST_RETRY_MS = 1_000;
 const LAST_RETRY_MS = 30_000;
@@ -25,26 +24,16 @@ const HEALTHY_CONNECTION_MS = 60_000;
  * leaves nothing running.
  */
 export async function runRunner(args: readonly string[]): Promise<void> {
+    // A daemon on this machine starts its workload users' runners itself, over their own pipes.
+    if (args.includes("--stdio")) {
+        await runStdioRunner(args);
+        return;
+    }
     const options = readRunnerOptions(args);
     const logger = createRunnerLogger(process.env["HAPPY_RUNNER_DEBUG"] === "1");
     const root = withLogger(createRootContext(), logger);
     const ctx = root.named("runner");
-    const identity = {
-        version: getDaemonIdentity().version,
-        platform: process.platform,
-        arch: process.arch,
-        hostname: hostname().slice(0, 255),
-        home: options.home,
-    };
-    const host = new RunnerHost({
-        ctx,
-        identity,
-        createCompute: async (computeCtx, request) =>
-            createRunnerMachine(computeCtx, request, {
-                home: options.home,
-                hostPolicy: { privateDirectories: [...options.privateDirectories] },
-            }),
-    });
+    const { host, identity } = createRunnerHostFor(ctx, options);
 
     // A standalone daemon is reached through one Tailcat carrier, reused across reconnects.
     const tailcat = options.tailcat;
@@ -98,15 +87,6 @@ export async function runRunner(args: readonly string[]): Promise<void> {
     }
     await disposeHost(root.named("runner-shutdown"), host);
     await remote?.close();
-}
-
-async function disposeHost(ctx: Context, host: RunnerHost): Promise<void> {
-    try {
-        await host.dispose(ctx);
-    } catch (error: unknown) {
-        ctx.log.error("The runner could not stop everything it held.", error);
-        process.exitCode = 1;
-    }
 }
 
 function jitter(ms: number): number {

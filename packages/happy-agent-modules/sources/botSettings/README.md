@@ -25,6 +25,9 @@ tree's root when it is created, in the same transaction, and stays governed by i
 walk is bounded; a cycle or an overlong chain is corrupt ancestry and fails closed, as does a
 stored row this module cannot read.
 
+`root(ctx, agentId)` answers which agent's tree governs an agent. `RunnersModule` uses it to run
+every agent under a bot as the Linux user `[execution.bots]` gives that bot.
+
 ## Who enforces what
 
 This module only stores settings and answers questions about them. The module that owns each

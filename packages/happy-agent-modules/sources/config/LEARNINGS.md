@@ -307,3 +307,12 @@ People wanted the Chief of Staff to create and change them on the fly instead, s
 the exported bots module's database table and need no reload. Only `[telegram] api_url` remains in
 configuration, for a self-hosted Bot API server. It is dropped from the project layer and is not
 something a tool can set, because whichever server it names receives every bot token.
+
+## Workload users are machine settings validated strictly
+
+`[execution]` names the Linux users agent work runs as, and each name ends up in a sudo command
+line that a sudoers rule allows. It is read only from machine `happy.toml` and dropped from the
+project layer, because a repository must never choose the account its own code runs as. Names
+must match `^[a-z_][a-z0-9_-]{0,31}$` and must not be `root`; the executable must be an absolute
+path; per-bot keys must be bot IDs. The table is refused beside `[runners]`, where nothing runs on
+this machine to separate, and on Windows, which has no sudo. Changing it takes a restart.

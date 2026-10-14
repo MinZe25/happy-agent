@@ -98,3 +98,12 @@ verify ordinary events, ignored directories, unsubscribe, and callback garbage c
 Parcel reports canonical event paths. Each subscription resolves its native root and uses that
 same root for ignore paths and relative event names, so a caller's symlink alias cannot hide
 changes. Missing roots keep the original path and the ordinary subscription retry behavior.
+
+## Folders worked on as a separate Linux user use the runner path
+
+With `[execution]` configured, a folder on this machine belongs to the workload user, and the
+daemon's own Git would run as the daemon's user against it. Every native branch now asks
+`RunnersModule.native(runnerId)`, so worktrees, clones, and probes on such a folder run through the
+default workload user's runner, exactly as on a runner. The embedded live Git tracking is not
+ported there, like on runners, so the API answers its Git state with `404` and a message saying
+why.

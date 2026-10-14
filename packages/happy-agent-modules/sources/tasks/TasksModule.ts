@@ -794,7 +794,13 @@ export class TasksModule implements AgentModule {
 
     /** A task's folder on the machine it goes to. */
     #taskPath(runnerId: string | undefined, folderName: string): string {
-        if (runnerId === undefined) return this.#config.taskPath(folderName);
+        if (runnerId === undefined) {
+            // A workload user's runner holds this machine's folders under that user's home.
+            const local = this.#runners.machineHome(undefined);
+            return local === undefined
+                ? this.#config.taskPath(folderName)
+                : this.#config.taskPathOn(local.home, local.platform, folderName);
+        }
         const home = this.#runners.home(runnerId);
         if (home === undefined) {
             throw new RunnerUnavailableError(

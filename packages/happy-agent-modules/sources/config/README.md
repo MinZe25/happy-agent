@@ -254,6 +254,11 @@ settles. A module asks for the answer instead of being handed the path it would 
 - `workspacesHome` — the folder managed workspaces are created under, `HAPPY_AGENT_WORKSPACES_DIRECTORY`
   when it names an absolute path and `~/Happy/Workspaces` (`~/happy/workspaces` off macOS)
   otherwise.
+- `execution` — the Linux users agent work runs as, from `[execution]` in machine `happy.toml`:
+  the default `user`, the `executable` sudo starts as each user's runner (the running binary
+  unless set), and `bots`, each bot ID's own user. Undefined when work runs as the daemon's user.
+  User names are strict Linux names and never `root`, and the table is refused beside
+  `[runners]` and on Windows.
 - `workspaceSettings` — what a workspace folder does when it says nothing itself: what to sync,
   what to protect, what to run on setup, and what archiving leaves on disk.
 

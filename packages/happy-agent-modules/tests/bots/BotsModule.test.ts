@@ -967,7 +967,7 @@ async function started(name: string, workspacesEnabled: boolean, script: Scripte
     );
     tasks.beforeStart(database.context, agents.asRef());
     const bots = new BotsModule(config, abort, titles, projects, workspaces, runners, tasks);
-    const hooks = bots.beforeStart(database.context, agents.asRef());
+    const hooks = await bots.beforeStart(database.context, agents.asRef());
     const events: BotEvent[] = [];
     const agentKVs = new Map<string, AgentKV>();
     bots.onEvent((_ctx, event) => {

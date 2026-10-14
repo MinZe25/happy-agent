@@ -375,10 +375,18 @@ export class ComputeModule implements AgentModule {
                 // A bot's compute setting is read only while the machine is built: a running
                 // machine is never moved, so a change reaches it the next time it starts.
                 const effective = await this.#withBotCompute(lockCtx, config, agentId);
+                // Work on this machine runs as a workload user once one is configured, and never
+                // inside this daemon; a bot with a Linux user of its own runs as that one.
+                const user =
+                    effective.runnerId === undefined
+                        ? await this.#runners?.userFor(lockCtx, agentId)
+                        : undefined;
                 const created =
-                    effective.runnerId === undefined && effective.docker === undefined
+                    effective.runnerId === undefined &&
+                    effective.docker === undefined &&
+                    user === undefined
                         ? await this.#createHere(lockCtx, effective, agentId)
-                        : await this.#createElsewhere(lockCtx, effective, agentId);
+                        : await this.#createElsewhere(lockCtx, effective, agentId, user);
                 const { compute } = created;
                 if (this.#closed) {
                     await compute.dispose(lockCtx);
@@ -756,13 +764,7 @@ export class ComputeModule implements AgentModule {
                 if (this.#closed) throw new Error("Compute module is closed.");
                 const cached = this.#reviewer;
                 if (cached !== undefined) return cached;
-                const { compute } = await this.#create(
-                    lockCtx,
-                    {
-                        cwd: this.#config.configuration.paths.publicHome,
-                    },
-                    "compute.permission-reviewer",
-                );
+                const compute = await this.#createReviewer(lockCtx);
                 if (this.#closed) {
                     await compute.dispose(lockCtx);
                     throw new Error("Compute module is closed.");
@@ -771,6 +773,39 @@ export class ComputeModule implements AgentModule {
                 return compute;
             }),
         );
+    }
+
+    /**
+     * The reviewer investigates where agents work. While the daemon runs work itself, that is this
+     * installation's public folder; once a workload user is configured, the reviewer's reads and
+     * read-only commands run in that user's runner, from its home, like every agent's.
+     */
+    async #createReviewer(ctx: Context): Promise<HostCompute> {
+        const runners = this.#runners;
+        const user = runners?.workloadUser;
+        if (runners === undefined || user === undefined) {
+            const { compute } = await this.#create(
+                ctx,
+                { cwd: this.#config.configuration.paths.publicHome },
+                "compute.permission-reviewer",
+            );
+            return compute;
+        }
+        await runners.machine(undefined);
+        const home = runners.machineHome(undefined)?.home as string;
+        const compute = await runners.localAgentMachine(
+            detach(ctx).named("compute.permission-reviewer"),
+            {
+                user,
+                agentId: "",
+                computeId: "permission-reviewer",
+                cwd: home,
+                policy: {
+                    protectedProjectFiles: [...(this.hostPolicy.protectedProjectFiles ?? [])],
+                },
+            },
+        );
+        return refuseAttachedSecrets(compute);
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -929,14 +964,16 @@ export class ComputeModule implements AgentModule {
     }
 
     /**
-     * An agent's machine somewhere else: on the runner its folder is on, or in a container of the
-     * workspace's image, on that runner or on this computer. The machine is built before this
-     * resolves, so a runner that is away or a missing Docker fails here, naming what is missing.
+     * An agent's machine somewhere else: on the runner its folder is on, in the runner of the
+     * Linux user its work runs as on this computer, or in a container of the workspace's image on
+     * either. The machine is built before this resolves, so a runner that is away, a workload user
+     * whose runner cannot start, or a missing Docker fails here, naming what is missing.
      */
     async #createElsewhere(
         ctx: Context,
         config: AgentComputeConfig,
         agentId: string,
+        user: string | undefined,
     ): Promise<{
         readonly compute: HostCompute;
         readonly processContext: Context;
@@ -949,7 +986,18 @@ export class ComputeModule implements AgentModule {
                 ? detachedProcessContext
                 : withAgentDatabase(detachedProcessContext, database);
         let compute: Compute;
-        if (config.runnerId !== undefined) {
+        const policy = {
+            protectedProjectFiles: [...(this.hostPolicy.protectedProjectFiles ?? [])],
+        };
+        if (config.runnerId === undefined && user !== undefined) {
+            compute = await this.#runners!.localAgentMachine(processContext, {
+                user,
+                agentId,
+                cwd: config.cwd,
+                policy,
+                ...(config.docker === undefined ? {} : { docker: config.docker }),
+            });
+        } else if (config.runnerId !== undefined) {
             if (this.#runners === undefined) {
                 throw new Error(
                     "This agent works on a runner, but runners are not available here.",
@@ -959,9 +1007,7 @@ export class ComputeModule implements AgentModule {
                 runnerId: config.runnerId,
                 agentId,
                 cwd: config.cwd,
-                policy: {
-                    protectedProjectFiles: [...(this.hostPolicy.protectedProjectFiles ?? [])],
-                },
+                policy,
                 ...(config.docker === undefined ? {} : { docker: config.docker }),
             });
         } else {

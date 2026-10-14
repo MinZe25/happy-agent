@@ -286,7 +286,7 @@ export class ServicesModule implements AgentModule {
         const compute = await this.compute.resolve(withAgentConfig(ctx, agentConfig), agentId);
         if (compute?.services === undefined)
             throw new Error(
-                "This machine cannot enforce the sandbox services need. Services are not available on runners or in containers yet.",
+                "This machine cannot enforce the sandbox services need. Services are not available on runners, in containers, or for work that runs as a separate Linux user yet.",
             );
         if (compute.cwd !== owner.path)
             throw new Error("The service compute does not match its owning workspace directory.");

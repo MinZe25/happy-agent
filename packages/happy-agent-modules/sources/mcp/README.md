@@ -36,3 +36,8 @@ process across machines. A server whose runner goes away fails at once, naming t
 a server that stopped or could not start because its runner was away starts again once that runner
 connects. The module takes `RunnersModule` for the machines and `ComputeModule`
 for which runner an agent's folder is on.
+
+When work runs as a separate Linux user, stdio servers start through that user's local runner
+like a runner's. Only the default user has one product machine, so an agent of a bot that runs as
+a user of its own sees the user-wide and workspace stdio servers as failed, with a message saying
+why, rather than reaching processes that run as another user. HTTP servers are unaffected.

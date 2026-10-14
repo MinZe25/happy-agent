@@ -59,3 +59,11 @@ When the lease ran out the server was gone, yet its pooled connection stayed in 
 never came back after the runner restarted. A runner that disconnects now fails its servers at
 once with a message naming it and stops them; a connection that ends on its own is recorded as
 failed; and the runner's return reloads every failed server.
+
+## A bot with its own Linux user gets no shared stdio servers
+
+Stdio servers are pooled per machine, and with `[execution]` the machine is the default workload
+user's runner. A bot given a user of its own, typically one that strangers talk to, would otherwise
+have driven processes running as the default user, with that user's files. Its agents now see
+those servers as failed with a message naming the reason, and connecting refuses; the catalog
+records which user each active agent runs as.

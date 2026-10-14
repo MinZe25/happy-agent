@@ -238,3 +238,11 @@ a concurrent edit is refused rather than overwritten. Narrowing skips review; wi
 with each widening named. A bot kept inside its own tree is not offered `list_bots`, `create_bot`,
 or `send_bot_message`, its tasks lose them too, and `sendMessage` refuses it; it keeps
 `set_bot_avatar` for its own picture.
+
+## Bots tell runners which Linux user they run as
+
+`[execution.bots]` keys a bot's own Linux user by bot ID, but compute only knows agent IDs and
+cannot depend on the bots catalog. `BotsModule` therefore binds every bot's agent and settings root
+to its user with `RunnersModule.bindBots` while it starts, before any agent can run, and binds each
+new bot as it is created. Bot and task folders are placed under the workload user's home when
+`[execution]` is configured, because that user is the one that works in them.

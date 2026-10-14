@@ -23,7 +23,8 @@ interface Listing {
 }
 
 /**
- * File-name search for folders on runners, which the native index on this machine cannot reach.
+ * File-name search for folders on runners — a remote one, or a workload user's on this machine —
+ * which the native index in this process cannot reach.
  *
  * The runner lists the folder itself — Git's own view of the working tree, which already leaves
  * ignored files out, or a bounded walk outside a repository — and the list is ranked here. One
@@ -44,14 +45,14 @@ export class MachineFileIndex {
     }
 
     /** Marks a listing out of date after a change the folder's watch reported. */
-    refresh(runnerId: string, root: string): void {
+    refresh(runnerId: string | undefined, root: string): void {
         const listing = this.#listings.get(listingKey(runnerId, root));
         if (listing !== undefined) listing.stale = true;
     }
 
     async search(
         machine: Compute,
-        folder: { readonly root: string; readonly runnerId: string },
+        folder: { readonly root: string; readonly runnerId: string | undefined },
         query: string,
         limit: number,
         watching: boolean,
@@ -62,7 +63,7 @@ export class MachineFileIndex {
 
     async #paths(
         machine: Compute,
-        folder: { readonly root: string; readonly runnerId: string },
+        folder: { readonly root: string; readonly runnerId: string | undefined },
         watching: boolean,
     ): Promise<readonly string[]> {
         const key = listingKey(folder.runnerId, folder.root);
@@ -103,10 +104,13 @@ export class MachineFileIndex {
 
     async #list(
         machine: Compute,
-        folder: { readonly root: string; readonly runnerId: string },
+        folder: { readonly root: string; readonly runnerId: string | undefined },
     ): Promise<readonly string[]> {
         const listed = await this.#git
-            .listWorkingTreeFiles({ path: folder.root, runnerId: folder.runnerId })
+            .listWorkingTreeFiles({
+                path: folder.root,
+                ...(folder.runnerId === undefined ? {} : { runnerId: folder.runnerId }),
+            })
             .catch(() => undefined);
         if (listed !== undefined && listed.paths.length > 0) return listed.paths;
         return await walk(machine, folder.root);
@@ -147,6 +151,6 @@ async function walk(machine: Compute, root: string): Promise<readonly string[]> 
     return files;
 }
 
-function listingKey(runnerId: string, root: string): string {
-    return `${runnerId}\0${root}`;
+function listingKey(runnerId: string | undefined, root: string): string {
+    return `${runnerId ?? ""}\0${root}`;
 }

@@ -1,8 +1,11 @@
 import type { Compute, ComputeShell } from "@slopus/happy-agent-compute";
 
-/** What an agent is told when a command on a runner or in a container selects attached secrets. */
+/**
+ * What an agent is told when a command on a runner, in a container, or running as a separate
+ * Linux user selects attached secrets.
+ */
 const SECRETS_UNAVAILABLE =
-    "Secrets are not available on runners or in containers yet. Run the command without selecting secrets.";
+    "Secrets are not available on runners, in containers, or for work that runs as a separate Linux user yet. Run the command without selecting secrets.";
 
 /**
  * The same machine, refusing commands that select attached secrets.

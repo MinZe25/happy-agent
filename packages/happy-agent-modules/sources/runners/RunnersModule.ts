@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 
 import {
@@ -30,12 +30,15 @@ import {
     type RootContext,
 } from "@steve.kite/stdlib";
 
+import type { BotSettingsModule } from "../botSettings/index.js";
 import type { ConfigModule } from "../config/index.js";
 import type { BinaryWebSocket } from "../transport/index.js";
 import { LocalExecutionDisabledError } from "./LocalExecutionDisabledError.js";
 import { createRunnersVersion } from "./createRunnersVersion.js";
 import { canonicalMachinePath, futureMachinePath } from "./impl/canonicalMachinePath.js";
+import { LocalUserRunner } from "./impl/LocalUserRunner.js";
 import { runOnMachine } from "./impl/runOnMachine.js";
+import { sudoRunnerCommand } from "./impl/sudoRunnerCommand.js";
 import { webSocketRunnerChannel } from "./impl/webSocketRunnerChannel.js";
 import type { RunnerRunOptions, RunnerRunResult } from "./RunnerRun.js";
 import {
@@ -54,6 +57,21 @@ export type RunnersListener = (ctx: Context, snapshot: RunnerListResponse) => vo
 /** The compute ID of the machine Happy's own work runs on, one per runner. */
 const PRODUCT_COMPUTE_ID = "happy-product";
 
+/** How long startup waits for the workload user's runner before carrying on without it. */
+const LOCAL_RUNNER_STARTUP_MS = 20_000;
+
+/** A machine's home directory and platform, where folders that have no project are placed. */
+export interface MachineHome {
+    readonly home: string;
+    readonly platform: NodeJS.Platform;
+}
+
+/** A bot as this module needs to know it: which agent is the bot's own. */
+export interface RunnerBotIdentity {
+    readonly id: string;
+    readonly agentId: string;
+}
+
 /**
  * The runners this installation works on.
  *
@@ -67,10 +85,19 @@ export class RunnersModule implements AgentModule {
     readonly name = "runners";
     readonly migrations = runnersMigrations;
     readonly #config: ConfigModule;
+    readonly #botSettings: BotSettingsModule | undefined;
     readonly #instanceId = randomUUID();
     readonly #links = new Map<string, RunnerLink>();
     readonly #products = new Map<string, Promise<Compute>>();
     #local: Compute | undefined;
+    /** One runner per Linux user this machine's work runs as, started on first use. */
+    readonly #localRunners = new Map<string, LocalUserRunner>();
+    /** Each workload user's product machine, created once its runner proved who it runs as. */
+    readonly #localProducts = new Map<string, Promise<Compute>>();
+    /** The default workload user's home, as its runner reported it. */
+    #localHome: string | undefined;
+    /** The bots that run as a user of their own, by their agent ID, once the bots are known. */
+    #bots: Map<string, string> | undefined;
     readonly #listeners = new Set<RunnersListener>();
     readonly #lock = asyncLock({ reentry: "block" });
     #snapshot: RunnerListResponse | undefined;
@@ -78,14 +105,21 @@ export class RunnersModule implements AgentModule {
     #database: AgentDatabase | undefined;
     #closed = false;
 
-    constructor(config: ConfigModule) {
+    /**
+     * @param config The machine configuration naming the runners and the Linux users work runs as.
+     * @param botSettings Which bot governs an agent, so a bot with a Linux user of its own gets it
+     * for every agent under it. Without this module, every agent runs as the default user.
+     */
+    constructor(config: ConfigModule, botSettings?: BotSettingsModule) {
         this.#config = config;
+        this.#botSettings = botSettings;
     }
 
-    readonly beforeStart = (ctx: Context): AgentModuleHooks => {
+    readonly beforeStart = async (ctx: Context): Promise<AgentModuleHooks> => {
         const root = detach(ctx);
         this.#lifetime = ctx.lifetime === undefined ? root : withLifetime(root, ctx.lifetime);
         this.#database = agentDatabase(ctx);
+        await this.#startWorkloadUser(ctx);
         return { afterStart: this.afterStart };
     };
 
@@ -96,6 +130,70 @@ export class RunnersModule implements AgentModule {
     /** Whether any runner is configured, which is when nothing runs on this machine. */
     get enabled(): boolean {
         return Object.keys(this.#config.runners.entries).length > 0;
+    }
+
+    /**
+     * Whether work on a folder runs inside this daemon process: a folder on this machine, while
+     * no workload user is configured. Otherwise it runs in a runner — on another machine, or on
+     * this one as the workload user — and only what a runner offers is available for it.
+     */
+    native(runnerId?: string): boolean {
+        return runnerId === undefined && this.#config.execution === undefined;
+    }
+
+    /** The Linux user this machine's work runs as, when the daemon does not run it as itself. */
+    get workloadUser(): string | undefined {
+        return this.#config.execution?.user;
+    }
+
+    /** Whether any bot has a Linux user of its own, besides this machine's workload user. */
+    get hasBotUsers(): boolean {
+        return Object.keys(this.#config.execution?.bots ?? {}).length > 0;
+    }
+
+    /**
+     * Tell this module every bot there is, so a bot configured with a Linux user of its own is
+     * recognized by its agent. Until this is called, no agent work starts while any bot has one.
+     */
+    bindBots(bots: readonly RunnerBotIdentity[]): void {
+        const configured = this.#config.execution?.bots ?? {};
+        const bound = new Map<string, string>();
+        for (const bot of bots) {
+            if (configured[bot.id] !== undefined) bound.set(bot.agentId, bot.id);
+        }
+        const known = new Set(bots.map((bot) => bot.id));
+        for (const botId of Object.keys(configured)) {
+            if (!known.has(botId)) {
+                this.#named("execution-bots").log.warn(
+                    `execution.bots names ${botId}, which is not a bot here; nothing runs as its user.`,
+                );
+            }
+        }
+        this.#bots = bound;
+    }
+
+    /** Tell this module about one bot created after {@link bindBots}. */
+    bindBot(bot: RunnerBotIdentity): void {
+        if (this.#config.execution?.bots[bot.id] === undefined) return;
+        (this.#bots ??= new Map()).set(bot.agentId, bot.id);
+    }
+
+    /**
+     * The Linux user an agent's own work runs as: its bot's user when the bot that governs it has
+     * one, otherwise this machine's workload user, or undefined when the daemon runs work itself.
+     */
+    async userFor(ctx: Context, agentId: string): Promise<string | undefined> {
+        const execution = this.#config.execution;
+        if (execution === undefined) return undefined;
+        if (Object.keys(execution.bots).length === 0) return execution.user;
+        const bots = this.#bots;
+        if (bots === undefined || this.#botSettings === undefined) {
+            throw new RunnerUnavailableError(
+                "Some bots run as Linux users of their own, and which bots those are is not known yet, so no agent work starts until it is.",
+            );
+        }
+        const botId = bots.get(await this.#botSettings.root(ctx, agentId));
+        return (botId === undefined ? undefined : execution.bots[botId]) ?? execution.user;
     }
 
     /** The runner new folders go to when nobody chose one. */
@@ -215,6 +313,8 @@ export class RunnersModule implements AgentModule {
         if (runnerId === undefined) {
             this.assertLocalExecution();
             if (this.#closed) throw new Error("The runners module is closed.");
+            const user = this.workloadUser;
+            if (user !== undefined) return await this.#localProduct(user);
             this.#local ??= createHostCompute({
                 ctx: this.#named("local-product-machine"),
                 cwd: homedir(),
@@ -257,23 +357,48 @@ export class RunnersModule implements AgentModule {
      * here, or the same layout under a runner's home directory there.
      */
     async projectsHome(runnerId: string | undefined): Promise<string> {
+        const machine = this.machineHome(runnerId);
         const home =
-            runnerId === undefined
+            machine === undefined
                 ? this.#config.projectsHome
-                : this.#config.projectsHomeOn(this.#knownHome(runnerId));
+                : this.#config.projectsHomeOn(machine.home);
         return await this.futurePath(runnerId, home);
     }
 
     /** The folder managed workspaces live under on a machine, laid out the same way. */
     async workspacesHome(runnerId: string | undefined): Promise<string> {
+        const machine = this.machineHome(runnerId);
         const home =
-            runnerId === undefined
+            machine === undefined
                 ? this.#config.workspacesHome
-                : this.#config.workspacesHomeOn(
-                      this.#knownHome(runnerId),
-                      this.platform(runnerId) ?? "linux",
-                  );
+                : this.#config.workspacesHomeOn(machine.home, machine.platform);
         return await this.futurePath(runnerId, home);
+    }
+
+    /**
+     * The home a folder's machine places folders that have no project under — the home project,
+     * bot and task folders, clones, and workspaces: a runner's home, or this machine's workload
+     * user's home. Undefined for this machine while the daemon runs its work itself, which uses
+     * this installation's own layout. Throws when that home is not known yet.
+     */
+    machineHome(runnerId: string | undefined): MachineHome | undefined {
+        if (runnerId !== undefined) {
+            return {
+                home: this.#knownHome(runnerId),
+                platform: this.platform(runnerId) ?? "linux",
+            };
+        }
+        const user = this.workloadUser;
+        if (user === undefined) return undefined;
+        const home = this.#localHome;
+        if (home === undefined) {
+            const failure = this.#localRunners.get(user)?.lastFailure;
+            throw new RunnerUnavailableError(
+                failure ??
+                    `The runner for the Linux user ${user} has not started yet, so it has nowhere to put folders.`,
+            );
+        }
+        return { home, platform: process.platform };
     }
 
     /** A runner's home directory, which must be known before anything is placed under it. */
@@ -323,13 +448,44 @@ export class RunnersModule implements AgentModule {
         });
     }
 
+    /**
+     * A machine for one agent on this machine, run as a workload user: its files, commands, and
+     * processes all live in that user's runner, in the agent's folder. With `docker`, its files
+     * and commands run in a container of that image, which that user's runner starts.
+     */
+    async localAgentMachine(
+        ctx: Context,
+        input: {
+            readonly user: string;
+            readonly agentId: string;
+            readonly cwd: string;
+            readonly policy: RunnerProjectPolicy;
+            readonly docker?: { readonly image: string };
+            /** Overrides the agent-derived compute ID, for a machine that is not an agent's. */
+            readonly computeId?: string;
+        },
+    ): Promise<Compute> {
+        await this.#localProduct(input.user);
+        return await createRunnerCompute(ctx, {
+            link: this.#localRunner(input.user).link,
+            computeId: input.computeId ?? `agent-${input.agentId}`,
+            cwd: input.cwd,
+            policy: input.policy,
+            ...(input.docker === undefined ? {} : { docker: { image: input.docker.image } }),
+        });
+    }
+
     /** Tell every runner to release what this daemon holds, and stop accepting connections. */
     async close(): Promise<void> {
         this.#closed = true;
-        const products: Promise<Compute>[] = [...this.#products.values()];
+        const products: Promise<Compute>[] = [
+            ...this.#products.values(),
+            ...this.#localProducts.values(),
+        ];
         if (this.#local !== undefined) products.push(Promise.resolve(this.#local));
         this.#local = undefined;
         this.#products.clear();
+        this.#localProducts.clear();
         if (products.length > 0) {
             const ctx = this.#named("runners-close");
             await Promise.allSettled(
@@ -338,6 +494,128 @@ export class RunnersModule implements AgentModule {
         }
         for (const link of this.#links.values()) link.close("The daemon is shutting down.");
         this.#links.clear();
+        const locals = [...this.#localRunners.values()];
+        this.#localRunners.clear();
+        await Promise.allSettled(
+            locals.map(async (runner) => await runner.close("The daemon is shutting down.")),
+        );
+    }
+
+    /**
+     * Start this machine's workload user's runner while the daemon starts, so its home is known
+     * before the first folder is placed. A runner that will not start is logged and left: the
+     * daemon still starts, and every piece of work that needs the runner fails with the reason.
+     */
+    async #startWorkloadUser(ctx: Context): Promise<void> {
+        const user = this.workloadUser;
+        if (user === undefined || this.enabled) return;
+        let timer: NodeJS.Timeout | undefined;
+        try {
+            await Promise.race([
+                this.#localProduct(user),
+                new Promise((_, reject) => {
+                    timer = setTimeout(
+                        () =>
+                            reject(
+                                new Error(
+                                    `The runner for the Linux user ${user} did not start within ${String(LOCAL_RUNNER_STARTUP_MS / 1_000)} seconds.`,
+                                ),
+                            ),
+                        LOCAL_RUNNER_STARTUP_MS,
+                    );
+                }),
+            ]);
+        } catch (error) {
+            ctx.log.error(
+                `Agent work on this machine is unavailable until it can run as ${user}.`,
+                error,
+            );
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    /** The runner a workload user's work runs in, created on first use. */
+    #localRunner(user: string): LocalUserRunner {
+        const execution = this.#config.execution;
+        if (execution === undefined || this.#closed) {
+            throw new RunnerUnavailableError(
+                `Agent work cannot run as the Linux user ${user} because the daemon is shutting down.`,
+            );
+        }
+        const existing = this.#localRunners.get(user);
+        if (existing !== undefined) return existing;
+        const runner = new LocalUserRunner(this.#named(`runner-user-${user}`), {
+            user,
+            command: sudoRunnerCommand(user, execution.executable),
+            instanceId: this.#instanceId,
+        });
+        this.#localRunners.set(user, runner);
+        return runner;
+    }
+
+    /**
+     * A workload user's product machine, once its runner is connected and has proved that it runs
+     * as that user. A runner that turns out to run as anyone else — above all as this daemon's own
+     * user — is stopped, and nothing of this machine's work runs until that is fixed.
+     */
+    async #localProduct(user: string): Promise<Compute> {
+        const existing = this.#localProducts.get(user);
+        if (existing !== undefined) return await existing;
+        const created = this.#createLocalProduct(user);
+        this.#localProducts.set(user, created);
+        created.catch(() => {
+            if (this.#localProducts.get(user) === created) this.#localProducts.delete(user);
+        });
+        return await created;
+    }
+
+    async #createLocalProduct(user: string): Promise<Compute> {
+        const daemonUser = userInfo().username;
+        if (user === daemonUser) {
+            throw new RunnerUnavailableError(
+                `Agent work cannot run as the Linux user ${user}, because that is the user this daemon runs as. Name a separate workload user in execution.user.`,
+            );
+        }
+        const runner = this.#localRunner(user);
+        await runner.ready();
+        const reported = runner.link.status().runner?.home;
+        if (reported === undefined) {
+            throw new RunnerUnavailableError(
+                `The runner for the Linux user ${user} did not say where its home is.`,
+            );
+        }
+        const ctx = this.#named(`runner-user-product-${user}`);
+        const product = await createRunnerCompute(ctx, {
+            link: runner.link,
+            computeId: PRODUCT_COMPUTE_ID,
+            cwd: reported,
+        });
+        const whoami = await runOnMachine(ctx, product, {
+            command: "id",
+            args: ["-un"],
+            maximumBytes: 1_024,
+            timeoutMs: 15_000,
+        }).catch((error: unknown) => ({
+            code: 1,
+            stdout: Buffer.alloc(0),
+            stderr: error instanceof Error ? error.message : String(error),
+            truncated: false,
+            timedOut: false,
+        }));
+        const actual = whoami.stdout.toString("utf8").trim();
+        if (whoami.code !== 0 || actual !== user) {
+            await product.dispose(ctx).catch(() => undefined);
+            this.#localRunners.delete(user);
+            await runner.close("The runner does not run as the user it was started for.");
+            throw new RunnerUnavailableError(
+                whoami.code !== 0
+                    ? `Agent work cannot run as the Linux user ${user}: its runner could not confirm which user it runs as (${whoami.stderr.trim().slice(0, 300)}).`
+                    : `Agent work cannot run as the Linux user ${user}: its runner runs as ${actual.slice(0, 64)} instead, so it was stopped.`,
+            );
+        }
+        if (user === this.workloadUser) this.#localHome = reported;
+        return product;
     }
 
     #link(runnerId: string): RunnerLink {

@@ -210,11 +210,14 @@ export interface AgentGym {
 /** Start one gym. Every call is completely isolated from every other. */
 export async function createAgentGym(options: AgentGymOptions = {}): Promise<AgentGym> {
     const home = await createGymHome(options);
+    let gym: AgentGymInstance | undefined;
     try {
-        const gym = new AgentGymInstance(home, options);
+        gym = new AgentGymInstance(home, options);
         await gym.start();
         return gym;
     } catch (error) {
+        // A start can fail after the daemon is already listening, so stop it with the folder.
+        await gym?.dispose().catch(() => undefined);
         await home.remove().catch(() => undefined);
         throw error;
     }

@@ -43,3 +43,25 @@ Each call on an absent runner used to wait ten seconds for it to return, so an a
 reads AGENTS.md, skills, and its folder before inference stalled for minutes before failing. The
 wait now counts from the moment the runner went away: a brief drop is still bridged, and once the
 window has passed every call answers `runner_unavailable` immediately.
+
+## Separate Linux users are local runners started through sudo
+
+The request was to run agent work as a Linux user other than the daemon's, so that agent commands
+cannot read the configuration, database, or credentials, with specific bots able to use a user of
+their own. Every path that touches a folder is already written against a runner's compute, so each
+user gets a local runner, started as `sudo -n -u <user> -- happy-agent runner --stdio` and spoken
+to over stdio with the unchanged runner protocol, rather than a second, sudo-aware execution path.
+The sudo command line is fixed and minimal so the sudoers rule can allow exactly that command; the
+spawn passes only `PATH` and starts in `/`.
+
+It fails closed: a missing sudo rule, an unknown user, a runner that stops before it is ready, or
+an `id -un` that does not name the configured user fails the work with a message naming the user
+and the reason, and nothing falls back to the daemon's user. A user that is the daemon's own is
+refused, because it would only look separated. The daemon still starts when the default user's
+runner cannot, so the operator can read the log and fix the sudo rule. Per-bot users are keyed by
+bot ID, and an agent's user is unknown until `BotsModule` has bound its bots, so `userFor` refuses
+until then instead of choosing the default.
+
+`[execution]` cannot be combined with `[runners]`: with runners, no work runs on the node's machine
+at all, and that is the stronger separation. The API stays unchanged — folders are ordinary
+folders on this machine — so a workload user that cannot start answers `503 runner_unavailable`.

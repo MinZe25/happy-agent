@@ -203,3 +203,10 @@ Existing stored associations remain readable and are not rewritten.
 The project tools already required a root agent and `features.cross_workspace`. A bot whose owner
 keeps it inside its own tree loses them too, on its own agent and on tasks it opened, because
 seeing every project on the machine is exactly the reach the setting removes.
+
+## The home project follows the workload user
+
+When work runs as a separate Linux user, the daemon's own home is unreadable to agents, so the
+home project, its "home folder" check, and the location new folders are created under use the
+default workload user's home, which `RunnersModule.machineHome()` reports from its runner. While
+that runner cannot start, the home project shows no folder rather than the daemon's home.

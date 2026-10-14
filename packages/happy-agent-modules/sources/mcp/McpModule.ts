@@ -129,7 +129,17 @@ type McpServerConfig = HappyAgentConfigValues["mcpServers"][string];
 interface McpCatalogServer {
     readonly config: McpServerConfig;
     readonly connectionId?: string;
+    /** Why this agent may not use the server, in words the model reads. */
+    readonly unavailable?: string;
 }
+
+/**
+ * What an agent running as its bot's own Linux user is told about a stdio server. Stdio servers
+ * are shared by every agent of a folder and run as the workload user, so one such agent using
+ * them would be acting as a user its bot was moved away from.
+ */
+const SEPARATE_USER_STDIO =
+    "This bot runs as its own Linux user, and stdio MCP servers run as the installation's workload user, so they are not available to it. HTTP servers still are.";
 
 interface McpCatalog {
     readonly servers: ReadonlyMap<string, McpCatalogServer>;
@@ -167,6 +177,8 @@ export class McpModule implements AgentModule {
     /** Runners connected at the last update, so a runner coming back retries its servers once. */
     readonly #connectedRunners = new Set<string>();
     #agents: AgentSystemRef | undefined;
+    /** The Linux user each active agent's own work runs as, while some bots have their own. */
+    readonly #agentUsers = new Map<string, string>();
     #context: Context | undefined;
     #serversContext: Context | undefined;
     #initialReload: Promise<void> | undefined;
@@ -489,6 +501,14 @@ export class McpModule implements AgentModule {
                     const { config } = server;
                     if (config.enabled === false) {
                         return { name, status: "disabled", toolCount: 0 };
+                    }
+                    if (server.unavailable !== undefined) {
+                        return {
+                            name,
+                            status: "failed",
+                            toolCount: 0,
+                            errorMessage: server.unavailable,
+                        };
                     }
                     const pooled =
                         server.connectionId === undefined
@@ -1016,6 +1036,7 @@ export class McpModule implements AgentModule {
 
     #connection(agentId: string, name: string): McpClientConnection {
         const server = this.#effectiveServers(agentId).get(name);
+        if (server?.unavailable !== undefined) throw new Error(server.unavailable);
         const pooled =
             server?.connectionId === undefined ? undefined : this.#pool.get(server.connectionId);
         const connection = pooled?.connection;
@@ -1040,7 +1061,24 @@ export class McpModule implements AgentModule {
         for (const [name, server] of this.#catalogs.get(GLOBAL_CATALOG)?.servers ?? []) {
             servers.set(name, server);
         }
+        if (this.#runsAsWorkloadUser(agentId)) return servers;
+        for (const [name, server] of servers) {
+            if (server.config.transport === "stdio") {
+                servers.set(name, { config: server.config, unavailable: SEPARATE_USER_STDIO });
+            }
+        }
         return servers;
+    }
+
+    /**
+     * Whether an agent's own work runs as the user its folder's stdio servers run as. Only a bot
+     * with a Linux user of its own makes that untrue; an agent whose user is not known yet is
+     * treated as one, so a stdio server is never offered to it by mistake.
+     */
+    #runsAsWorkloadUser(agentId: string): boolean {
+        const workloadUser = this.#runners.workloadUser;
+        if (workloadUser === undefined || !this.#runners.hasBotUsers) return true;
+        return this.#agentUsers.get(agentId) === workloadUser;
     }
 
     async #ensureAgentWorkspace(ctx: Context, agentId: string): Promise<void> {
@@ -1055,6 +1093,11 @@ export class McpModule implements AgentModule {
     async #activateAgent(ctx: Context, agents: AgentSystemRef, agentId: string): Promise<void> {
         this.#rememberContext(ctx);
         if (this.#closed) return;
+        if (this.#runners.hasBotUsers) {
+            const user = await this.#runners.userFor(ctx, agentId).catch(() => undefined);
+            if (user === undefined) this.#agentUsers.delete(agentId);
+            else this.#agentUsers.set(agentId, user);
+        }
         const config = await agents.config(ctx, agentId);
         const workspace = config?.environment?.workingDirectory;
         if (workspace === undefined) {
@@ -1098,6 +1141,7 @@ export class McpModule implements AgentModule {
 
     async #releaseAgentLocked(agentId: string, workspace: string): Promise<void> {
         this.#agentWorkspaces.delete(agentId);
+        this.#agentUsers.delete(agentId);
         const demand = this.#workspaceAgents.get(workspace);
         demand?.delete(agentId);
         if (demand !== undefined && demand.size > 0) return;
@@ -1196,13 +1240,12 @@ export class McpModule implements AgentModule {
                 try {
                     return {
                         connectionId,
-                        connection:
-                            input.runnerId === undefined
-                                ? await McpClientConnection.connect(input.name, input.config)
-                                : await McpClientConnection.connect(input.name, input.config, {
-                                      ctx: this.#serversLifetime(ctx),
-                                      machine: await this.#runners.machine(input.runnerId),
-                                  }),
+                        connection: this.#runners.native(input.runnerId)
+                            ? await McpClientConnection.connect(input.name, input.config)
+                            : await McpClientConnection.connect(input.name, input.config, {
+                                  ctx: this.#serversLifetime(ctx),
+                                  machine: await this.#runners.machine(input.runnerId),
+                              }),
                     } as const;
                 } catch (error) {
                     return {
@@ -1310,7 +1353,7 @@ export class McpModule implements AgentModule {
     /** A workspace's own catalog, read from the machine the workspace is on. */
     async #readWorkspaceServers(workspace: string): Promise<HappyAgentConfigValues["mcpServers"]> {
         const { path, runnerId } = parseWorkspaceKey(workspace);
-        if (runnerId === undefined) return await this.#config.readWorkspaceMcpServers(path);
+        if (this.#runners.native(runnerId)) return await this.#config.readWorkspaceMcpServers(path);
         return await this.#config.readWorkspaceMcpServers(
             path,
             await this.#runners.machine(runnerId),

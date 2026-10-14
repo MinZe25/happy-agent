@@ -302,7 +302,7 @@ export class GitModule implements AgentModule {
         const machine = this.#machine(options.runnerId);
         return await probeGitRepository({
             git: this.#readFor(options.credential, options.runnerId),
-            ...(options.runnerId === undefined
+            ...(this.#native(options.runnerId)
                 ? {}
                 : {
                       isDirectory: async (candidate: string) =>
@@ -471,7 +471,7 @@ export class GitModule implements AgentModule {
                       options.credential.projectId,
                       options.credential.creator,
                   );
-        if (options.runnerId !== undefined) {
+        if (!this.#native(options.runnerId)) {
             const runnerId = options.runnerId;
             const machine = await this.#runnerMachine(runnerId);
             const runners = this.#runnersModule();
@@ -544,7 +544,7 @@ export class GitModule implements AgentModule {
             commit: options.commit,
             expectedCommonDir: options.expectedCommonDir,
             git: machine.foreground(options.credential),
-            ...(options.runnerId === undefined
+            ...(this.#native(options.runnerId)
                 ? {}
                 : { makeParent: async (path: string) => await machine.makeDirectory(path) }),
             projectPath: options.projectPath,
@@ -572,7 +572,7 @@ export class GitModule implements AgentModule {
         await removeGitWorktree({
             expectedCommonDir: options.expectedCommonDir,
             git: machine.foreground(options.credential),
-            ...(options.runnerId === undefined
+            ...(this.#native(options.runnerId)
                 ? {}
                 : { inspect: async (path: string) => await machine.inspect(path) }),
             projectPath: options.projectPath,
@@ -928,9 +928,20 @@ export class GitModule implements AgentModule {
         return this.#lifetime;
     }
 
-    /** Git work on this machine, or on the runner named. */
+    /**
+     * Whether Git for a folder runs in this daemon process: only on this machine, and only while
+     * no workload user is configured. Otherwise it runs in the folder's runner, which is what
+     * keeps a repository's own configuration and hooks from ever running as the daemon.
+     */
+    #native(runnerId: string | undefined): boolean {
+        return this.#runners === undefined
+            ? runnerId === undefined
+            : this.#runners.native(runnerId);
+    }
+
+    /** Git work in this process, or on the folder's runner: a remote one or a workload user's. */
     #machine(runnerId: string | undefined): GitMachine {
-        if (runnerId === undefined) {
+        if (this.#native(runnerId)) {
             return {
                 foreground: (credential) => this.#foregroundFor(credential),
                 read: this.#read,
@@ -951,7 +962,7 @@ export class GitModule implements AgentModule {
                 },
             };
         }
-        const existing = this.#runnerMachines.get(runnerId);
+        const existing = this.#runnerMachines.get(runnerId ?? "");
         if (existing !== undefined) return existing;
         const runners = this.#runnersModule();
         const target = {
@@ -998,11 +1009,11 @@ export class GitModule implements AgentModule {
                 return { isDirectory: stats.isDirectory, isSymbolicLink: stats.isSymbolicLink };
             },
         };
-        this.#runnerMachines.set(runnerId, created);
+        this.#runnerMachines.set(runnerId ?? "", created);
         return created;
     }
 
-    async #runnerMachine(runnerId: string): Promise<Compute> {
+    async #runnerMachine(runnerId: string | undefined): Promise<Compute> {
         return await this.#runnersModule().machine(runnerId);
     }
 
@@ -1015,12 +1026,12 @@ export class GitModule implements AgentModule {
 
     /** The credential's environment, pointed at the runner's own way back to the proxy. */
     async #throughTunnel(
-        runnerId: string,
+        runnerId: string | undefined,
         machine: Compute,
         authentication: GitAuthentication,
     ): Promise<GitAuthentication> {
         const port = await this.#tunnel.port(
-            this.#root().named(`runner-git-tunnel-${runnerId}`),
+            this.#root().named(`runner-git-tunnel-${runnerId ?? "local"}`),
             machine,
             authentication.loopbackPort,
         );

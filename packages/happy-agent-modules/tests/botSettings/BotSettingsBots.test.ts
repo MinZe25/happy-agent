@@ -178,7 +178,7 @@ async function started(name: string) {
         projects: projects.beforeStart(ctx, agents.asRef()),
         workspaces: workspaces.beforeStart(ctx, agents.asRef()),
         tasks: tasks.beforeStart(ctx, agents.asRef()),
-        bots: bots.beforeStart(ctx, agents.asRef()),
+        bots: await bots.beforeStart(ctx, agents.asRef()),
     };
     const scope = (agentId: string) =>
         ({ agent: { id: agentId, provider: "scripted" }, kv: sharedKV() }) as AgentModuleScope;

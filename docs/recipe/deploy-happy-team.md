@@ -158,6 +158,11 @@ folders and runs agent commands, Git, and terminals on a separate machine; the n
 database, provider credentials, and WorkOS settings. It dials the node's Tailcat exposure with its
 own token, so neither the listener nor WorkOS authentication changes.
 
+If the team declines a runner, offer to [harden the node with separate Linux users](harden-node.md)
+before the service first starts: members' agent commands then run as a workload user that cannot
+read the service account's configuration, database, WorkOS settings, or provider credentials. The
+two cannot be combined on one node.
+
 ## 5. Add the local connection and verify it
 
 On the original standalone installation, use `list_remote_connections` with `{}` to check for an

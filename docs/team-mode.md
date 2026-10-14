@@ -76,6 +76,9 @@ sudo install -d -m 0750 -o happy-agent -g happy-agent \
   /var/lib/happy-agent/happy/config
 ```
 
+To keep agent work away from this account's configuration and database, also follow
+[Harden a node with separate Linux users](recipe/harden-node.md) before the service first starts.
+
 Install the desired first-party coding assistants and complete their normal sign-in flow as the
 `happy-agent` service user. Happy Agent reads that user's existing provider credentials; it has no
 separate provider login and should not share another operating-system user's credential files. The

@@ -1355,9 +1355,10 @@ export class ProjectsModule implements AgentModule {
      * Where a project's folder is: the runner holding it and the path there, or this machine.
      *
      * The home project follows the runners: while any are configured it is the default runner's
-     * home directory, which is unknown until that runner first connects. A folder on this machine
-     * is refused once runners are configured, and a folder on a runner that is no longer
-     * configured is unavailable rather than looked for here.
+     * home directory, which is unknown until that runner first connects. With a workload user it
+     * is that user's home, which is unknown until that user's runner first starts. A folder on
+     * this machine is refused once runners are configured, and a folder on a runner that is no
+     * longer configured is unavailable rather than looked for here.
      */
     location(project: Project): { readonly runnerId?: string; readonly path: string } {
         const runners = this.#runners;
@@ -1375,6 +1376,11 @@ export class ProjectsModule implements AgentModule {
         }
         if (project.runnerId === undefined) {
             if (project.kind !== "home") runners.assertLocalExecution();
+            // Once this machine's work runs as a workload user, the home project is that user's.
+            if (project.kind === "home") {
+                const local = runners.machineHome(undefined);
+                if (local !== undefined) return { path: local.home };
+            }
             return { path: project.repositoryRef };
         }
         if (!runners.has(project.runnerId)) {
@@ -1398,9 +1404,25 @@ export class ProjectsModule implements AgentModule {
                 return { type: "runner", runnerId, path: runners.home(runnerId) ?? null };
             }
         }
+        if (
+            project.kind === "home" &&
+            project.runnerId === undefined &&
+            runners.workloadUser !== undefined
+        ) {
+            return { type: "host", path: this.#workloadHome() ?? project.repositoryRef };
+        }
         return project.runnerId === undefined
             ? { type: "host", path: project.repositoryRef }
             : { type: "runner", runnerId: project.runnerId, path: project.repositoryRef };
+    }
+
+    /** The workload user's home, or undefined while its runner has not started. */
+    #workloadHome(): string | undefined {
+        try {
+            return this.#runners.machineHome(undefined)?.home;
+        } catch {
+            return undefined;
+        }
     }
 
     /** The machine a project's folder is on, where everything that touches the folder runs. */
@@ -1493,12 +1515,15 @@ export class ProjectsModule implements AgentModule {
     }
 
     /**
-     * Whether a folder is the Home project's: this machine's home directory, or once runners are
-     * configured, the default runner's.
+     * Whether a folder is the Home project's: this machine's home directory — the workload user's,
+     * once one is configured — or once runners are configured, the default runner's.
      */
     #isHomeFolder(runnerId: string | undefined, path: string): boolean {
         const homeRunner = this.#runners.enabled ? this.#runners.defaultRunnerId : undefined;
         if (runnerId !== homeRunner) return false;
+        if (runnerId === undefined && this.#runners.workloadUser !== undefined) {
+            return path === this.#workloadHome();
+        }
         return (
             path === (runnerId === undefined ? this.#homeDirectory : this.#runners.home(runnerId))
         );

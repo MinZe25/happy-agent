@@ -28,6 +28,11 @@
             "types": "./dist/tailcat/remote.d.ts",
             "import": "./dist/tailcat/remote.js",
             "default": "./dist/tailcat/remote.js"
+        },
+        "./runners/stdio": {
+            "types": "./dist/runners/stdio.d.ts",
+            "import": "./dist/runners/stdio.js",
+            "default": "./dist/runners/stdio.js"
         }
     },
     "publishConfig": {

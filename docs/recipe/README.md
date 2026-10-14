@@ -89,6 +89,15 @@ and recommend it strongly: the node keeps its database and credentials while a s
 runs agent commands, Git, terminals, and project folders. Offer it at the end of both deployment
 recipes; do not put the runner on the node's own machine or copy node credentials to it.
 
+## Hardening a node
+
+Read [Harden a node with separate Linux users](harden-node.md) when a machine runs its own agent
+work as a service, and offer it whenever a deployment declines a dedicated runner. The service user
+keeps the configuration, database, and credentials; agent work runs through sudo as a workload user
+that cannot read them, and specific bots can run as users of their own. Apply it before the daemon
+first starts, because folders are placed in the workload user's home. It cannot be combined with
+runners on one node.
+
 ## Enterprise sign-in
 
 Read [Set up enterprise JWT sign-in](enterprise-jwt-authentication.md) when a team should sign in

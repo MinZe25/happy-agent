@@ -190,3 +190,12 @@ while an agent's machine is built, because a running machine is never moved: new
 once and running agents after a restart. The bot's image is applied on whichever machine holds the
 folder — this computer or the agent's runner — and a workspace that already runs in Docker keeps
 its own image. Docker machines still refuse attached secrets.
+
+## Work for a separate Linux user never gets a host compute
+
+With `[execution]` configured, an agent with no runner used to be the one case that reached
+`#createHere`, so a bug in routing would have run agent commands as the daemon's user, which can
+read the database and credentials. Resolution now asks `RunnersModule.userFor` first and uses a
+host compute only when there is no runner, no container, and no user; every other agent machine,
+the permission reviewer's included, is built on the user's local runner. Secrets are refused there
+because they would have to be delivered across the user boundary first.

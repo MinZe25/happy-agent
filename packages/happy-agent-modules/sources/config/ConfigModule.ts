@@ -65,6 +65,13 @@ import { HAPPY_TOML_TEMPLATE, MCP_TOML_TEMPLATE } from "./impl/userConfiguration
 import { readSecurityDocument } from "./impl/readSecurityDocument.js";
 import { DEFAULT_TELEGRAM_API_URL, telegramApiUrlSchema } from "./TelegramConfig.js";
 import {
+    executionConfigSchema,
+    executionExecutableSchema,
+    executionUserSchema,
+    MAX_EXECUTION_BOTS,
+    type ExecutionConfig,
+} from "./ExecutionConfig.js";
+import {
     MAX_RUNNERS,
     runnerConfigSchema,
     runnersConfigSchema,
@@ -449,6 +456,7 @@ const partialValuesSchema = Type.Object(
         ),
         connections: Type.Optional(remoteConnectionsConfigSchema),
         runners: Type.Optional(runnersConfigSchema),
+        execution: Type.Optional(executionConfigSchema),
         docker: Type.Optional(dockerInputSchema),
         defaults: Type.Optional(defaultsInputSchema),
         features: Type.Optional(
@@ -791,6 +799,7 @@ const resolvedValuesSchema = Type.Object(
         ),
         connections: Type.Optional(remoteConnectionsConfigSchema),
         runners: Type.Optional(runnersConfigSchema),
+        execution: Type.Optional(executionConfigSchema),
         docker: Type.Optional(
             Type.Object(
                 {
@@ -1943,6 +1952,28 @@ export class ConfigModule implements AgentModule {
     }
 
     /**
+     * The Linux users this machine's work runs as, or undefined when the daemon runs it as itself.
+     * `executable` is the program each user's runner starts from, as sudo is allowed to run it.
+     */
+    get execution():
+        | {
+              readonly user: string;
+              readonly executable: string;
+              readonly bots: Readonly<Record<string, string>>;
+          }
+        | undefined {
+        const execution = this.configuration.values.execution;
+        if (execution === undefined) return undefined;
+        return {
+            user: execution.user,
+            executable: execution.executable ?? process.execPath,
+            bots: Object.fromEntries(
+                Object.entries(execution.bots).map(([botId, bot]) => [botId, bot.user]),
+            ),
+        };
+    }
+
+    /**
      * The runners this installation works on, and the one new folders go to. Empty when none are
      * configured, which is when this machine still runs its own work.
      */
@@ -3067,6 +3098,7 @@ export function parseHappyAgentConfigToml(source: string): {
         "defaults",
         "docker",
         "runners",
+        "execution",
         "feature",
         "features",
         "mcp_servers",
@@ -3098,6 +3130,7 @@ export function parseHappyAgentConfigToml(source: string): {
     const workspace = readWorkspace(table.workspace, recordUnknown);
     const docker = readDocker(table.docker, recordUnknown);
     const runners = readRunners(table.runners);
+    const execution = readExecution(table.execution);
     const mcpServers = readMcpServers(table.mcp_servers, recordUnknown);
     const network = readNetwork(table.network, recordUnknown);
     const observation = readObservation(table.observation, recordUnknown);
@@ -3118,6 +3151,7 @@ export function parseHappyAgentConfigToml(source: string): {
         ...(table.api === undefined ? {} : { api: table.api }),
         ...(table.connections === undefined ? {} : { connections: table.connections }),
         ...(runners === undefined ? {} : { runners }),
+        ...(execution === undefined ? {} : { execution }),
         ...(defaults === undefined ? {} : { defaults }),
         ...(features === undefined ? {} : { features }),
         ...(feature === undefined ? {} : { feature }),
@@ -3337,6 +3371,7 @@ function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigVal
                 entries: { ...merged.runners?.entries, ...partial.runners.entries },
             };
         }
+        if (partial.execution !== undefined) merged.execution = structuredClone(partial.execution);
         if (partial.docker !== undefined) merged.docker = normalizeDocker(partial.docker);
         if (partial.defaults !== undefined) {
             const defaults = normalizeDefaults(partial.defaults);
@@ -3430,6 +3465,7 @@ function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigVal
         throw new Error("Team deployments cannot configure a shared standalone profile.");
     }
     if (merged.runners !== undefined) merged.runners = validateRunners(merged.runners, merged);
+    if (merged.execution !== undefined) validateExecution(merged);
     if (!Value.Check(happyAgentConfigValuesSchema, merged)) {
         throw new Error("The merged Happy Agent configuration is invalid.");
     }
@@ -3956,6 +3992,9 @@ function withoutProjectMachineSettings(values: PartialValues): PartialValues {
         telegram: _telegram,
         connections: _connections,
         runners: _runners,
+        // Which Linux user runs this machine's work is the machine owner's decision alone: a
+        // checked-in file that picked the user would pick what every command may reach.
+        execution: _execution,
         docker: _docker,
         // A credential is this machine's, never a repository's: a checked-in project file must not
         // choose which Gemini account this installation's tools bill against.
@@ -4489,6 +4528,87 @@ function validateRunners(
         tokens.add(entry.token);
     }
     return { default: runners.default ?? (ids[0] as string), entries: runners.entries };
+}
+
+/**
+ * `[execution]` names the Linux user this machine's work runs as, and `[execution.bots.<botId>]`
+ * gives single bots a user of their own. Unknown keys are refused rather than reported, because a
+ * mistyped setting here would leave work running as a user nobody chose.
+ */
+function readExecution(value: TomlValue | undefined): ExecutionConfig | undefined {
+    if (value === undefined) return undefined;
+    if (!isTable(value)) throw new Error("execution must be a TOML table.");
+    for (const key of Object.keys(value)) {
+        if (key !== "user" && key !== "executable" && key !== "bots") {
+            throw new Error(`execution.${key.slice(0, 64)} is not an execution setting.`);
+        }
+    }
+    if (value.user === undefined) {
+        throw new Error("execution.user must name the Linux user agent work runs as.");
+    }
+    const user = readExecutionUser(value.user, "execution.user");
+    let executable: string | undefined;
+    if (value.executable !== undefined) {
+        if (!Value.Check(executionExecutableSchema, value.executable)) {
+            throw new Error(
+                "execution.executable must be the absolute path of the happy-agent executable.",
+            );
+        }
+        executable = value.executable as string;
+    }
+    const bots: Record<string, { user: string }> = {};
+    if (value.bots !== undefined) {
+        if (!isTable(value.bots)) throw new Error("execution.bots must be a TOML table.");
+        for (const [botId, item] of Object.entries(value.bots)) {
+            if (!Value.Check(cuid2Schema, botId)) {
+                throw new Error(
+                    `execution.bots.${String(botId).slice(0, 64)} must be a bot ID, as list_bots shows it.`,
+                );
+            }
+            if (!isTable(item)) throw new Error(`execution.bots.${botId} must be a TOML table.`);
+            for (const field of Object.keys(item)) {
+                if (field !== "user") {
+                    throw new Error(
+                        `execution.bots.${botId}.${field.slice(0, 64)} is not a bot execution setting.`,
+                    );
+                }
+            }
+            if (item.user === undefined) {
+                throw new Error(`execution.bots.${botId}.user must name a Linux user.`);
+            }
+            bots[botId] = { user: readExecutionUser(item.user, `execution.bots.${botId}.user`) };
+        }
+        if (Object.keys(bots).length > MAX_EXECUTION_BOTS) {
+            throw new Error(
+                `At most ${String(MAX_EXECUTION_BOTS)} bots may have a Linux user of their own.`,
+            );
+        }
+    }
+    return { user, ...(executable === undefined ? {} : { executable }), bots };
+}
+
+function readExecutionUser(value: TomlValue, path: string): string {
+    if (!Value.Check(executionUserSchema, value)) {
+        throw new Error(
+            `${path} must be a Linux user name: a lowercase letter or "_", then up to 31 lowercase letters, digits, "_", or "-".`,
+        );
+    }
+    if (value === "root") {
+        throw new Error(`${path} must not be root; agent work runs as an unprivileged user.`);
+    }
+    return value;
+}
+
+/** The rules that span the execution users and the rest of the configuration. */
+function validateExecution(values: Static<typeof resolvedValuesSchema>): void {
+    if (Object.keys(values.runners?.entries ?? {}).length > 0) {
+        throw new Error(
+            "execution applies only to work on this machine, and nothing runs here once runners are configured. Choose the user each runner runs as on its own machine instead.",
+        );
+    }
+    if (process.platform === "win32") {
+        throw new Error("execution needs sudo, which Windows does not have.");
+    }
 }
 
 function readNetwork(

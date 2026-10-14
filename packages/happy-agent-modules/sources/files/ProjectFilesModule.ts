@@ -316,13 +316,15 @@ export class ProjectFilesModule implements AgentModule {
         assertSchema(fileSearchQuerySchema, query, "file search query");
         const limit = query.limit ?? MAX_SEARCH_RESULTS;
         try {
-            // The native index reads this machine's disk; a runner lists its folder itself.
-            if (root.runnerId === undefined) {
+            // The native index reads this machine's disk from this process; a runner lists its
+            // folder itself, and so does a workload user's runner, whose folders this process
+            // does not read.
+            if (this.#runners.native(root.runnerId)) {
                 return { files: await this.#index.search(root.root, query.query, limit) };
             }
             const machine = await this.#machine(root);
             const folder = { root: root.root, runnerId: root.runnerId };
-            this.#watcherInstance().watchTree({ ...root, runnerId: root.runnerId }, machine);
+            this.#watcherInstance().watchTree(root, machine);
             return {
                 files: await this.#machineIndex.search(
                     machine,
@@ -441,7 +443,7 @@ export class ProjectFilesModule implements AgentModule {
             relativeDirectory === "." ? "" : relativeDirectory,
             dirname(path),
         );
-        if (root.runnerId === undefined) this.#index.ensure(root.root, relativePath);
+        if (this.#runners.native(root.runnerId)) this.#index.ensure(root.root, relativePath);
         return { content: bytes.toString("base64"), hash: sha256(bytes) };
     }
 
@@ -495,8 +497,8 @@ export class ProjectFilesModule implements AgentModule {
             `${root.runnerId ?? ""}\0${target}`,
             async () => await this.#writeCompared(machine, target, input, bytes),
         );
-        if (root.runnerId === undefined) {
-            // Live Git state and the native index follow folders on this machine only.
+        if (this.#runners.native(root.runnerId)) {
+            // Live Git state and the native index follow folders this process reads itself.
             this.#git.invalidate(root.root);
             this.#git.markChanged({
                 path: root.root,
@@ -626,10 +628,10 @@ export class ProjectFilesModule implements AgentModule {
 
     /** Keeps what a client just looked at current, in the way the folder's machine allows. */
     #watch(root: ProjectFileRoot, machine: Compute, relativeDirectory: string, directory: string) {
-        if (root.runnerId === undefined) {
+        if (this.#runners.native(root.runnerId)) {
             this.#watcherInstance().watchDirectory(root, relativeDirectory, directory);
         } else {
-            this.#watcherInstance().watchTree({ ...root, runnerId: root.runnerId }, machine);
+            this.#watcherInstance().watchTree(root, machine);
         }
     }
 
@@ -717,7 +719,7 @@ export class ProjectFilesModule implements AgentModule {
             this.#root().named("project-file-watcher"),
             async (ctx, root, paths, structural) => {
                 if (structural) {
-                    if (root.runnerId === undefined) this.#index.refresh(root.root);
+                    if (this.#runners.native(root.runnerId)) this.#index.refresh(root.root);
                     else this.#machineIndex.refresh(root.runnerId, root.root);
                 }
                 await this.#publish(ctx, root.workspaceId ?? root.projectId, paths);

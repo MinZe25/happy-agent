@@ -210,9 +210,19 @@ export class BotsModule implements AgentModule {
         },
     };
 
-    readonly beforeStart = (ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
+    readonly beforeStart = async (
+        ctx: Context,
+        agents: AgentSystemRef,
+    ): Promise<AgentModuleHooks> => {
         this.#agents = agents;
         this.#lifetime = withAgentDatabase(detach(ctx), ctx.db) as RootContext;
+        // Bots that run as a Linux user of their own are named by bot ID, while machines are built
+        // for agents. No agent starts before every module's beforeStart, so binding them here means
+        // no agent of such a bot ever starts as the default user first.
+        if (Object.keys(this.#config.execution?.bots ?? {}).length > 0) {
+            const bots = await readBots(ctx);
+            this.#runners.bindBots(bots.map((bot) => ({ id: bot.id, agentId: bot.agentId })));
+        }
         return this.#hooks;
     };
 
@@ -372,6 +382,7 @@ export class BotsModule implements AgentModule {
                 updatedAt: now,
             };
             await insertBot(txCtx, bot);
+            this.#runners.bindBot({ id: bot.id, agentId: bot.agentId });
             if (initialAvatar !== undefined) {
                 await writeBotAvatar(txCtx, bot.id, initialAvatar.asset);
             }
@@ -401,7 +412,13 @@ export class BotsModule implements AgentModule {
 
     /** A bot's folder on the machine it goes to. */
     #botPath(runnerId: string | undefined, username: string): string {
-        if (runnerId === undefined) return this.#config.botPath(username);
+        if (runnerId === undefined) {
+            // A workload user's runner holds this machine's folders under that user's home.
+            const local = this.#runners.machineHome(undefined);
+            return local === undefined
+                ? this.#config.botPath(username)
+                : this.#config.botPathOn(local.home, local.platform, username);
+        }
         const home = this.#runners.home(runnerId);
         if (home === undefined) {
             throw new RunnerUnavailableError(

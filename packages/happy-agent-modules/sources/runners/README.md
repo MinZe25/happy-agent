@@ -38,3 +38,28 @@ Other modules ask this one where work runs:
 Work on a runner that is not connected, or no longer configured, fails with
 `RunnerUnavailableError`, which the API reports as `503 runner_unavailable`. Nothing falls back to
 this machine.
+
+## Work as separate Linux users
+
+`[execution]` in machine `happy.toml` names the Linux user agent work runs as on this machine, and
+`[execution.bots.<botId>] user` gives specific bots a user of their own. For each user, the module
+starts a local runner through sudo — `sudo -n -u <user> -- <executable> runner --stdio`, built by
+`impl/sudoRunnerCommand.ts` with a fixed `PATH` and nothing else from the daemon's environment —
+and speaks the same runner protocol over its standard input and output (`stdio.ts`, a 4-byte
+big-endian length before each frame). `impl/LocalUserRunner.ts` owns that process: it starts it on
+first use, explains why it would not start, and restarts it with backoff if it stops later.
+
+Before any work runs there, the module runs `id -un` on the runner and stops it unless the answer
+is the configured user; a user that is the daemon's own is refused. The default user's runner is
+started while the daemon starts, so a missing sudo rule shows up in the log at once, but a failure
+does not stop the daemon.
+
+Nothing about this is visible in the API: folders stay on this machine with no runner, and
+`native(runnerId?)` is what other modules ask before taking a fast path that works in the daemon's
+own process. It is true only when no runner is named and `[execution]` is not configured.
+Otherwise `machine()` returns the default user's product machine, `machineHome()` its home
+directory (which is where new folders go), and `localAgentMachine()` an agent's machine as the
+user `userFor(ctx, agentId)` chooses. `BotsModule` binds bots to users with `bindBots` while it
+starts and `bindBot` as each bot is created; until then `userFor` refuses rather than guessing.
+A runner that will not start fails the work with `RunnerUnavailableError`, whose message names the
+user and the reason. Nothing falls back to the daemon's user.

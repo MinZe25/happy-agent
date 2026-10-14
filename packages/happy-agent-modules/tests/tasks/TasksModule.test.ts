@@ -1055,7 +1055,7 @@ async function started(name: string, options: { readonly team?: boolean } = {}) 
     );
     const taskHooks = tasks.beforeStart(database.context, agents.asRef());
     const bots = new BotsModule(config, abort, titles, projects, workspaces, runners, tasks);
-    const botHooks = bots.beforeStart(database.context, agents.asRef());
+    const botHooks = await bots.beforeStart(database.context, agents.asRef());
     const events: TaskEvent[] = [];
     tasks.onEvent((_ctx, event) => {
         events.push(event);

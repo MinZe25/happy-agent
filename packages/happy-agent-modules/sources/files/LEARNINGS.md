@@ -74,3 +74,11 @@ resolution that must land on the same path. Replaced files keep their permission
 get the machine's default mode, instead of both inheriting the temporary file's `0600`. Only search and watching differ, because FFF and
 non-recursive native watches read this machine's disk: runner folders are listed and watched by the
 runner itself.
+
+## The native index and watches are only for the daemon's own user
+
+The FFF index and the native watcher read folders in the daemon's process, as the daemon's user.
+When `[execution]` runs work as a separate Linux user, those folders belong to that user and the
+daemon may not be able to read them, and reading them as the daemon would bypass the separation.
+The native paths are taken only when `RunnersModule.native(runnerId)` says so; otherwise browsing,
+indexing, and watching go through the default workload user's runner, like a runner's folders.

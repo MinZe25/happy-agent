@@ -31,4 +31,10 @@ export {
     type RunnerConfig,
     type RunnersConfig,
 } from "./RunnerConfig.js";
+export {
+    executionConfigSchema,
+    executionUserSchema,
+    type ExecutionBotConfig,
+    type ExecutionConfig,
+} from "./ExecutionConfig.js";
 export { VoiceCredentialPoolError } from "./VoiceCredentialPoolError.js";

@@ -30,6 +30,9 @@ Commands:
            --token-file <path>   The runner's token (default ~/.happy-runner/token), or set
                                  HAPPY_RUNNER_TOKEN.
            --home <directory>    Where the home project and bot folders live (default: home).
+           --stdio               Serve the daemon that started this process over standard
+                                 input and output, as the user it runs as. A daemon with
+                                 [execution] user starts this itself through sudo.
   sandbox setup [--retry]  Set up the Windows sandbox, or explicitly retry setup.
   sandbox status          Report Windows sandbox configuration without changing it.
   artifact dev <folder>   Serve an HTML artifact's folder with a local artifact data API,

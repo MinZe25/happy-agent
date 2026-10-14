@@ -403,7 +403,7 @@ export async function startHappyAgentRuntime(
         // agent, so it is built before all of them.
         const botSettings = new BotSettingsModule();
         const secrets = new SecretsModule(botSettings);
-        const runners = new RunnersModule(config);
+        const runners = new RunnersModule(config, botSettings);
         registerShutdown("runners", async () => await runners.close());
         const suppliedCompute = options.compute;
         const computeModule =

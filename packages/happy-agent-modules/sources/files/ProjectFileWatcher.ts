@@ -45,7 +45,7 @@ interface DirectoryWatch {
 interface TreeWatch {
     ended: boolean;
     readonly root: string;
-    readonly runnerId: string;
+    readonly runnerId: string | undefined;
     watch: ComputeWatch | undefined;
 }
 
@@ -115,8 +115,8 @@ export class ProjectFileWatcher {
         }
     }
 
-    /** Watches a whole folder on a runner through that runner's watcher. */
-    watchTree(root: ProjectFileWatchRoot & { readonly runnerId: string }, machine: Compute): void {
+    /** Watches a whole folder on a runner, remote or a workload user's, through its watcher. */
+    watchTree(root: ProjectFileWatchRoot, machine: Compute): void {
         const watcher = machine.watcher;
         if (this.#closed || watcher === undefined) return;
         const key = root.workspaceId ?? root.projectId;
