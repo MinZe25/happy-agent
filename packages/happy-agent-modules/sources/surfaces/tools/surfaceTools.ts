@@ -14,7 +14,6 @@ import {
 } from "@slopus/happy-agent-client";
 import type { SurfacesModule } from "../SurfacesModule.js";
 
-const capabilities = ["Manage shared todo-list Surfaces, todos, and permanent revision history."];
 const identity = { surfaceId: surfaceIdSchema, todoId: cuid2Schema };
 const guard = { ...identity, version: resourceVersionSchema };
 const page = {
@@ -31,7 +30,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "list_surfaces",
             defer: true,
-            capabilities,
+            capabilities: ["Find shared todo-list Surfaces and their members."],
+            searchKeywords: ["list surfaces", "shared todo lists", "sidebar members"],
             description:
                 "List shared Surface instances, their IDs, names, types, and joined people. Each todo tool requires a Surface ID. Results are paged.",
             parameters: Type.Object(page, { additionalProperties: false }),
@@ -55,7 +55,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "list_todos",
             defer: true,
-            capabilities,
+            capabilities: ["Read active, completed, or deleted todos in a Surface."],
+            searchKeywords: ["list todos", "checklist items", "completed todos", "deleted todos"],
             description:
                 "List todos in one Surface, active by default. Use completed, deleted, or all to find older items. Keep returned versions for guarded edits. Results are paged.",
             parameters: Type.Object(
@@ -79,7 +80,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "create_todo",
             defer: true,
-            capabilities,
+            capabilities: ["Add a todo to a shared Surface."],
+            searchKeywords: ["create todo", "add checklist item", "append reminder"],
             description:
                 "Append a plain-text todo to one shared Surface. This never creates a chat or joins anyone to the Surface.",
             parameters: Type.Object(
@@ -103,7 +105,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "update_todo",
             defer: true,
-            capabilities,
+            capabilities: ["Change a todo's text or active, completed, or deleted state."],
+            searchKeywords: ["edit todo", "complete todo", "uncomplete todo", "change todo state"],
             description:
                 "Edit text or status (active, completed, deleted) with the current version. Returning an inactive todo to active appends it to the list. To apply a historical state, read its revision and supply the desired fields here; use reorder_todo for placement. Conflicts require a fresh read.",
             parameters: Type.Object(
@@ -134,7 +137,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "reorder_todo",
             defer: true,
-            capabilities,
+            capabilities: ["Move an active todo within its Surface list."],
+            searchKeywords: ["reorder todo", "move checklist item", "todo position"],
             description:
                 "Move an active todo after another active todo in the same Surface, or first with afterId null. Completed and deleted todos cannot be reordered.",
             parameters: Type.Object(
@@ -161,7 +165,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "delete_todo",
             defer: true,
-            capabilities,
+            capabilities: ["Delete a todo while preserving its permanent history."],
+            searchKeywords: ["delete todo", "remove checklist item"],
             description:
                 "Delete a todo from one Surface. Its text and every revision remain permanently recoverable.",
             parameters: Type.Object(guard, { additionalProperties: false }),
@@ -185,7 +190,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "list_todo_versions",
             defer: true,
-            capabilities,
+            capabilities: ["Read a todo's permanent revisions and their authors."],
+            searchKeywords: ["todo history", "todo versions", "previous todo state", "todo author"],
             description:
                 "Read a bounded page of a todo's permanent full revisions and their actors, oldest first. Continue with nextAfterVersion.",
             parameters: Type.Object(
@@ -214,7 +220,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "create_todo_surface",
             defer: true,
-            capabilities,
+            capabilities: ["Create a named shared todo-list Surface as an admin bot."],
+            searchKeywords: ["create todo surface", "new shared todo list", "todo list image"],
             description:
                 "Admin bots only: create a distinct named shared todo-list Surface. Optionally supply an absolute PNG, JPEG, or WebP image path (8 MiB maximum). The identified person joins at the end of their sidebar.",
             parameters: Type.Object(
@@ -267,7 +274,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "add_surface_user",
             defer: true,
-            capabilities,
+            capabilities: ["Add a person to a Surface as an admin bot."],
+            searchKeywords: ["add surface member", "join shared list", "surface sidebar"],
             description:
                 "Admin bots only: add an existing user to a Surface, appending it to their own sidebar. Use null for the standalone person. Existing members keep their order.",
             parameters: Type.Object(
@@ -288,7 +296,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "remove_surface_user",
             defer: true,
-            capabilities,
+            capabilities: ["Remove a person's Surface membership as an admin bot."],
+            searchKeywords: ["remove surface member", "leave shared list", "remove sidebar list"],
             description:
                 "Admin bots only: remove a user's Surface from their sidebar. Todos, revisions, and all other users' memberships stay intact.",
             parameters: Type.Object(

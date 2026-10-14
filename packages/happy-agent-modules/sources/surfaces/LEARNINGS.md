@@ -42,3 +42,9 @@ ordinary update, and active placement through reorder. Lifecycle timestamps rema
 
 A Surface-specific normalizer duplicated node and bot WebP processing. All three now use one
 shared managed-image function, while each module owns permissions, persistence, and error mapping.
+
+## Deferred tools own their discovery descriptions
+
+Shared capability text and missing keywords obscured the differences between Surface tools.
+Every definition now declares its own concise capability and search terms directly, so listing,
+editing, history, and administration can be found independently without a metadata wrapper.

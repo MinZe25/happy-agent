@@ -22,6 +22,13 @@ export function peerMessagingTools(
         defineAgentTool({
             name: "configure_peer_messaging",
             defer: true,
+            capabilities: ["Configure this installation's peer messaging listener and identity."],
+            searchKeywords: [
+                "configure peer messaging",
+                "peer listener",
+                "node identity",
+                "WebSocket server",
+            ],
             description:
                 "Enable or disable peer messaging. Set listen=true only on the reachable node that accepts incoming WebSocket sessions; listen defaults false so a desktop can connect outward without binding a port. Supply a stable node_id. Listener default host is 127.0.0.1 and port is 24780. Durably admits settings; poll debug_peer_connections to confirm application. Only active admin bots may configure it. Configure the other installation through independently authorized administration access.",
             parameters: Type.Object(
@@ -54,6 +61,15 @@ export function peerMessagingTools(
         defineAgentTool({
             name: "set_peer_connection",
             defer: true,
+            capabilities: [
+                "Connect a known remote installation for bidirectional agent messaging.",
+            ],
+            searchKeywords: [
+                "add peer",
+                "connect remote installation",
+                "pair nodes",
+                "shared peer token",
+            ],
             description:
                 "Register or replace a known peer with shared 43-character base64url token. On the initiating node use role=connect and its peer's ws:// or wss:// origin. On the listener use role=accept with only the token; no reverse URL is needed. One persistent session supports messages in both directions. Pair tokens must match and be unique per peer; never repeat tokens in output. Durably admits settings; poll debug_peer_connections. Only active admin bots may use this tool.",
             parameters: Type.Object(
@@ -75,6 +91,8 @@ export function peerMessagingTools(
         defineAgentTool({
             name: "remove_peer_connection",
             defer: true,
+            capabilities: ["Disable a configured peer and revoke its messaging authority."],
+            searchKeywords: ["remove peer", "disconnect node", "revoke peer token"],
             description:
                 "Durably admit disabling a peer in this installation's generated runtime settings, revoking its inbound messaging token and outbound route. Inspect debug_peer_connections to confirm application. Does not alter the remote installation. Only active admin bots may use this tool.",
             parameters: Type.Object({ node_id: peerNodeIdSchema }, { additionalProperties: false }),
@@ -93,6 +111,8 @@ export function peerMessagingTools(
         defineAgentTool({
             name: "check_peer_connection",
             defer: true,
+            capabilities: ["Check whether a configured peer messaging connection is ready."],
+            searchKeywords: ["ping peer", "peer health", "check remote node connection"],
             description:
                 "Ping a known peer over its existing authenticated WebSocket session. Both connector and listener use that same connection; this never opens a reverse connection. Returns bounded credential-free readiness diagnostics. Only active admin bots may use this tool.",
             parameters: Type.Object({ node_id: peerNodeIdSchema }, { additionalProperties: false }),
@@ -108,6 +128,13 @@ export function peerMessagingTools(
         defineAgentTool({
             name: "debug_peer_connections",
             defer: true,
+            capabilities: ["Inspect local peer configuration, session status, and diagnostics."],
+            searchKeywords: [
+                "debug peers",
+                "peer connection status",
+                "peer diagnostics",
+                "listener status",
+            ],
             description:
                 "Inspect local peer listener state, configured peer endpoints, and last health or send diagnostics. Does not contact peers or return tokens or message content. Only active admin bots may use this tool.",
             parameters: Type.Object({}, { additionalProperties: false }),
