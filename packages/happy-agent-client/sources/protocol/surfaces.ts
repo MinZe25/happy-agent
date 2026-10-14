@@ -61,15 +61,21 @@ const surfaceCreationFields = {
     mutationId: Type.Optional(mutationIdSchema),
 };
 
+const surfaceImageInputSchema = Type.Object(
+    { data: Type.String({ minLength: 1, maxLength: 11_184_812 }) },
+    { additionalProperties: false },
+);
+
+/** Markdown is preserved verbatim, including an empty document; length is in UTF-16 units. */
+export const surfaceDocumentTextSchema = Type.String({
+    maxLength: 262_144,
+    pattern: "^[^\\u0000]*$",
+});
+
 export const createTodoSurfaceRequestSchema = Type.Object(
     {
         ...surfaceCreationFields,
-        image: Type.Optional(
-            Type.Object(
-                { data: Type.String({ minLength: 1, maxLength: 11_184_812 }) },
-                { additionalProperties: false },
-            ),
-        ),
+        image: Type.Optional(surfaceImageInputSchema),
         type: Type.Literal("todo"),
     },
     { additionalProperties: false },
@@ -78,9 +84,19 @@ export const createSeparatorSurfaceRequestSchema = Type.Object(
     { ...surfaceCreationFields, type: Type.Literal("separator") },
     { additionalProperties: false },
 );
+export const createDocumentSurfaceRequestSchema = Type.Object(
+    {
+        ...surfaceCreationFields,
+        image: Type.Optional(surfaceImageInputSchema),
+        text: Type.Optional(surfaceDocumentTextSchema),
+        type: Type.Literal("document"),
+    },
+    { additionalProperties: false },
+);
 export const createSurfaceRequestSchema = Type.Union([
     createTodoSurfaceRequestSchema,
     createSeparatorSurfaceRequestSchema,
+    createDocumentSurfaceRequestSchema,
 ]);
 export type CreateSurfaceRequest = Static<typeof createSurfaceRequestSchema>;
 
@@ -164,9 +180,14 @@ export const todoResponseSchema = Type.Object({ todo: todoSchema });
 export type TodoResponse = Static<typeof todoResponseSchema>;
 
 /** Audit identity comes from trusted API or tool execution context, never the body. */
+const surfaceRevisionActorSchema = Type.Object({
+    agentId: Nullable(cuid2Schema),
+    userId: Nullable(userIdSchema),
+});
+const surfaceRevisionSourceSchema = Type.Union([Type.Literal("api"), Type.Literal("tool")]);
 export const todoRevisionSchema = Type.Object({
-    actor: Type.Object({ agentId: Nullable(cuid2Schema), userId: Nullable(userIdSchema) }),
-    source: Type.Union([Type.Literal("api"), Type.Literal("tool")]),
+    actor: surfaceRevisionActorSchema,
+    source: surfaceRevisionSourceSchema,
     todo: todoSchema,
 });
 export type TodoRevision = Static<typeof todoRevisionSchema>;
@@ -220,3 +241,63 @@ export type ReorderTodoRequest = Static<typeof reorderTodoRequestSchema>;
 /** Delete accepts this optional echo-only body. */
 export const todoMutationRequestSchema = surfaceMemberRequestSchema;
 export type TodoMutationRequest = Static<typeof todoMutationRequestSchema>;
+
+/** A document's content version is independent of its catalog Surface version. */
+export const surfaceDocumentSchema = Type.Object({
+    authorUserId: Nullable(userIdSchema),
+    createdAt: timestampSchema,
+    lastEditorUserId: Nullable(userIdSchema),
+    surfaceId: surfaceIdSchema,
+    text: surfaceDocumentTextSchema,
+    updatedAt: timestampSchema,
+    version: resourceVersionSchema,
+});
+export type SurfaceDocument = Static<typeof surfaceDocumentSchema>;
+
+export const surfaceDocumentResponseSchema = Type.Object({ document: surfaceDocumentSchema });
+export type SurfaceDocumentResponse = Static<typeof surfaceDocumentResponseSchema>;
+
+export const surfaceDocumentSnapshotResponseSchema = Type.Object({
+    cursor: eventCursorSchema,
+    document: surfaceDocumentSchema,
+});
+export type SurfaceDocumentSnapshotResponse = Static<typeof surfaceDocumentSnapshotResponseSchema>;
+
+export const updateSurfaceDocumentRequestSchema = Type.Object(
+    { text: surfaceDocumentTextSchema, mutationId: Type.Optional(mutationIdSchema) },
+    { additionalProperties: false },
+);
+export type UpdateSurfaceDocumentRequest = Static<typeof updateSurfaceDocumentRequestSchema>;
+
+export const surfaceDocumentRevisionSchema = Type.Object({
+    actor: surfaceRevisionActorSchema,
+    document: surfaceDocumentSchema,
+    /** Immutable request correlation; null when not supplied, absent on older daemons. */
+    mutationId: Type.Optional(Nullable(mutationIdSchema)),
+    source: surfaceRevisionSourceSchema,
+});
+export type SurfaceDocumentRevision = Static<typeof surfaceDocumentRevisionSchema>;
+
+/** History pages carry only immutable metadata; fetch one revision to read its text. */
+export const surfaceDocumentVersionSummarySchema = Type.Object({
+    actor: surfaceRevisionActorSchema,
+    /** Identifies a committed save after a lost response; never a deduplication key. */
+    mutationId: surfaceDocumentRevisionSchema.properties.mutationId,
+    source: surfaceRevisionSourceSchema,
+    updatedAt: timestampSchema,
+    version: resourceVersionSchema,
+});
+export type SurfaceDocumentVersionSummary = Static<typeof surfaceDocumentVersionSummarySchema>;
+
+export const surfaceDocumentVersionListResponseSchema = Type.Object({
+    nextAfterVersion: Nullable(resourceVersionSchema),
+    versions: Type.Array(surfaceDocumentVersionSummarySchema),
+});
+export type SurfaceDocumentVersionListResponse = Static<
+    typeof surfaceDocumentVersionListResponseSchema
+>;
+
+export const surfaceDocumentVersionResponseSchema = Type.Object({
+    revision: surfaceDocumentRevisionSchema,
+});
+export type SurfaceDocumentVersionResponse = Static<typeof surfaceDocumentVersionResponseSchema>;

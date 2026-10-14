@@ -46,6 +46,7 @@ import {
     surfaceIdSchema,
     surfaceOrderKeySchema,
     surfaceSchema,
+    surfaceDocumentSchema,
     todoSchema,
     todoTextSchema,
 } from "./surfaces.js";
@@ -237,6 +238,15 @@ export const todoUpdatedPayloadSchema = Type.Object({
     version: resourceVersionSchema,
 });
 export type TodoUpdatedPayload = Static<typeof todoUpdatedPayloadSchema>;
+
+export const surfaceDocumentUpdatedPayloadSchema = Type.Object({
+    surfaceId: surfaceIdSchema,
+    previousVersion: resourceVersionSchema,
+    version: resourceVersionSchema,
+    changes: Type.Pick(surfaceDocumentSchema, ["text", "lastEditorUserId", "updatedAt"]),
+    mutationId: Type.Optional(mutationIdSchema),
+});
+export type SurfaceDocumentUpdatedPayload = Static<typeof surfaceDocumentUpdatedPayloadSchema>;
 
 /** An artifact was created with its first version. */
 export const artifactCreatedPayloadSchema = Type.Object({
@@ -477,6 +487,7 @@ export type HappyAgentEvent =
     | EventEnvelope<"surface.created", SurfaceCreatedPayload>
     | EventEnvelope<"todo.created", TodoCreatedPayload>
     | EventEnvelope<"todo.updated", TodoUpdatedPayload>
+    | EventEnvelope<"surface.document.updated", SurfaceDocumentUpdatedPayload>
     | EventEnvelope<"artifact.created", ArtifactCreatedPayload>
     | EventEnvelope<"artifact.updated", ArtifactUpdatedPayload>
     | EventEnvelope<"artifact.deleted", ArtifactDeletedPayload>

@@ -85,6 +85,10 @@ import type {
     SurfaceListResponse,
     SurfaceMemberRequest,
     SurfaceResponse,
+    SurfaceDocumentResponse,
+    SurfaceDocumentSnapshotResponse,
+    SurfaceDocumentVersionListResponse,
+    SurfaceDocumentVersionResponse,
     TodoListResponse,
     TodoListScope,
     TodoMutationRequest,
@@ -92,6 +96,7 @@ import type {
     TodoVersionListResponse,
     TodoVersionResponse,
     UpdateTodoRequest,
+    UpdateSurfaceDocumentRequest,
 } from "./protocol/surfaces.js";
 import type {
     CloudAccessTokenResponse,
@@ -1662,6 +1667,58 @@ export class HappyAgentClient {
         return await this.#json({
             method: "GET",
             path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}/${encodeURIComponent(todoId)}/versions/${encodeURIComponent(version)}`,
+            signal: options.signal,
+        });
+    }
+
+    /** A Markdown snapshot and the shared cursor captured before it was read. */
+    async getSurfaceDocument(
+        surfaceId: SurfaceId,
+        options: RequestOptions = {},
+    ): Promise<SurfaceDocumentSnapshotResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}`,
+            signal: options.signal,
+        });
+    }
+
+    /** Replaces the whole text; identical text is a no-op after checking the current version. */
+    async updateSurfaceDocument(
+        surfaceId: SurfaceId,
+        request: UpdateSurfaceDocumentRequest,
+        options: VersionedRequestOptions,
+    ): Promise<SurfaceDocumentResponse> {
+        return await this.#json({
+            method: "PUT",
+            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}`,
+            json: request,
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Permanent revision summaries, oldest first, without repeated Markdown text. */
+    async listSurfaceDocumentVersions(
+        surfaceId: SurfaceId,
+        options: RequestOptions & { readonly afterVersion?: string; readonly limit?: number } = {},
+    ): Promise<SurfaceDocumentVersionListResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}/versions`,
+            query: { afterVersion: options.afterVersion, limit: options.limit },
+            signal: options.signal,
+        });
+    }
+
+    async getSurfaceDocumentVersion(
+        surfaceId: SurfaceId,
+        version: string,
+        options: RequestOptions = {},
+    ): Promise<SurfaceDocumentVersionResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}/versions/${encodeURIComponent(version)}`,
             signal: options.signal,
         });
     }

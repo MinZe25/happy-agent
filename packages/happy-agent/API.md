@@ -452,6 +452,8 @@ string the daemon echoes verbatim in the change events that mutation produces. A
 optimistic updates checks arriving events against its in-flight mutation IDs — a match means
 "that is my own change coming back," no match means someone else's. The daemon never interprets
 it; it is not an idempotency key, and it does not dedupe retries.
+Document revisions additionally retain this value as immutable metadata for recognizing a committed
+save after its response and change event were lost; this does not change its echo-only semantics.
 
 User messages do not need this dance at all: the client names the message itself by supplying
 its `id` to `send`, so the optimistic copy and the durable message are one message from the
@@ -6310,17 +6312,17 @@ Response — `200`: `{ "bot": { ... } }` with `avatar` `null`.
 
 ## Surfaces
 
-A Surface is an instance of a predefined feature with its own typed API, rather than an arbitrary
-document or agent. Every instance has a CUID2 ID and a human name. Multiple independent todo-list
-Surfaces may exist; each owns its todos, history, and members. Supported types are `todo` and
-`separator`; calendars are a future type, not a current endpoint. The catalog initially has no instances.
+A Surface is an instance of a predefined feature with its own typed API. Every instance has a
+CUID2 ID and a human name. Multiple independent Surfaces of each type may exist, with separate
+content, history, and members. Supported types are `todo`, `separator`, and `document`; calendars
+are a future type, not a current endpoint. The catalog initially has no instances.
 All onboarded authenticated people may read and modify Surface data, whether
 or not they joined. Joining and leaving control only the person's sidebar. No Surface operation
 creates a workspace, agent, or chat.
 
 ### Surface catalog and members
 
-A Surface object has `id` (CUID2), `type` (`todo` or `separator`; future types are additive),
+A Surface object has `id` (CUID2), `type` (`todo`, `separator`, or `document`; future types are additive),
 `name` (human display text), `image` (`null` or `{ "thumbhash": "..." }`), `members`,
 `version` (UUIDv7), and `updatedAt` (epoch milliseconds).
 Surface IDs always use the daemon generator's 24-character CUID2 form: a lowercase letter
@@ -6576,6 +6578,107 @@ are shared. Consumers follow normal version-chain reconciliation and refetch on 
 Desktop bootstrap adds optional `surfaces` (the complete catalog with nested members), exactly
 as the list route returns. No todos or revision history are loaded into desktop bootstrap;
 opening Todo fetches its list with its snapshot cursor.
+
+### Document Surfaces
+
+A `document` Surface owns one shared Markdown document, not a workspace file or an artifact.
+`POST /v0/surfaces` accepts `{ "type": "document", "name": "Notes", "text": "# Notes\n",
+"id": "...", "image": { "data": "..." }, "mutationId": "..." }`. Only `type` and `name` are
+required. Omitted `text` means the empty string. Images, creator attribution, automatic creator
+membership, supplied-ID retries, and `surface.created` follow the catalog rules. The Surface,
+initial document snapshot, first immutable revision, and notification intent commit atomically.
+Repeating an existing Surface ID does not replace its document or add a revision. Creation emits
+`surface.created`, not a separate document-created event.
+
+The current document is:
+
+```json
+{
+    "surfaceId": "s4k8m2q9w1e5r7y3u6i0o2p4",
+    "text": "# Notes\n",
+    "authorUserId": "u1x2y3z4a5b6c7d8e9f0g1h2",
+    "lastEditorUserId": "u1x2y3z4a5b6c7d8e9f0g1h2",
+    "createdAt": 1755300000000,
+    "updatedAt": 1755400000000,
+    "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e"
+}
+```
+
+`text` is an uninterpreted Markdown string of at most 262,144 UTF-16 code units (JavaScript
+`string.length`), with no NUL.
+Empty and whitespace-only documents are valid. Line endings and whitespace are retained exactly.
+The limit bounds UTF-8 content at 1 MiB. Rendering never executes embedded code or grants access
+to local files. `authorUserId` is the immutable Surface creator's local Happy user ID or null.
+`lastEditorUserId` is the latest revision actor's user ID or null, including for the initial
+snapshot. Neither can be supplied through HTTP document bodies. Tool creation uses its explicit
+Surface creator for authorship, independently of the actual revision actor. Timestamps are epoch
+milliseconds. The document has its own UUIDv7 version; editing content does not change the
+catalog Surface version, memberships, image, or name.
+
+The prefix is `/v0/surfaces/document/:surfaceId`:
+
+- `GET` returns `200 { "document": {...}, "cursor": "..." }`. The shared event cursor is
+  captured before the document read, closing the snapshot/stream window.
+- `PUT` accepts `{ "text": "replacement Markdown", "mutationId": "..." }`. It replaces the
+  whole text and requires the current document version in `If-Match`. A changed text advances
+  `updatedAt`, `lastEditorUserId`, and `version`, stores a full immutable revision, and returns
+  `200 { "document": {...} }`. Identical text is an exact no-op, preserving version, actor
+  attribution, timestamps, and history. A successful change emits `surface.document.updated`
+  after commit. A stale version is a conflict even when the supplied text equals the current text.
+- `GET /versions` returns `200 { "versions": [...], "nextAfterVersion": null }`. Entries are
+  immutable summaries `{ "version": "...", "updatedAt": 1755400000000,
+"actor": { "userId": null, "agentId": null }, "source": "api", "mutationId": "..." }`, oldest first. They omit
+  document text so listing history stays bounded. Optional `afterVersion` is an exclusive UUIDv7
+  cursor belonging to this document; an unknown cursor returns `404 not_found`. Optional `limit`
+  is an integer from 1 through 200, default 100. `nextAfterVersion` is the last returned version
+  when another page exists, otherwise null. New revisions never change previous pages.
+- `GET /versions/:version` returns `200 { "revision": { "document": {...}, "actor": {...},
+"source": "api", "mutationId": "..." } }` with the exact immutable snapshot. Unknown versions return `404 not_found`.
+
+Every document revision records the committing request's `mutationId` verbatim, or null when
+none was supplied. The initial revision records the Surface creation request's value. This
+immutable metadata appears on both the summary and the full revision, not on the document
+snapshot. Identical-text no-ops, conflicts, and supplied-ID creation retries neither append a
+revision nor replace an existing revision's mutation ID. The field is optional and additive on
+the wire for older compatible daemons; current daemons always emit a string or null. An omitted
+field means that correlation metadata is unavailable, not proof that no mutation ID was supplied.
+
+After an uncertain save whose HTTP response and change event were both lost, an editor can page
+through revisions after its base version, find the revision with its own mutation ID, and fetch
+that revision's text as the merge base. This still works when another person has edited on top
+of that save; text equality alone is not evidence that the editor's write landed. Clients choose
+a fresh mutation ID for each logical save and retain it only while resolving that same save.
+The daemon does not interpret the value, enforce uniqueness, or deduplicate writes by it. A
+retry still obeys `If-Match`, and an identical-text no-op creates no new revision to find.
+
+Every route checks the Surface has type `document`; unknown or wrong-type Surfaces return
+`404 not_found`. Missing or malformed `If-Match`, oversized or invalid text, unsupported body
+fields, and malformed history paging return `400 invalid_request`. A stale `If-Match` returns
+`409 conflict` with `currentVersion` and the authoritative `document`. Rejections have no effect
+on the current document, history, or events. Actor and source use the same trusted-context rules
+as todo revisions: source is `api` or `tool`, with the actual user and agent IDs or null.
+
+Every successful change commits the current snapshot, immutable revision, and durable event
+intent in one transaction, composable with its caller's transaction. Revisions are permanent
+and survive restart and ordinary event retention. There is no document delete or restore route:
+replace with empty text to clear content, or read an old revision and use ordinary guarded `PUT`
+to apply its text as a new revision. Neither action erases history.
+
+`surface.document.updated` contains `surfaceId`, `previousVersion`, `version`, `changes` with
+the full new `text`, `lastEditorUserId`, and `updatedAt`, and optional `mutationId`. It is shared
+like todo events; clients reconcile the document version chain and refetch on gaps. Document
+content and revisions are not included in desktop bootstrap.
+
+Ordinary models receive `read_document` (`surfaceId`, optional `version` to read history),
+`update_document` (`surfaceId`, current `version`, full replacement `text`), and
+`list_document_versions` (`surfaceId`, optional `afterVersion`, optional `limit` from 1 through
+20, default 10). History listing returns summaries, not full text. These tools use the same
+operations and conflicts as HTTP. Reading needs no review; updates are durable and own ordinary
+shared-data Auto review with no filesystem elevation. Active admin bots additionally receive
+`create_document_surface`, accepting `name`, required explicit `creatorUserId`, optional initial
+`text`, and optional absolute `imagePath`. Its authority, attribution, creator join rules, image
+handling, and permission boundaries match `create_todo_surface`. No document operation joins
+anyone automatically other than the explicit creator rule during Surface creation.
 
 ## Tasks
 
