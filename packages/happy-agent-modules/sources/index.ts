@@ -36,6 +36,7 @@ export * from "./botSettings/index.js";
 
 // Tasks: persistent owned conversations with dedicated folders, roots of their own subtasks.
 export * from "./tasks/index.js";
+export * from "./surfaces/index.js";
 
 // Artifacts: one global, versioned catalog of published Markdown, HTML, images, video, and documents.
 export * from "./artifacts/index.js";

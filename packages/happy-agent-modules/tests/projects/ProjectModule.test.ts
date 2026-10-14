@@ -31,6 +31,41 @@ import { projectsModuleFor } from "../support/projectsModule.js";
 const NO_CROSS_WORKSPACE_TOML = "[features]\ncross_workspace = false\n";
 
 describe("ProjectsModule", () => {
+    it("appends fractional keys after mixed existing project keys without rewriting them", async () => {
+        const database = await migratedProjectDatabase("projects-shared-order-test");
+        const projects = await projectsModule();
+        try {
+            const first = await projects.create(database.context, {
+                id: "order-first",
+                name: "First",
+                repositoryRef: "/tmp/projects/order-first",
+            });
+            expect(first.orderKey).toBe("5");
+            await agentDatabaseRun(
+                database.database,
+                sql`UPDATE happy_agent_module_projects SET order_key = ${"00000000000000000001"} WHERE id = ${first.id}`,
+            );
+            const second = await projects.create(database.context, {
+                id: "order-second",
+                name: "Second",
+                repositoryRef: "/tmp/projects/order-second",
+            });
+            const third = await projects.create(database.context, {
+                id: "order-third",
+                name: "Third",
+                repositoryRef: "/tmp/projects/order-third",
+            });
+            expect(second.orderKey).toBe("5");
+            expect(third.orderKey).toBe("7");
+            const rows = await agentDatabaseRows<{ order_key: string }>(
+                database.database,
+                sql`SELECT order_key FROM happy_agent_module_projects ORDER BY order_key`,
+            );
+            expect(rows.map((row) => row.order_key)).toEqual(["00000000000000000001", "5", "7"]);
+        } finally {
+            database.close();
+        }
+    });
     it("owns its catalog migration and is built from the modules it depends on", async () => {
         const module = await projectsModule();
 

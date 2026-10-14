@@ -123,6 +123,9 @@ moved row back where it started.
 Project and root-agent ordering now use decimal fractional keys. A reorder computes one key between
 the destination neighbours, guards and versions only the moved resource, and emits one event that
 tells the whole truth. Neighbour rows remain byte-for-byte unchanged.
+Creation now uses that same shared fractional-key helper too, rather than appending padded
+integer positions. Existing stored keys remain untouched. Tasks, bots, connections, subtasks,
+workspaces, and Surfaces use the shared algorithm instead of maintaining copies.
 
 ## A project carries what a new workspace starts with
 

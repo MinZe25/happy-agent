@@ -1,6 +1,7 @@
 import { AsyncResource } from "node:async_hooks";
 
 import { createId } from "@paralleldrive/cuid2";
+import { orderKeyBetween } from "../utils/orderKeyBetween.js";
 import { botNameSchema } from "@slopus/happy-agent-client";
 import {
     currentAgentEnvironment,
@@ -41,7 +42,7 @@ import {
 } from "./Bot.js";
 import { insertSystemBotSeed, readSystemBotSeed } from "./BotSystemSeedStore.js";
 import { CHIEF_OF_STAFF_SYSTEM_KEY, type BotSystemKey } from "./BotSystemKey.js";
-import { normalizeBotAvatar } from "./impl/normalizeBotAvatar.js";
+import { normalizeManagedImage } from "../impl/images/normalizeManagedImage.js";
 import {
     botEventSchema,
     type BotEvent,
@@ -466,7 +467,10 @@ export class BotsModule implements AgentModule {
         // This first read is only an optimization: image decoding stays off every startup after
         // the seed is present. The transaction repeats the read before it decides to create.
         if ((await readSystemBotSeed(ctx, CHIEF_OF_STAFF_SYSTEM_KEY)) !== undefined) return;
-        const avatar = await normalizeBotAvatar(await loadChiefOfStaffAvatar(), "image/webp");
+        const avatar = await normalizeManagedImage(await loadChiefOfStaffAvatar(), {
+            maxPixels: 25_000_000,
+            contentType: "image/webp",
+        });
         await ctx.inTx(async (txCtx) => {
             if ((await readSystemBotSeed(txCtx, CHIEF_OF_STAFF_SYSTEM_KEY)) !== undefined) return;
             const created = await this.#create(
@@ -727,7 +731,7 @@ export class BotsModule implements AgentModule {
         // Re-encoding happens before the transaction opens. Every transaction on this database
         // runs to completion before the next one begins, so holding one open across image work
         // would stall every other writer for as long as the picture takes.
-        const asset = await normalizeBotAvatar(bytes, contentType);
+        const asset = await normalizeManagedImage(bytes, { maxPixels: 25_000_000, contentType });
         return await ctx.inTx(async (txCtx) => {
             const current = await this.#required(txCtx, botId);
             this.#assertVersion(current, expectedVersion);
@@ -745,7 +749,7 @@ export class BotsModule implements AgentModule {
         bytes: Uint8Array,
         botId?: string,
     ): Promise<BotRecord> {
-        const asset = await normalizeBotAvatar(bytes);
+        const asset = await normalizeManagedImage(bytes, { maxPixels: 25_000_000 });
         return await ctx.inTx(async (txCtx) => {
             const acting = await readBotByAgent(txCtx, agentId);
             if (acting === undefined) {
@@ -1059,28 +1063,4 @@ function derivedUsername(name: string): string {
     if (username.length === 0) username = "bot";
     if (!/^[a-z]/.test(username)) username = `bot_${username}`;
     return username.slice(0, 64).replace(/_+$/g, "") || "bot";
-}
-
-/** Decimal-fraction sort key, compared lexicographically. */
-function orderKeyBetween(before: string | null, after: string | null): string {
-    const lower = before ?? "";
-    if (after !== null && lower >= after) throw new Error("Bot order keys are out of order.");
-    let prefix = "";
-    for (let index = 0; ; index += 1) {
-        const low = index < lower.length ? lower.charCodeAt(index) - 48 : 0;
-        const high = after !== null && index < after.length ? after.charCodeAt(index) - 48 : 10;
-        if (high - low > 1) return `${prefix}${String(low + Math.floor((high - low) / 2))}`;
-        if (high - low === 1)
-            return `${prefix}${String(low)}${orderKeyAbove(lower.slice(index + 1))}`;
-        prefix += String(low);
-    }
-}
-
-function orderKeyAbove(rest: string): string {
-    let prefix = "";
-    for (let index = 0; ; index += 1) {
-        const digit = index < rest.length ? rest.charCodeAt(index) - 48 : 0;
-        if (digit < 9) return `${prefix}${String(digit + Math.floor((10 - digit) / 2))}`;
-        prefix += "9";
-    }
 }

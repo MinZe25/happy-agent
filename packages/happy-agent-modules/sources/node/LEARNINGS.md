@@ -17,3 +17,9 @@ the human profile. Its display information belongs in `config.node`, including d
 existing config snapshot. Avatar presence is only `{ thumbhash } | null`, never an additional
 boolean. Name and avatar changes invalidate config through `config.updated`; only image bytes
 need a separate authenticated endpoint.
+
+## Managed pictures share one normalization function
+
+Node, bot, and Surface pictures had duplicated WebP, hash, and ThumbHash processing. They now
+call the same bounded managed-image function. Existing decoded-pixel limits remain options;
+each owner still handles its own filesystem permissions, persisted representation, and events.

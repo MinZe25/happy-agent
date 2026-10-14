@@ -14,7 +14,7 @@ import type { DurableFunctionsModule } from "../../sources/durableFunctions/inde
 import { NodeModule } from "../../sources/node/index.js";
 import { ApiModule } from "../../sources/api/index.js";
 import { withTeamUser, type TeamUser } from "../../sources/team/index.js";
-import { normalizeNodeAvatar } from "../../sources/node/impl/normalizeNodeAvatar.js";
+import { normalizeManagedImage } from "../../sources/impl/images/normalizeManagedImage.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -303,9 +303,9 @@ describe("installation display configuration", () => {
             })
                 .toFormat(format)
                 .toBuffer();
-            const asset = await normalizeNodeAvatar(bytes);
-            expect(await normalizeNodeAvatar(bytes)).toEqual(asset);
-            expect(await sharp(Buffer.from(asset.data, "base64")).metadata()).toMatchObject({
+            const asset = await normalizeManagedImage(bytes);
+            expect(await normalizeManagedImage(bytes)).toEqual(asset);
+            expect(await sharp(asset.bytes).metadata()).toMatchObject({
                 format: "webp",
                 width: 256,
             });
@@ -314,11 +314,11 @@ describe("installation display configuration", () => {
 
     it("rejects unsupported formats, too many pixels, and oversized input", async () => {
         await expect(
-            normalizeNodeAvatar(
+            normalizeManagedImage(
                 Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'),
             ),
         ).rejects.toThrow("readable PNG");
-        await expect(normalizeNodeAvatar(Buffer.alloc(8 * 1024 * 1024 + 1))).rejects.toThrow(
+        await expect(normalizeManagedImage(Buffer.alloc(8 * 1024 * 1024 + 1))).rejects.toThrow(
             "8 MiB",
         );
         const huge = await sharp({
@@ -326,6 +326,6 @@ describe("installation display configuration", () => {
         })
             .png()
             .toBuffer();
-        await expect(normalizeNodeAvatar(huge)).rejects.toThrow("40 million");
+        await expect(normalizeManagedImage(huge)).rejects.toThrow("40 million");
     });
 });

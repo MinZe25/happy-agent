@@ -25,6 +25,14 @@ import {
 import { createId } from "@paralleldrive/cuid2";
 import {
     closeWorkspaceBridgeRequestSchema,
+    createSurfaceRequestSchema,
+    surfaceMemberRequestSchema,
+    reorderSurfaceRequestSchema,
+    createTodoRequestSchema,
+    updateTodoRequestSchema,
+    reorderTodoRequestSchema,
+    todoMutationRequestSchema,
+    todoListScopeSchema,
     WORKSPACE_BRIDGE_MAX_BINARY_MESSAGE_BYTES,
     createLiveSessionRequestSchema,
     closeLiveSessionRequestSchema,
@@ -83,6 +91,7 @@ import { MAX_RUNNER_FRAME_BYTES, RunnerUnavailableError } from "@slopus/happy-ag
 import { WebSocketServer } from "ws";
 
 import { AbortModule } from "../abort/index.js";
+import { SurfacesModule, SurfaceError } from "../surfaces/index.js";
 import type { SchedulingModule } from "../scheduling/index.js";
 import {
     ArtifactConflictError,
@@ -478,6 +487,7 @@ export class ApiModule implements AgentModule {
     readonly #chatMedia: ChatMediaModule | undefined;
     readonly #exportedBots: ExportedBotsModule | undefined;
     readonly #userSettings: UserSettingsModule | undefined;
+    readonly #surfaces: SurfacesModule | undefined;
     readonly #live: LiveModule | undefined;
     readonly #runners: RunnersModule | undefined;
     readonly #projects: ProjectsModule;
@@ -619,6 +629,7 @@ export class ApiModule implements AgentModule {
         exportedBots?: ExportedBotsModule,
         scheduling?: SchedulingModule,
         userSettings?: UserSettingsModule,
+        surfaces?: SurfacesModule,
     ) {
         this.#abort = abort;
         this.#config = config;
@@ -661,6 +672,7 @@ export class ApiModule implements AgentModule {
         this.#bridges = bridges;
         this.#exportedBots = exportedBots;
         this.#userSettings = userSettings;
+        this.#surfaces = surfaces;
     }
 
     readonly beforeStart = async (
@@ -1554,6 +1566,7 @@ export class ApiModule implements AgentModule {
             }
             if (await this.#handleBotRoute(ctx, request, response, url)) return;
             if (await this.#handleTaskRoute(ctx, request, response, url)) return;
+            if (await this.#handleSurfaceRoute(ctx, request, response, url)) return;
             if (await this.#handleArtifactRoute(ctx, request, response, url)) return;
             if (request.method === "GET" && url.pathname === "/v0/projects") {
                 const projects = await this.#allProjects(ctx, true);
@@ -2478,6 +2491,12 @@ export class ApiModule implements AgentModule {
                 this.#convertSecretEvent(event);
             }),
         );
+        if (this.#surfaces !== undefined)
+            this.#unsubscribe.push(
+                this.#surfaces.onEvent((_ctx, event) => {
+                    this.#journal.append(event.type, event.payload);
+                }),
+            );
         if (this.#userSettings !== undefined)
             this.#unsubscribe.push(
                 this.#userSettings.onEvent((_eventCtx, event) => {
@@ -5290,6 +5309,229 @@ export class ApiModule implements AgentModule {
         }
     }
 
+    async #handleSurfaceRoute(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        url: URL,
+    ): Promise<boolean> {
+        const surfaces = this.#surfaces;
+        if (surfaces === undefined || !url.pathname.startsWith("/v0/surfaces")) return false;
+        try {
+            if (url.pathname === "/v0/surfaces") {
+                if (request.method === "GET") {
+                    const cursor = this.#journal.cursor();
+                    sendJson(response, 200, { surfaces: await surfaces.list(ctx), cursor });
+                    return true;
+                }
+                if (request.method === "POST") {
+                    const body = await bodyAs(
+                        request,
+                        createSurfaceRequestSchema,
+                        "Surface creation",
+                        12 * 1024 * 1024,
+                    );
+                    sendJson(response, 201, {
+                        surface: await surfaces.create(ctx, body, await surfaces.owner(ctx)),
+                    });
+                    return true;
+                }
+                return false;
+            }
+            const membership =
+                /^\/v0\/surfaces\/([a-z][a-z0-9]*)\/(join|leave|reorder|image)$/.exec(url.pathname);
+            if (membership !== null) {
+                const id = membership[1]!;
+                const operation = membership[2]!;
+                if (operation === "image" && request.method === "GET") {
+                    const image = await surfaces.image(ctx, id);
+                    setImageCacheHeaders(response);
+                    response.setHeader("etag", image.etag);
+                    if (request.headers["if-none-match"] === image.etag) {
+                        response.writeHead(304);
+                        response.end();
+                        return true;
+                    }
+                    response.writeHead(200, { "content-type": "image/webp" });
+                    response.end(Buffer.from(image.data, "base64"));
+                    return true;
+                }
+                if (request.method !== "POST" || operation === "image") return false;
+                if (operation === "reorder") {
+                    const body = await bodyAs(
+                        request,
+                        reorderSurfaceRequestSchema,
+                        "Surface reorder",
+                    );
+                    sendJson(response, 200, {
+                        surface: await surfaces.changeMember(
+                            ctx,
+                            id,
+                            await surfaces.owner(ctx),
+                            "reorder",
+                            body.afterId,
+                            body.mutationId,
+                        ),
+                    });
+                } else {
+                    const body = await optionalBodyAs(
+                        request,
+                        surfaceMemberRequestSchema,
+                        "Surface membership",
+                        2048,
+                    );
+                    sendJson(response, 200, {
+                        surface: await surfaces.changeMember(
+                            ctx,
+                            id,
+                            await surfaces.owner(ctx),
+                            operation === "join" ? "join" : "leave",
+                            null,
+                            body.mutationId,
+                        ),
+                    });
+                }
+                return true;
+            }
+            const match =
+                /^\/v0\/surfaces\/todo\/([a-z][a-z0-9]*)(?:\/([a-z][a-z0-9]*)(?:\/(reorder|versions)(?:\/([^/]+))?)?)?$/.exec(
+                    url.pathname,
+                );
+            if (match === null) return false;
+            const surfaceId = match[1]!;
+            const todoId = match[2];
+            const action = match[3];
+            const selectedVersion = match[4];
+            const actor = { userId: await surfaces.owner(ctx), agentId: null };
+            if (todoId === undefined) {
+                if (request.method === "GET") {
+                    const scopes = url.searchParams.getAll("scope");
+                    const scope = scopes[0] ?? "active";
+                    if (scopes.length > 1 || !Value.Check(todoListScopeSchema, scope))
+                        throw invalidRequest("The todo list scope is invalid.");
+                    const cursor = this.#journal.cursor();
+                    sendJson(response, 200, {
+                        todos: await surfaces.listTodos(ctx, surfaceId, scope),
+                        cursor,
+                    });
+                    return true;
+                }
+                if (request.method === "POST") {
+                    const body = await bodyAs(request, createTodoRequestSchema, "todo creation");
+                    sendJson(response, 201, {
+                        todo: await surfaces.createTodo(ctx, surfaceId, body, actor),
+                    });
+                    return true;
+                }
+                return false;
+            }
+            if (request.method === "GET") {
+                if (action === undefined) {
+                    sendJson(response, 200, {
+                        todo: await surfaces.getTodo(ctx, surfaceId, todoId),
+                    });
+                    return true;
+                }
+                if (action !== "versions") return false;
+                if (selectedVersion !== undefined) {
+                    sendJson(response, 200, {
+                        revision: await surfaces.getVersion(
+                            ctx,
+                            surfaceId,
+                            todoId,
+                            decodePathSegment(selectedVersion, "todo revision"),
+                        ),
+                    });
+                    return true;
+                }
+                const after = url.searchParams.getAll("afterVersion");
+                const limits = url.searchParams.getAll("limit");
+                const limit = limits[0] === undefined ? 100 : Number(limits[0]);
+                if (
+                    after.length > 1 ||
+                    limits.length > 1 ||
+                    (limits[0] !== undefined &&
+                        !Value.Check(Type.String({ pattern: "^[1-9][0-9]*$" }), limits[0])) ||
+                    !Value.Check(Type.Integer({ minimum: 1, maximum: 200 }), limit)
+                )
+                    throw invalidRequest("The todo history page is invalid.");
+                sendJson(
+                    response,
+                    200,
+                    await surfaces.versions(ctx, surfaceId, todoId, after[0], limit),
+                );
+                return true;
+            }
+            if (selectedVersion !== undefined) return false;
+            const current = await surfaces.getTodo(ctx, surfaceId, todoId);
+            const version = requireIfMatch(request, current.version, {
+                currentVersion: current.version,
+                todo: current,
+            });
+            let todo;
+            if (request.method === "PATCH" && action === undefined) {
+                const body = await bodyAs(request, updateTodoRequestSchema, "todo update");
+                todo = await surfaces.mutateTodo(
+                    ctx,
+                    surfaceId,
+                    todoId,
+                    version,
+                    "update",
+                    body,
+                    actor,
+                    body.mutationId,
+                );
+            } else if (request.method === "DELETE" && action === undefined) {
+                const body = await optionalBodyAs(
+                    request,
+                    todoMutationRequestSchema,
+                    "todo deletion",
+                    2048,
+                );
+                todo = await surfaces.mutateTodo(
+                    ctx,
+                    surfaceId,
+                    todoId,
+                    version,
+                    "delete",
+                    {},
+                    actor,
+                    body.mutationId,
+                );
+            } else if (request.method === "POST" && action === "reorder") {
+                const body = await bodyAs(request, reorderTodoRequestSchema, "todo reorder");
+                todo = await surfaces.mutateTodo(
+                    ctx,
+                    surfaceId,
+                    todoId,
+                    version,
+                    "reorder",
+                    body,
+                    actor,
+                    body.mutationId,
+                );
+            } else return false;
+            sendJson(response, 200, { todo });
+            return true;
+        } catch (error) {
+            if (!(error instanceof SurfaceError)) throw error;
+            throw new ApiError(
+                error.code === "not_found"
+                    ? 404
+                    : error.code === "conflict"
+                      ? 409
+                      : error.code === "forbidden"
+                        ? 403
+                        : 400,
+                error.code,
+                error.message,
+                error.todo === undefined
+                    ? {}
+                    : { todo: error.todo, currentVersion: error.todo.version },
+            );
+        }
+    }
+
     async #handleTaskRoute(
         ctx: Context,
         request: IncomingMessage,
@@ -7128,6 +7370,7 @@ export class ApiModule implements AgentModule {
             ],
             archivedAgents: await this.#archivedAgentResources(ctx, archived),
             ...(await this.#taskBootstrap(ctx)),
+            ...(this.#surfaces === undefined ? {} : { surfaces: await this.#surfaces.list(ctx) }),
             ...(this.#userSettings === undefined
                 ? {}
                 : { userSettings: await this.#userSettings.list(ctx) }),

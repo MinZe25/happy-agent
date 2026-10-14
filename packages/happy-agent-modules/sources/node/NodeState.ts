@@ -1,7 +1,8 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { nodeNameSchema } from "@slopus/happy-agent-client";
 
-export const MAX_NODE_AVATAR_BYTES = 8 * 1024 * 1024;
+import { MAX_MANAGED_IMAGE_BYTES } from "../impl/images/normalizeManagedImage.js";
+export const MAX_NODE_AVATAR_BYTES = MAX_MANAGED_IMAGE_BYTES;
 
 export const nodeAvatarAssetSchema = Type.Object(
     {

@@ -9,7 +9,7 @@ import { ComputeModule } from "../compute/index.js";
 import { DurableFunctionsModule } from "../durableFunctions/index.js";
 import { MAX_NODE_AVATAR_BYTES, type NodeAvatarAsset, type NodeState } from "./NodeState.js";
 import { nodeMigrations, queryNodeState, saveNodeState } from "./persistence/nodeState.js";
-import { normalizeNodeAvatar } from "./impl/normalizeNodeAvatar.js";
+import { normalizeManagedImage } from "../impl/images/normalizeManagedImage.js";
 import { setNodeNameTool } from "./tools/set_node_name.js";
 import { setNodeAvatarTool } from "./tools/set_node_avatar.js";
 
@@ -145,7 +145,12 @@ export class NodeModule implements AgentModule {
             const bytes = await compute.fs.readFileBuffer(permissions, path, {
                 maxBytes: MAX_NODE_AVATAR_BYTES,
             });
-            asset = await normalizeNodeAvatar(bytes);
+            const image = await normalizeManagedImage(bytes);
+            asset = {
+                data: Buffer.from(image.bytes).toString("base64"),
+                etag: image.etag,
+                thumbhash: image.thumbhash,
+            };
         }
         return await ctx.inTx(async (txCtx) => {
             await this.requireAdmin(txCtx, agentId);

@@ -1,0 +1,311 @@
+import { createId } from "@paralleldrive/cuid2";
+import { defineAgentTool, cuid2Schema, type AgentModuleScope } from "@slopus/happy-agent-base";
+import { Type } from "@sinclair/typebox";
+import {
+    surfaceIdSchema,
+    surfaceSchema,
+    todoSchema,
+    todoStatusSchema,
+    todoTextSchema,
+    todoListScopeSchema,
+    todoVersionListResponseSchema,
+    createSurfaceRequestSchema,
+    resourceVersionSchema,
+} from "@slopus/happy-agent-client";
+import type { SurfacesModule } from "../SurfacesModule.js";
+
+const capabilities = ["Manage shared todo-list Surfaces, todos, and permanent revision history."];
+const identity = { surfaceId: surfaceIdSchema, todoId: cuid2Schema };
+const guard = { ...identity, version: resourceVersionSchema };
+const page = {
+    offset: Type.Optional(Type.Integer({ minimum: 0 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+};
+const textResult = (result: unknown) => [{ type: "text" as const, text: JSON.stringify(result) }];
+
+/** Fixed common arrays; model providers never affect the Surface tool or permission contract. */
+export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, admin: boolean) {
+    const actor = (ctx: Parameters<SurfacesModule["actor"]>[0]) =>
+        surfaces.actor(ctx, scope.agent.id, scope.kv);
+    const ordinary = [
+        defineAgentTool({
+            name: "list_surfaces",
+            defer: true,
+            capabilities,
+            description:
+                "List shared Surface instances, their IDs, names, types, and joined people. Each todo tool requires a Surface ID. Results are paged.",
+            parameters: Type.Object(page, { additionalProperties: false }),
+            returnType: Type.Object({
+                surfaces: Type.Array(surfaceSchema),
+                nextOffset: Type.Union([Type.Integer(), Type.Null()]),
+            }),
+            durable: false,
+            shouldReviewInAutoMode: () => false,
+            execute: async (ctx, input) => {
+                const all = await surfaces.list(ctx);
+                const start = input.offset ?? 0;
+                const end = start + (input.limit ?? 20);
+                return {
+                    surfaces: all.slice(start, end),
+                    nextOffset: end < all.length ? end : null,
+                };
+            },
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "list_todos",
+            defer: true,
+            capabilities,
+            description:
+                "List todos in one Surface, active by default. Use completed, deleted, or all to find older items. Keep returned versions for guarded edits. Results are paged.",
+            parameters: Type.Object(
+                { surfaceId: surfaceIdSchema, scope: Type.Optional(todoListScopeSchema), ...page },
+                { additionalProperties: false },
+            ),
+            returnType: Type.Object({
+                todos: Type.Array(todoSchema),
+                nextOffset: Type.Union([Type.Integer(), Type.Null()]),
+            }),
+            durable: false,
+            shouldReviewInAutoMode: () => false,
+            execute: async (ctx, input) => {
+                const all = await surfaces.listTodos(ctx, input.surfaceId, input.scope);
+                const start = input.offset ?? 0;
+                const end = start + (input.limit ?? 20);
+                return { todos: all.slice(start, end), nextOffset: end < all.length ? end : null };
+            },
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "create_todo",
+            defer: true,
+            capabilities,
+            description:
+                "Append a plain-text todo to one shared Surface. This never creates a chat or joins anyone to the Surface.",
+            parameters: Type.Object(
+                { surfaceId: surfaceIdSchema, text: todoTextSchema },
+                { additionalProperties: false },
+            ),
+            returnType: todoSchema,
+            durable: true,
+            transactional: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            execute: async (ctx, input, call) =>
+                surfaces.createTodo(
+                    ctx,
+                    input.surfaceId,
+                    { text: input.text, id: await call.kv.getOrCreate(ctx, "todoId", createId) },
+                    await actor(ctx),
+                ),
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "update_todo",
+            defer: true,
+            capabilities,
+            description:
+                "Edit text or status (active, completed, deleted) with the current version. Returning an inactive todo to active appends it to the list. To apply a historical state, read its revision and supply the desired fields here; use reorder_todo for placement. Conflicts require a fresh read.",
+            parameters: Type.Object(
+                {
+                    ...guard,
+                    text: Type.Optional(todoTextSchema),
+                    status: Type.Optional(todoStatusSchema),
+                },
+                { additionalProperties: false },
+            ),
+            returnType: todoSchema,
+            durable: true,
+            transactional: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            execute: async (ctx, { surfaceId, todoId, version, ...edit }) =>
+                surfaces.mutateTodo(
+                    ctx,
+                    surfaceId,
+                    todoId,
+                    version,
+                    "update",
+                    edit,
+                    await actor(ctx),
+                ),
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "reorder_todo",
+            defer: true,
+            capabilities,
+            description:
+                "Move an active todo after another active todo in the same Surface, or first with afterId null. Completed and deleted todos cannot be reordered.",
+            parameters: Type.Object(
+                { ...guard, afterId: Type.Union([cuid2Schema, Type.Null()]) },
+                { additionalProperties: false },
+            ),
+            returnType: todoSchema,
+            durable: true,
+            transactional: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            execute: async (ctx, input) =>
+                surfaces.mutateTodo(
+                    ctx,
+                    input.surfaceId,
+                    input.todoId,
+                    input.version,
+                    "reorder",
+                    { afterId: input.afterId },
+                    await actor(ctx),
+                ),
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "delete_todo",
+            defer: true,
+            capabilities,
+            description:
+                "Delete a todo from one Surface. Its text and every revision remain permanently recoverable.",
+            parameters: Type.Object(guard, { additionalProperties: false }),
+            returnType: todoSchema,
+            durable: true,
+            transactional: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            execute: async (ctx, input) =>
+                surfaces.mutateTodo(
+                    ctx,
+                    input.surfaceId,
+                    input.todoId,
+                    input.version,
+                    "delete",
+                    {},
+                    await actor(ctx),
+                ),
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "list_todo_versions",
+            defer: true,
+            capabilities,
+            description:
+                "Read a bounded page of a todo's permanent full revisions and their actors, oldest first. Continue with nextAfterVersion.",
+            parameters: Type.Object(
+                {
+                    ...identity,
+                    afterVersion: Type.Optional(resourceVersionSchema),
+                    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+                },
+                { additionalProperties: false },
+            ),
+            returnType: todoVersionListResponseSchema,
+            durable: false,
+            shouldReviewInAutoMode: () => false,
+            execute: async (ctx, input) =>
+                surfaces.versions(
+                    ctx,
+                    input.surfaceId,
+                    input.todoId,
+                    input.afterVersion,
+                    input.limit ?? 10,
+                ),
+            toLLM: textResult,
+        }),
+    ];
+    const administration = [
+        defineAgentTool({
+            name: "create_todo_surface",
+            defer: true,
+            capabilities,
+            description:
+                "Admin bots only: create a distinct named shared todo-list Surface. Optionally supply an absolute PNG, JPEG, or WebP image path (8 MiB maximum). The identified person joins at the end of their sidebar.",
+            parameters: Type.Object(
+                {
+                    name: createSurfaceRequestSchema.properties.name,
+                    imagePath: Type.Optional(
+                        Type.String({
+                            minLength: 1,
+                            maxLength: 4096,
+                            pattern: "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\u0000]*$",
+                        }),
+                    ),
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: (input, ctx) =>
+                surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath),
+            describeAutoPermissionAction: (input) =>
+                `creating a shared todo Surface${input.imagePath === undefined ? "" : ` from image ${JSON.stringify(input.imagePath)}`}. Access: shared data write and, when supplied, filesystem image read; outside-workspace and symlink targets require Full access`,
+            execute: async (ctx, input, call) => {
+                await surfaces.requireAdmin(ctx, scope.agent.id);
+                const id = await call.kv.getOrCreate(ctx, "surfaceId", createId);
+                const image =
+                    input.imagePath === undefined
+                        ? undefined
+                        : {
+                              data: await call.kv.getOrCreate(ctx, "image", () =>
+                                  surfaces.imageFromPath(ctx, scope.agent.id, input.imagePath!),
+                              ),
+                          };
+                const author = await actor(ctx);
+                return surfaces.create(
+                    ctx,
+                    {
+                        id,
+                        type: "todo",
+                        name: input.name,
+                        ...(image === undefined ? {} : { image }),
+                    },
+                    surfaces.team.enabled ? (author.userId ?? undefined) : null,
+                    scope.agent.id,
+                );
+            },
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "add_surface_user",
+            defer: true,
+            capabilities,
+            description:
+                "Admin bots only: add an existing user to a Surface, appending it to their own sidebar. Use null for the standalone person. Existing members keep their order.",
+            parameters: Type.Object(
+                { surfaceId: surfaceIdSchema, userId: Type.Union([cuid2Schema, Type.Null()]) },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            transactional: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            execute: async (ctx, input) => {
+                await surfaces.requireAdmin(ctx, scope.agent.id);
+                return surfaces.changeMember(ctx, input.surfaceId, input.userId, "join");
+            },
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "remove_surface_user",
+            defer: true,
+            capabilities,
+            description:
+                "Admin bots only: remove a user's Surface from their sidebar. Todos, revisions, and all other users' memberships stay intact.",
+            parameters: Type.Object(
+                { surfaceId: surfaceIdSchema, userId: Type.Union([cuid2Schema, Type.Null()]) },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            transactional: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            execute: async (ctx, input) => {
+                await surfaces.requireAdmin(ctx, scope.agent.id);
+                return surfaces.changeMember(ctx, input.surfaceId, input.userId, "leave");
+            },
+            toLLM: textResult,
+        }),
+    ];
+    return admin ? [...ordinary, ...administration] : ordinary;
+}

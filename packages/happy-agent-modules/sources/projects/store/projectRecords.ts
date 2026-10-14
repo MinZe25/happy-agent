@@ -4,6 +4,7 @@ import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
 import { projectOrderKeySchema, projectVersionSchema, type Project } from "../Project.js";
+import { projectOrderKeyBetween } from "./projectRootAgentOrdering.js";
 import { PROJECTS_TABLE, PROJECT_SETTINGS_TABLE } from "../ProjectMigrations.js";
 import { projectFromRow, type ProjectRow } from "../ProjectRow.js";
 import { ProjectLifecycleError } from "../ProjectLifecycleError.js";
@@ -71,29 +72,10 @@ export async function nextProjectOrderKey(database: AgentDatabase): Promise<stri
             LIMIT 1`,
     );
     const current = rows[0]?.order_key;
-    if (current === undefined) return orderKeyForPosition(1);
-    if (!Value.Check(projectOrderKeySchema, current)) {
+    if (current !== undefined && !Value.Check(projectOrderKeySchema, current)) {
         throw new Error("Project order storage contains an invalid key.");
     }
-    let next: bigint;
-    try {
-        next = BigInt(current) + 1n;
-    } catch {
-        throw new Error("Project order storage contains an invalid key.");
-    }
-    const value = next.toString().padStart(20, "0");
-    if (!Value.Check(projectOrderKeySchema, value)) {
-        throw new Error("Project order storage exceeded its key bound.");
-    }
-    return value;
-}
-
-export function orderKeyForPosition(position: number): string {
-    const value = String(position).padStart(20, "0");
-    if (!Value.Check(projectOrderKeySchema, value)) {
-        throw new Error("Project order position is invalid.");
-    }
-    return value;
+    return projectOrderKeyBetween(current ?? null, null);
 }
 
 /**

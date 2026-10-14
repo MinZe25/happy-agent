@@ -1,0 +1,3 @@
+export { SurfacesModule, type SurfaceEvent, type SurfaceActor } from "./SurfacesModule.js";
+export { SurfaceError } from "./SurfaceError.js";
+export type { SurfaceImageAsset } from "./SurfaceImageAsset.js";

@@ -88,6 +88,7 @@ import { ToolDiscoveryModule } from "../toolDiscovery/index.js";
 import { UsageModule } from "../usage/index.js";
 import { UserInputModule } from "../userInput/index.js";
 import { UserSettingsModule } from "../userSettings/index.js";
+import { SurfacesModule } from "../surfaces/index.js";
 import { WorkflowsModule } from "../workflows/index.js";
 import { WorkspacesModule } from "../workspaces/index.js";
 import { checkModuleToolParameters } from "./checkModuleToolParameters.js";
@@ -198,6 +199,7 @@ export interface HappyAgentRuntimeModules {
     readonly usage: UsageModule;
     readonly userInput: UserInputModule;
     readonly userSettings: UserSettingsModule;
+    readonly surfaces: SurfacesModule;
     readonly workflows: WorkflowsModule;
     readonly workspaces: WorkspacesModule;
 }
@@ -538,6 +540,7 @@ export async function startHappyAgentRuntime(
         const team = new TeamModule<LibSQLDatabase>(config, profile);
         registerShutdown("team", async () => team.close());
         const userSettings = new UserSettingsModule(team);
+        const surfaces = new SurfacesModule(durableFunctions, team, bots, compute.computeModule);
         const artifactData = new ArtifactDataModule(config, artifacts, profile, team, bots);
         registerShutdown(
             "artifact-data",
@@ -673,6 +676,7 @@ export async function startHappyAgentRuntime(
             exportedBots,
             scheduling,
             userSettings,
+            surfaces,
         );
         api = apiModule;
 
@@ -738,6 +742,7 @@ export async function startHappyAgentRuntime(
             usage,
             userInput,
             userSettings,
+            surfaces,
             workflows,
             workspaces,
         };
@@ -771,6 +776,7 @@ export async function startHappyAgentRuntime(
             userSettings,
             git,
             durableFunctions,
+            surfaces,
             botSettings,
             globalSkills,
             live,

@@ -8,7 +8,7 @@ import { BotNotFoundError } from "../Bot.js";
 import { BotAvatarInputError } from "../BotAvatarInputError.js";
 import type { BotsModule } from "../BotsModule.js";
 import { formatOtherBotRefusal } from "../impl/formatOtherBotRefusal.js";
-import { MAX_BOT_AVATAR_BYTES } from "../impl/normalizeBotAvatar.js";
+import { MAX_MANAGED_IMAGE_BYTES as MAX_BOT_AVATAR_BYTES } from "../../impl/images/normalizeManagedImage.js";
 
 const setBotAvatarInputSchema = Type.Object(
     {

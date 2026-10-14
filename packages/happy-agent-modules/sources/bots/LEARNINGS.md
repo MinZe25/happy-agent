@@ -1,5 +1,11 @@
 # Bots — learnings
 
+## Managed pictures share one normalization function
+
+Bot, node, and Surface pictures use one managed-image normalization function for WebP encoding,
+hashing, and ThumbHash generation. Bot callers retain their existing 25-million-pixel bound and
+declared-content-type check as options, and keep decoding outside database transactions.
+
 ## Bots strongly prefer workspace-bound subtasks for repository work
 
 Restricting subtasks to substantial workstreams made project delegation unclear and encouraged
