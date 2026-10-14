@@ -4,6 +4,7 @@ import { Type } from "@sinclair/typebox";
 import {
     surfaceIdSchema,
     surfaceSchema,
+    surfaceMemberSchema,
     todoSchema,
     todoStatusSchema,
     todoTextSchema,
@@ -83,9 +84,13 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             capabilities: ["Add a todo to a shared Surface."],
             searchKeywords: ["create todo", "add checklist item", "append reminder"],
             description:
-                "Append a plain-text todo to one shared Surface. This never creates a chat or joins anyone to the Surface.",
+                "Append a plain-text todo to one shared Surface. Explicitly supply authorUserId as a local Happy user ID, or null for no attribution; only null is allowed in standalone mode. The author is immutable and separate from the revision's audit actor. This never creates a chat or joins anyone to the Surface.",
             parameters: Type.Object(
-                { surfaceId: surfaceIdSchema, text: todoTextSchema },
+                {
+                    surfaceId: surfaceIdSchema,
+                    text: todoTextSchema,
+                    authorUserId: surfaceMemberSchema.properties.userId,
+                },
                 { additionalProperties: false },
             ),
             returnType: todoSchema,
@@ -99,6 +104,7 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
                     input.surfaceId,
                     { text: input.text, id: await call.kv.getOrCreate(ctx, "todoId", createId) },
                     await actor(ctx),
+                    input.authorUserId,
                 ),
             toLLM: textResult,
         }),
@@ -223,10 +229,11 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             capabilities: ["Create a named shared todo-list Surface as an admin bot."],
             searchKeywords: ["create todo surface", "new shared todo list", "todo list image"],
             description:
-                "Admin bots only: create a distinct named shared todo-list Surface. Optionally supply an absolute PNG, JPEG, or WebP image path (8 MiB maximum). The identified person joins at the end of their sidebar.",
+                "Admin bots only: create a distinct named shared todo-list Surface. Explicitly supply creatorUserId as a local Happy user ID or null; only null is allowed in standalone mode. The creator is immutable. A named creator joins at the end of their sidebar; null joins nobody in team mode and the local person in standalone mode. Optionally supply an absolute PNG, JPEG, or WebP image path (8 MiB maximum).",
             parameters: Type.Object(
                 {
                     name: createSurfaceRequestSchema.properties.name,
+                    creatorUserId: surfaceMemberSchema.properties.userId,
                     imagePath: Type.Optional(
                         Type.String({
                             minLength: 1,
@@ -256,7 +263,6 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
                                   surfaces.imageFromPath(ctx, scope.agent.id, input.imagePath!),
                               ),
                           };
-                const author = await actor(ctx);
                 return surfaces.create(
                     ctx,
                     {
@@ -265,7 +271,7 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
                         name: input.name,
                         ...(image === undefined ? {} : { image }),
                     },
-                    surfaces.team.enabled ? (author.userId ?? undefined) : null,
+                    input.creatorUserId,
                     scope.agent.id,
                 );
             },

@@ -10,6 +10,7 @@ import {
     createSurfaceRequestSchema,
     createTodoRequestSchema,
     surfaceSchema,
+    surfaceMemberSchema,
     surfaceIdSchema,
     todoSchema,
     todoRevisionSchema,
@@ -164,13 +165,13 @@ export class SurfacesModule implements AgentModule {
     }
     async list(ctx: Context): Promise<Surface[]> {
         return ctx.inTx(async (tx) =>
-            (await this.#kv.list(tx, "surface.")).map((row) => checked(surfaceSchema, row.value)),
+            (await this.#kv.list(tx, "surface.")).map((row) => readSurface(row.value)),
         );
     }
     async create(
         ctx: Context,
         input: CreateSurfaceRequest,
-        owner: string | null | undefined,
+        creatorUserId: string | null,
         adminAgentId?: string,
     ): Promise<Surface> {
         checked(createSurfaceRequestSchema, input);
@@ -194,23 +195,25 @@ export class SurfacesModule implements AgentModule {
         }
         return ctx.inTx(async (tx) => {
             if (adminAgentId !== undefined) await this.requireAdmin(tx, adminAgentId);
+            await this.#validateUser(tx, creatorUserId);
             const id = input.id ?? createId();
             const old = await this.#kv.read(tx, `surface.${id}`);
-            if (old !== undefined) return checked(surfaceSchema, old);
+            if (old !== undefined) return readSurface(old);
             const now = Date.now();
             const surface: Surface = {
                 id,
                 type: "todo",
                 name: input.name,
+                creatorUserId,
                 image: image === null ? null : { thumbhash: image.thumbhash },
                 members:
-                    owner === undefined
+                    this.team.enabled && creatorUserId === null
                         ? []
                         : [
                               {
-                                  userId: owner,
+                                  userId: creatorUserId,
                                   joinedAt: now,
-                                  orderKey: await this.#memberTail(tx, owner),
+                                  orderKey: await this.#memberTail(tx, creatorUserId),
                               },
                           ],
                 updatedAt: now,
@@ -243,17 +246,9 @@ export class SurfacesModule implements AgentModule {
         mutationId?: string,
     ): Promise<Surface> {
         return ctx.inTx(async (tx) => {
-            const target =
-                this.team.enabled && userId !== null
-                    ? await this.team.getUser(tx, userId)
-                    : undefined;
-            if (this.team.enabled && (target === undefined || target.authentication === "guest"))
+            await this.#validateUser(tx, userId);
+            if (this.team.enabled && userId === null)
                 throw new SurfaceError("not_found", "The Surface user was not found.");
-            if (!this.team.enabled && userId !== null)
-                throw new SurfaceError(
-                    "invalid_request",
-                    "Standalone Surfaces use the local person.",
-                );
             const current = await this.#surface(tx, id);
             const member = current.members.find((m) => m.userId === userId);
             if (
@@ -313,7 +308,7 @@ export class SurfacesModule implements AgentModule {
         return ctx.inTx(async (tx) => {
             await this.#surface(tx, surfaceId);
             const todos = (await this.#kv.list(tx, `todo.${surfaceId}.`))
-                .map((row) => checked(todoSchema, row.value))
+                .map((row) => readTodo(row.value))
                 .filter((t) => scope === "all" || t.status === scope);
             return todos.sort((a, b) => {
                 const rank = { active: 0, completed: 1, deleted: 2 };
@@ -333,7 +328,7 @@ export class SurfacesModule implements AgentModule {
             const todo = await this.#kv.read(tx, `todo.${surfaceId}.${id}`);
             if (todo === undefined)
                 throw new SurfaceError("not_found", "The todo was not found in this Surface.");
-            return checked(todoSchema, todo);
+            return readTodo(todo);
         });
     }
     async createTodo(
@@ -341,19 +336,22 @@ export class SurfacesModule implements AgentModule {
         surfaceId: string,
         input: CreateTodoRequest,
         actor: SurfaceActor,
+        authorUserId: string | null,
     ): Promise<Todo> {
         checked(createTodoRequestSchema, input);
         if (input.id !== undefined) checked(cuid2Schema, input.id);
         return ctx.inTx(async (tx) => {
+            await this.#validateUser(tx, authorUserId);
             await this.#surface(tx, surfaceId);
             const id = input.id ?? createId();
             const old = await this.#kv.read(tx, `todo.${surfaceId}.${id}`);
-            if (old !== undefined) return checked(todoSchema, old);
+            if (old !== undefined) return readTodo(old);
             const now = Date.now();
             const todo: Todo = {
                 id,
                 surfaceId,
                 text: input.text,
+                authorUserId,
                 status: "active",
                 orderKey: await this.#todoTail(tx, surfaceId),
                 createdAt: now,
@@ -493,7 +491,7 @@ export class SurfacesModule implements AgentModule {
                     afterVersion ?? "",
                     limit + 1,
                 )
-            ).map((row) => checked(todoRevisionSchema, row));
+            ).map(readRevision);
             const versions = rows.slice(0, limit);
             return {
                 versions,
@@ -513,14 +511,23 @@ export class SurfacesModule implements AgentModule {
             const row = await this.#kv.read(tx, `revision.${surfaceId}.${id}.${version}`);
             if (row === undefined)
                 throw new SurfaceError("not_found", "The todo revision was not found.");
-            return checked(todoRevisionSchema, row);
+            return readRevision(row);
         });
     }
     async #surface(ctx: Context, id: string): Promise<Surface> {
         checked(surfaceIdSchema, id);
         const value = await this.#kv.read(ctx, `surface.${id}`);
         if (value === undefined) throw new SurfaceError("not_found", "The Surface was not found.");
-        return checked(surfaceSchema, value);
+        return readSurface(value);
+    }
+    async #validateUser(ctx: Context, userId: string | null): Promise<void> {
+        checked(surfaceMemberSchema.properties.userId, userId);
+        if (userId === null) return;
+        if (!this.team.enabled)
+            throw new SurfaceError("invalid_request", "Standalone Surfaces use the local person.");
+        const target = await this.team.getUser(ctx, userId);
+        if (target === undefined || target.authentication === "guest")
+            throw new SurfaceError("not_found", "The Surface user was not found.");
     }
     async #memberTail(ctx: Context, userId: string | null): Promise<string> {
         const keys = (await this.list(ctx))
@@ -560,6 +567,22 @@ export class SurfacesModule implements AgentModule {
     }
 }
 
+/** Older snapshots have no attribution; reads never infer it or rewrite stored history. */
+function readSurface(value: unknown): Surface {
+    const surface = checked(surfaceSchema, value);
+    return { ...surface, creatorUserId: surface.creatorUserId ?? null };
+}
+function readTodo(value: unknown): Todo {
+    const todo = checked(todoSchema, value);
+    return { ...todo, authorUserId: todo.authorUserId ?? null };
+}
+function readRevision(value: unknown): TodoRevision {
+    const revision = checked(todoRevisionSchema, value);
+    return {
+        ...revision,
+        todo: { ...revision.todo, authorUserId: revision.todo.authorUserId ?? null },
+    };
+}
 function echo(mutationId?: string) {
     return mutationId === undefined ? {} : { mutationId };
 }

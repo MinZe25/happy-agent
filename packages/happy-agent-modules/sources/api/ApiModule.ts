@@ -5419,7 +5419,7 @@ export class ApiModule implements AgentModule {
                 if (request.method === "POST") {
                     const body = await bodyAs(request, createTodoRequestSchema, "todo creation");
                     sendJson(response, 201, {
-                        todo: await surfaces.createTodo(ctx, surfaceId, body, actor),
+                        todo: await surfaces.createTodo(ctx, surfaceId, body, actor, actor.userId),
                     });
                     return true;
                 }

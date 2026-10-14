@@ -19,6 +19,17 @@ Generic model creation hid differences between feature types. Active admin bots 
 `create_todo_surface`, with a name and optional image, and add/remove-user tools. Execution
 rechecks authority; ordinary todo use cannot grant membership administration or create lists.
 
+## Attribution is explicit and remains separate from audit actors
+
+Todo records and Surfaces did not retain their author or creator. Todos now carry immutable
+`authorUserId` in every snapshot and Surfaces carry immutable `creatorUserId`, using local Happy
+user IDs or null. HTTP uses the authenticated caller; creation tools require an explicit ID or
+null and never infer it from the agent's current message. Non-null IDs must identify existing
+sign-in-capable team users. The explicit Surface creator joins its sidebar; team null creates
+no member, while standalone null joins the local person. Older snapshots read as null without
+inferring from members or revision actors or rewriting permanent history. Revision actors still
+record the actual mutation context independently of attribution.
+
 ## Ordering reuses the existing implementation
 
 Duplicating the workspace fractional-key helper was unnecessary. The algorithm now lives in a

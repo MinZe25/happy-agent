@@ -71,7 +71,7 @@ describe("Surface instances through the real daemon", () => {
                             {
                                 type: "tool_call",
                                 name: "create_todo_surface",
-                                arguments: { name: "Reviewed list" },
+                                arguments: { name: "Reviewed list", creatorUserId: null },
                             },
                         ],
                     };
@@ -304,7 +304,7 @@ describe("Surface instances through the real daemon", () => {
         let adminId = "";
         let nextAdminTool: { name: string; arguments: unknown } | undefined = {
             name: "create_todo_surface",
-            arguments: { name: "Admin list" },
+            arguments: { name: "Admin list", creatorUserId: null },
         };
         const calls = new Set<string>();
         const gym = await createAgentGym({
@@ -330,6 +330,7 @@ describe("Surface instances through the real daemon", () => {
                             name: "create_todo_surface",
                             arguments: {
                                 name: request.sessionId === adminId ? "Admin list" : "Denied",
+                                creatorUserId: null,
                             },
                         },
                     ],
@@ -352,7 +353,10 @@ describe("Surface instances through the real daemon", () => {
         nextAdminTool = { name: "remove_surface_user", arguments: { surfaceId, userId: null } };
         await gym.send("Remove me from the Surface sidebar.", sendOptions);
         expect((await gym.client.listSurfaces()).surfaces[0]!.members).toEqual([]);
-        nextAdminTool = { name: "create_todo", arguments: { surfaceId, text: "From a tool" } };
+        nextAdminTool = {
+            name: "create_todo",
+            arguments: { surfaceId, text: "From a tool", authorUserId: null },
+        };
         await gym.send("Create a todo on that Surface without joining.", sendOptions);
         const todo = (await gym.client.listTodos(surfaceId)).todos[0]!;
         expect(todo.text).toBe("From a tool");
