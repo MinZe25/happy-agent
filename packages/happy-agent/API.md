@@ -280,6 +280,12 @@ daemons. Task agents and their workspaces appear in no project or workspace list
 workspace `kind` value `"task"` and the workspace `taskId` field appear only on a task's
 workspace, which a client reaches only through a task.
 
+Surfaces are additive and do not increment the protocol version. Clients detect them through
+`GET /v0/surfaces`: `404` or `501` means Surface support is unavailable. The desktop bootstrap
+`surfaces` field and the `surface.*` and `todo.*` events are absent on
+older compatible daemons. Surface IDs are CUID2s and types are extensible strings; clients leave
+unknown types unavailable while retaining the rest of the catalog.
+
 Reference tags in agent text, described under "Message content", are additive and do not
 increment the protocol version. Request and response schemas are unchanged; a client that does not
 render them shows the tag text as written. File links, described in the same section, are additive
@@ -395,14 +401,14 @@ event cursors (defined in the events chapter) and resource versions (next sectio
 ### Resource versions and `If-Match`
 
 Every resource that appears in version-chained `*.updated` events — projects, workspaces,
-terminals, services, agents, bots, artifacts, secrets, questions, processes, and the profile — carries a `version`
+terminals, services, agents, bots, artifacts, secrets, surfaces, todos, questions, processes, and the profile — carries a `version`
 field: a **UUIDv7** minted at the moment of the change. Because versions are time-ordered, a
 client holding two copies of the same resource compares their versions and keeps the greater
 one; this is how a REST snapshot and the event stream reconcile without bookkeeping. Versions
 also chain updates together: every `*.updated` event names the version it replaced, so a client
 can tell whether its cached copy is current or dirty (see the events chapter).
 
-Mutations of projects, workspaces, bots, artifacts, secrets, and the profile additionally require an
+Mutations of projects, workspaces, bots, artifacts, secrets, todos, and the profile additionally require an
 `If-Match` header carrying the version the client last saw (creation excepted):
 
 ```
@@ -459,7 +465,8 @@ no hard-delete endpoints. The only things that end are runtime state — a termi
 the transcript resets described under `message.deleted`, none of which is a client deleting a
 durable resource. Artifacts are the one resource that is deleted rather than archived, and their
 deletion is a tombstone: the artifact leaves the lists and stops serving its content, but its record
-stays readable and its stored content stays on the daemon's disk.
+stays readable and its stored content stays on the daemon's disk. Todo deletion also records a
+tombstone: every version remains readable and can be reverted or unarchived.
 
 ## Endpoints
 
@@ -6299,6 +6306,211 @@ Removes the bot picture. Requires `If-Match`.
 
 Response — `200`: `{ "bot": { ... } }` with `avatar` `null`.
 
+## Surfaces
+
+A Surface is an instance of a predefined feature with its own typed API, rather than an arbitrary
+document or agent. Every instance has a CUID2 ID and a human name. Multiple independent todo-list
+Surfaces may exist; each owns its todos, history, and members. The supported type is `todo`;
+calendars are a future type, not a current endpoint. The catalog initially has no instances.
+All onboarded authenticated people may read and modify Surface data, whether
+or not they joined. Joining and leaving control only the person's sidebar. No Surface operation
+creates a workspace, agent, or chat.
+
+### Surface catalog and members
+
+A Surface object has `id` (CUID2), `type` (`todo` today; future types are additive),
+`name` (human display text), `image` (`null` or `{ "thumbhash": "..." }`), `members`,
+`version` (UUIDv7), and `updatedAt` (epoch milliseconds).
+`members` is an array inside the Surface, sorted by `userId` using plain string comparison.
+`members: []` is the sole representation of no joined people. There is no separate member list
+or nullable member field in responses, and no duplicate `userIds` list. The Surface's version
+covers all its member records. Its identity, type, and name cannot be edited through the API.
+`name` is 1–256 nonblank characters without ASCII control characters.
+
+Each member has `userId`, `orderKey`, and `joinedAt`. In standalone mode `userId` is `null`,
+matching the existing profile and task identity convention; in team mode it is the
+installation-local Happy user ID. A member is always an object, never a null array element. Resolve
+the standalone person's name and photo through the profile, and team members through the
+existing user routes. `orderKey` is an opaque fractional decimal string compared lexicographically,
+like other catalogs. It places this Surface in this person's sidebar, not in anyone else's.
+`joinedAt` is epoch milliseconds. The Surface contains all its members, so people can see who
+joined. To render a person's sidebar, select Surfaces containing their member record and order
+them by that record's key, with Surface ID as a tie-breaker.
+
+Each person starts with an empty Surface list. Requests cannot supply another person's identity.
+A new join appends to the caller's list; rejoining after leaving appends too. Mutations do not
+require `If-Match`: the latest reorder wins within one person's list. Leaving never removes
+Surface data or history. Changing one member never changes another member's order or join time.
+
+`GET /v0/surfaces` returns `200 { "surfaces": [...], "cursor": "..." }`, the full instance
+catalog in ascending ID order with members nested in every Surface. The event cursor is captured
+before snapshot reads. Unknown query fields are ignored.
+
+`POST /v0/surfaces` accepts `{ "id": "...", "type": "todo", "name": "Shopping",
+"mutationId": "..." }`; `id` and `mutationId` are optional. It creates one independent empty
+list, joins the authenticated creator at the end of their sidebar, and returns
+`201 { "surface": {...} }`. Repeating a supplied ID returns the existing Surface without changing
+it or rejoining, and emits no event. New creation emits shared `surface.created` containing
+`surface` and optional `mutationId`. Invalid names, IDs, or unsupported types return
+`400 invalid_request`. There is no Surface deletion route; leaving removes it only from the
+caller's sidebar.
+
+Creation additionally accepts optional `image` containing base64 `data` for a PNG, JPEG, or
+WebP, at most 8 MiB decoded and 40 million pixels. The daemon normalizes it to a bounded WebP,
+stores its own bytes atomically with creation, and computes the ThumbHash. Invalid or oversized
+images return `400 invalid_request` without creating anything. `GET /v0/surfaces/:surfaceId/image`
+serves those bytes with `Content-Type: image/webp`, a content-derived `ETag`, and the shared
+private image cache policy; matching `If-None-Match` returns `304`. Missing images or Surfaces
+return `404 not_found`. There is no caller-provided path or URL in a Surface response.
+
+`POST /v0/surfaces/:surfaceId/join` and `/leave` accept `{}` or `{ "mutationId": "..." }` and
+return `200 { "surface": {...} }`. Unknown Surface IDs return `404 not_found`.
+Joining an existing member or leaving an absent member is an exact no-op, including versions
+and events. A changed member record updates the
+Surface's `members` and version atomically and emits shared `surface.updated` after commit,
+echoing `mutationId` when supplied.
+
+`POST /v0/surfaces/:surfaceId/reorder` accepts `{ "afterId": "s4k8m2q9w1e5r7y3u6i0o2p4", "mutationId": "..." }`;
+`afterId: null` means first. It returns the same single-Surface response. The moved member record
+gets the fractional key between the destination neighbours; neighbours keep their keys. Only
+the caller's member record changes, advancing the Surface version and emitting `surface.updated`.
+Moving to the current position is a no-op. An unjoined target, self-anchor, or anchor outside
+the caller's list returns `409 conflict`. An unknown target Surface returns `404 not_found`.
+
+### Todo data and permanent versions
+
+Each Todo Surface owns one shared plain list. A todo contains:
+
+```json
+{
+    "id": "t4k8m2q9w1e5r7y3u6i0o2p4",
+    "surfaceId": "s4k8m2q9w1e5r7y3u6i0o2p4",
+    "text": "Pick up groceries",
+    "status": "active",
+    "orderKey": "5",
+    "createdAt": 1755300000000,
+    "updatedAt": 1755400000000,
+    "completedAt": null,
+    "deletedAt": null,
+    "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e"
+}
+```
+
+`id` is a CUID2. `text` is plain text, 1–10,000 characters, containing a non-whitespace character
+and no ASCII control characters except tab and newline. `status` is `active`, `completed`, or
+`deleted`. Only active todos have an `orderKey`; inactive ones have `null`. Active todos have
+`completedAt: null` and `deletedAt: null`. Completed todos have a completion timestamp and
+`deletedAt: null`. Deleted todos have a deletion timestamp and retain their prior completion
+timestamp, if any. All timestamps are epoch milliseconds. The version is a UUIDv7 resource
+version. Clients use plain string comparisons for keys, never locale-aware collation.
+
+Every creation, text edit, status change, deletion, and reorder atomically
+stores the new full todo snapshot as an immutable revision alongside the latest todo and its
+durable notification intent; publication to the shared event journal follows commit.
+A revision is `{ "todo": {...}, "actor": { "userId": null, "agentId": null },
+"source": "api" }`. `actor.userId` is the authenticated Happy user ID for HTTP mutations, or
+the identified person whose message the agent is working on for tools; it is `null` in
+standalone mode or when no person is identified. `actor.agentId` is the executing agent ID for
+tools and `null` for HTTP. `source` is `api` or `tool`. These values are resolved from trusted
+execution context and cannot be supplied in request bodies. Revisions retain the full snapshot
+including text and tombstones. Revisions are permanent; ordinary event-journal retention never
+removes todo history. A no-op adds neither a
+revision nor an event. All
+operations participate in a caller's transaction and notify only after commit.
+
+All mutations of existing todos require `If-Match` with the current todo version. Missing or
+malformed headers return `400 invalid_request`; stale ones return `409 conflict` with
+`currentVersion` and the authoritative `todo`, including when it is deleted. Unknown IDs return
+`404 not_found`. Invalid bodies, unsupported fields, invalid list scope, or malformed paging
+parameters return `400 invalid_request`. Creation and Surface member mutations do not use `If-Match`.
+
+### Todo routes
+
+The collection prefix is `/v0/surfaces/todo/:surfaceId`. There is no generic single-Surface read
+route: `GET /v0/surfaces` supplies the catalog; the typed prefix reads one list's todo data.
+Every operation checks the Surface and scopes todo and revision lookups to that instance.
+Unknown Surfaces and todos or revisions belonging to a different Surface return `404 not_found`.
+Active ordering, creation retry IDs, and history are isolated to their Surface.
+
+- `GET` lists `200 { "todos": [...], "cursor": "..." }`. Optional `scope` is `active` (default),
+  `completed`, `deleted`, or `all`. Active scope loads every active todo, sorted by `orderKey`
+  then ID, without paging. Completed and deleted scopes sort newest `completedAt` and
+  `deletedAt` first, respectively, then ID. `all` groups active, completed, and deleted in
+  that order with the same within-group ordering. The cursor precedes snapshot reads.
+- `POST` accepts `{ "text": "Pick up groceries", "id": "...", "mutationId": "..." }`. `id`
+  and `mutationId` are optional. Creation appends an active todo and returns
+  `201 { "todo": {...} }`, emitting shared `todo.created`. A repeated supplied ID returns the current todo
+  unchanged with `201`, even after deletion or restart, and emits no event; other valid fields
+  are ignored. This ID is the creation retry key; `mutationId` remains only an echo.
+- `GET /:todoId` returns `200 { "todo": {...} }`, including deleted tombstones.
+- `PATCH /:todoId` accepts `{ "text": "...", "status": "completed", "mutationId": "..." }`.
+  At least one of `text` or `status` is required. Status is `active`, `completed`, or `deleted`.
+  Omitting it keeps the current status. Text may be edited in any state. Moving an inactive
+  todo to `active` clears both lifecycle timestamps and appends a fresh key at the active tail.
+  Moving to `completed` clears the key and deletion timestamp and sets a new completion time.
+  Moving to `deleted` clears the key, sets a new deletion time, and retains any completion time.
+  Repeating the current status preserves its timestamps and key. Callers cannot supply audit
+  timestamps or historical versions. To apply an old revision, read its fields, then use this
+  ordinary update with the current `If-Match`; use ordinary reorder for active placement.
+  An identical edit is a no-op. Returns `200 { "todo": {...} }` and emits shared `todo.updated`
+  for a change.
+- `POST /:todoId/reorder` accepts `{ "afterId": "...", "mutationId": "..." }`, with
+  `afterId: null` meaning first. Only an active todo may move, and a non-null anchor must be a
+  different active todo. Completed or deleted targets and inactive, unknown, or self anchors
+  return `409 conflict` with the current target todo. Only the moved key changes; neighbours
+  keep their keys. The response is `200 { "todo": {...} }`; a change emits `todo.updated`.
+  Moving to the current position is a no-op and does not consume a version.
+- `DELETE /:todoId` accepts `{}` or `{ "mutationId": "..." }`, marks the todo deleted, clears
+  its key, and returns `200 { "todo": {...} }`. Already deleted is a no-op after checking
+  `If-Match`. A change emits `todo.updated`; deletion never removes a revision.
+- `GET /:todoId/versions` returns `200` with `versions` (immutable revisions, oldest first) and
+  `nextAfterVersion` (a UUIDv7 or `null`). `afterVersion` is an optional exclusive
+  UUIDv7 revision cursor belonging to this todo; unknown cursors return `404 not_found`.
+  `limit` is optional, default 100, from 1 through 200. `nextAfterVersion` names this page's
+  last revision when another page exists, otherwise `null`. Appending revisions never changes
+  prior pages; clients may continue pagination while mutations occur.
+- `GET /:todoId/versions/:version` returns `200 { "revision": {...} }` for that immutable
+  revision. Unknown versions return `404 not_found`.
+
+There are no dedicated restore, unarchive, or revert routes or tools. History reads and ordinary
+updates allow any prior editable state to be applied without rewriting its original revision.
+
+### Surface tools and events
+
+Every ordinary agent model receives fixed common tools `list_surfaces`, `list_todos`,
+`create_todo`, `update_todo`, `reorder_todo`, `delete_todo`, and `list_todo_versions`.
+They call the same strict typed operations as the API.
+Todo mutation tools supply the current version they read, and receive an explicit conflict on a
+stale version rather than silently overwriting. `list_surfaces` lists instance IDs, types, names,
+and nested members. Active admin bots additionally receive the type-specific `create_todo_surface`
+tool, accepting `name` and optional absolute `imagePath`, plus `add_surface_user` and
+`remove_surface_user`, accepting `surfaceId` and `userId` (null only for standalone).
+These tools require an actual active admin bot, checked both at tool selection and execution;
+ordinary agents and non-admin or archived bots cannot invoke them. Images are read through the
+ordinary Compute filesystem permission boundary, with reviewed elevation for outside-workspace
+or symlink targets. Creation makes an independent list;
+it joins the identified person the agent is working for, or the standalone person, and creates
+no member when a team agent has no identified person. Adding a user appends the Surface to that
+person's sidebar; removing them leaves data and history intact. Team targets must be existing
+local members who can sign in, not exported-bot guests. Admin changes use the same idempotence,
+versions, and shared events as self join/leave. Every todo tool requires `surfaceId`.
+Tools otherwise never join, leave, or reorder anyone's sidebar. Reading or modifying todos never joins
+the caller automatically. Read tools require no review; mutation tools own ordinary shared Auto
+review and run within the current permission boundary. Durable tool
+replay returns the previously committed result without appending another revision or event.
+
+`surface.updated` carries `surfaceId`, `previousVersion`, `version`, `changes` (the complete new
+`members` plus `updatedAt`), and optional `mutationId`. It is shared so everyone sees the joined
+people. It covers joining, leaving, and reordering; there are no separate member events.
+`todo.created` carries the full `todo` and optional `mutationId`.
+`todo.updated` carries `surfaceId`, `todoId`, `previousVersion`, `version`, `changes` (the
+changed mutable fields, always including `updatedAt`), and optional `mutationId`. All todo events
+are shared. Consumers follow normal version-chain reconciliation and refetch on gaps.
+
+Desktop bootstrap adds optional `surfaces` (the complete catalog with nested members), exactly
+as the list route returns. No todos or revision history are loaded into desktop bootstrap;
+opening Todo fetches its list with its snapshot cursor.
+
 ## Tasks
 
 A task is a bot-like continuous chat for one piece of work. Like a bot it is created with exactly
@@ -8319,6 +8531,9 @@ Response — `200`:
     "taskMemberships": [
         /* the caller's memberships, in the caller's order */
     ],
+    "surfaces": [
+        /* the full Surface instance catalog, ascending ID */
+    ],
     "archivedAgents": [
         /* the most recently archived agents of those projects and workspaces, newest first */
     ],
@@ -8356,6 +8571,9 @@ Response — `200`:
 - `taskMemberships` — the caller's memberships, in the caller's own order, exactly as
   `GET /v0/tasks` returns them. A client renders the caller's task list by following this order
   into `tasks`. Additive; absent together with `tasks`.
+- `surfaces` — exactly the catalog with nested members from `GET /v0/surfaces`. Additive and
+  absent on daemons without Surface support. Follow shared `surface.updated` from the bootstrap cursor.
+  Todo data and revision history are loaded on demand through the Todo Surface endpoints.
 - `archivedAgents` — the archived agents that would otherwise belong to the included projects'
   and workspaces' `agents` series, as full agent objects, newest `archivedAt` first with the
   agent ID as the tie-breaker. Each carries the `workspaceId` of its owner, which is the

@@ -3,6 +3,28 @@
 A typed client for the Happy agent HTTP API, specified endpoint by endpoint in
 `packages/happy-agent/API.md`.
 
+Surfaces are named instances of predefined shared features. `createSurface()` creates a todo
+list with its own CUID2 ID, name, and optional managed image. `listSurfaces()` returns the catalog with `members`
+nested inside every Surface, `[]` when nobody joined. Each member's `orderKey` places that
+Surface in that person's sidebar. `joinSurface()`, `leaveSurface()`, and `reorderSurface()`
+change only the caller's member record. Standalone members have `userId: null`, as in the
+profile; team members use their installation-local Happy user ID. Desktop bootstrap's optional `surfaces`
+field composes these same objects. Older daemons return `404` or `501` for the catalog. Follow
+shared `surface.updated` and use its normal version chain to reconcile the complete member array.
+
+The first Surface type is Todo, served at `/v0/surfaces/todo/:surfaceId`. Every todo method takes
+the Surface ID first. `listTodos(surfaceId)` loads every active todo
+in fractional key order; use `scope: "completed"`, `"deleted"`, or `"all"` for other states.
+`createTodo()` appends; supply an ID to resolve an uncertain creation result. `updateTodo()`
+edits text or status, and `reorderTodo()` moves active items only. `deleteTodo()` retains a
+tombstone; updating an inactive todo to `status: "active"` appends it at the end. Every mutation of an existing todo takes
+`ifMatch` with its current version. `listTodoVersions()` and `getTodoVersion()` expose permanent
+full revisions with trusted actor and source details. To apply a previous state, read its fields
+and use ordinary update and reorder operations with the current version. There is no separate
+restoring command. Todo access never joins the caller.
+Follow shared `todo.created` and `todo.updated` from the list cursor, refetching on a version gap.
+The client exposes these events without adding an automatic Todo store to `HappyReducer`.
+
 `HappyAgentClient` is built from an endpoint and a bearer token. The token may be a function called
 for every request, so refreshed credentials apply without a new client; it may be omitted only to
 call `getAuthentication()` before signing in.

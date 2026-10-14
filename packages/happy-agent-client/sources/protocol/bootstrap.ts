@@ -19,6 +19,7 @@ import type { BackgroundProcess } from "./processes.js";
 import { profileSchema } from "./profile.js";
 import { projectSchema } from "./projects.js";
 import { taskMembershipSchema, taskSchema } from "./tasks.js";
+import { surfaceSchema } from "./surfaces.js";
 import type { AgentUsageResponse } from "./usage.js";
 import { storedUserSettingSchema } from "./userSettings.js";
 import { workspaceSchema } from "./workspaces.js";
@@ -80,6 +81,8 @@ export const desktopBootstrapResponseSchema = Type.Object({
     taskMemberships: Type.Optional(Type.Array(taskMembershipSchema)),
     /** Every task, archived ones included, oldest first. Absent on older compatible daemons. */
     tasks: Type.Optional(Type.Array(taskSchema)),
+    /** The predefined catalog. Absent on older daemons without Surfaces. */
+    surfaces: Type.Optional(Type.Array(surfaceSchema)),
     /**
      * The caller's own user settings, exactly as `GET /v0/user-settings` lists them. Absent on
      * daemons without user settings; keep those preferences on the device there.

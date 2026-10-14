@@ -77,6 +77,23 @@ import type {
     UnarchiveTaskRequest,
 } from "./protocol/tasks.js";
 import type {
+    CreateSurfaceRequest,
+    CreateTodoRequest,
+    ReorderSurfaceRequest,
+    ReorderTodoRequest,
+    SurfaceId,
+    SurfaceListResponse,
+    SurfaceMemberRequest,
+    SurfaceResponse,
+    TodoListResponse,
+    TodoListScope,
+    TodoMutationRequest,
+    TodoResponse,
+    TodoVersionListResponse,
+    TodoVersionResponse,
+    UpdateTodoRequest,
+} from "./protocol/surfaces.js";
+import type {
     CloudAccessTokenResponse,
     CloudAuthorizingResponse,
     CloudConnectedResponse,
@@ -1462,6 +1479,189 @@ export class HappyAgentClient {
             path: `v0/tasks/${encodeURIComponent(taskId)}/unarchive`,
             json: bodyOf(options),
             ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    // Surfaces
+
+    /** `GET /v0/surfaces` — shared catalog, with members nested in each Surface. */
+    async listSurfaces(options: RequestOptions = {}): Promise<SurfaceListResponse> {
+        return await this.#json({ method: "GET", path: "v0/surfaces", signal: options.signal });
+    }
+
+    async createSurface(
+        request: CreateSurfaceRequest,
+        options: RequestOptions = {},
+    ): Promise<SurfaceResponse> {
+        return await this.#json({
+            method: "POST",
+            path: "v0/surfaces",
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    async getSurfaceImage(
+        surfaceId: SurfaceId,
+        options: ConditionalRequestOptions = {},
+    ): Promise<BinaryContent | null> {
+        return await this.#binary({
+            method: "GET",
+            path: `v0/surfaces/${encodeURIComponent(surfaceId)}/image`,
+            ifNoneMatch: options.ifNoneMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Joining appends to the caller's sidebar. It never changes Surface data. */
+    async joinSurface(
+        surfaceId: SurfaceId,
+        options: RequestOptions & SurfaceMemberRequest = {},
+    ): Promise<SurfaceResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/${encodeURIComponent(surfaceId)}/join`,
+            json: bodyOf(options),
+            signal: options.signal,
+        });
+    }
+
+    async leaveSurface(
+        surfaceId: SurfaceId,
+        options: RequestOptions & SurfaceMemberRequest = {},
+    ): Promise<SurfaceResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/${encodeURIComponent(surfaceId)}/leave`,
+            json: bodyOf(options),
+            signal: options.signal,
+        });
+    }
+
+    /** Moves only the caller's member record; `afterId: null` means first. */
+    async reorderSurface(
+        surfaceId: SurfaceId,
+        request: ReorderSurfaceRequest,
+        options: RequestOptions = {},
+    ): Promise<SurfaceResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/${encodeURIComponent(surfaceId)}/reorder`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** Loads every active todo by default, with a snapshot cursor for following changes. */
+    async listTodos(
+        surfaceId: SurfaceId,
+        options: RequestOptions & { readonly scope?: TodoListScope } = {},
+    ): Promise<TodoListResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}`,
+            query: { scope: options.scope },
+            signal: options.signal,
+        });
+    }
+
+    /** Appends; a supplied ID safely resolves an uncertain creation outcome. */
+    async createTodo(
+        surfaceId: SurfaceId,
+        request: CreateTodoRequest,
+        options: RequestOptions = {},
+    ): Promise<TodoResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** Deleted tombstones remain readable by ID. */
+    async getTodo(
+        surfaceId: SurfaceId,
+        todoId: Cuid2,
+        options: RequestOptions = {},
+    ): Promise<TodoResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}/${encodeURIComponent(todoId)}`,
+            signal: options.signal,
+        });
+    }
+
+    async updateTodo(
+        surfaceId: SurfaceId,
+        todoId: Cuid2,
+        request: UpdateTodoRequest,
+        options: VersionedRequestOptions,
+    ): Promise<TodoResponse> {
+        return await this.#json({
+            method: "PATCH",
+            path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}/${encodeURIComponent(todoId)}`,
+            json: request,
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Only active todos can move; completed and deleted targets reject reordering. */
+    async reorderTodo(
+        surfaceId: SurfaceId,
+        todoId: Cuid2,
+        request: ReorderTodoRequest,
+        options: VersionedRequestOptions,
+    ): Promise<TodoResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}/${encodeURIComponent(todoId)}/reorder`,
+            json: request,
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Deletion retains the text and every immutable revision. */
+    async deleteTodo(
+        surfaceId: SurfaceId,
+        todoId: Cuid2,
+        options: VersionedRequestOptions & TodoMutationRequest,
+    ): Promise<TodoResponse> {
+        return await this.#json({
+            method: "DELETE",
+            path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}/${encodeURIComponent(todoId)}`,
+            json: bodyOf(options),
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Permanent revisions, oldest first; the cursor belongs to this todo's version history. */
+    async listTodoVersions(
+        surfaceId: SurfaceId,
+        todoId: Cuid2,
+        options: RequestOptions & { readonly afterVersion?: string; readonly limit?: number } = {},
+    ): Promise<TodoVersionListResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}/${encodeURIComponent(todoId)}/versions`,
+            query: { afterVersion: options.afterVersion, limit: options.limit },
+            signal: options.signal,
+        });
+    }
+
+    async getTodoVersion(
+        surfaceId: SurfaceId,
+        todoId: Cuid2,
+        version: string,
+        options: RequestOptions = {},
+    ): Promise<TodoVersionResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}/${encodeURIComponent(todoId)}/versions/${encodeURIComponent(version)}`,
             signal: options.signal,
         });
     }

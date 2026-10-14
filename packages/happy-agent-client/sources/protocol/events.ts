@@ -42,6 +42,14 @@ import {
     secretSchema,
 } from "./secrets.js";
 import { taskMembershipSchema, taskSchema } from "./tasks.js";
+import {
+    surfaceIdSchema,
+    surfaceOrderKeySchema,
+    surfaceSchema,
+    todoSchema,
+    todoTextSchema,
+} from "./surfaces.js";
+import { Nullable } from "./common.js";
 import type { Terminal } from "./terminals.js";
 import type { AgentContextUsage } from "./usage.js";
 import type { Workspace } from "./workspaces.js";
@@ -184,6 +192,51 @@ export const taskMembershipPayloadSchema = Type.Object({
     mutationId: Type.Optional(mutationIdSchema),
 });
 export type TaskMembershipPayload = Static<typeof taskMembershipPayloadSchema>;
+
+/** A complete replacement of the Surface's nested members after a join, leave, or reorder. */
+export const surfaceUpdatedPayloadSchema = Type.Object({
+    changes: Type.Pick(surfaceSchema, ["members", "updatedAt"]),
+    mutationId: Type.Optional(mutationIdSchema),
+    previousVersion: resourceVersionSchema,
+    surfaceId: surfaceIdSchema,
+    version: resourceVersionSchema,
+});
+export type SurfaceUpdatedPayload = Static<typeof surfaceUpdatedPayloadSchema>;
+export const surfaceCreatedPayloadSchema = Type.Object({
+    surface: surfaceSchema,
+    mutationId: Type.Optional(mutationIdSchema),
+});
+export type SurfaceCreatedPayload = Static<typeof surfaceCreatedPayloadSchema>;
+
+export const todoCreatedPayloadSchema = Type.Object({
+    mutationId: Type.Optional(mutationIdSchema),
+    todo: todoSchema,
+});
+export type TodoCreatedPayload = Static<typeof todoCreatedPayloadSchema>;
+
+/** Mutable fields only; every revision updates its timestamp. */
+export const todoUpdatedPayloadSchema = Type.Object({
+    surfaceId: surfaceIdSchema,
+    changes: Type.Object({
+        completedAt: Type.Optional(Nullable(timestampSchema)),
+        deletedAt: Type.Optional(Nullable(timestampSchema)),
+        orderKey: Type.Optional(Nullable(surfaceOrderKeySchema)),
+        status: Type.Optional(
+            Type.Union([
+                Type.Literal("active"),
+                Type.Literal("completed"),
+                Type.Literal("deleted"),
+            ]),
+        ),
+        text: Type.Optional(todoTextSchema),
+        updatedAt: timestampSchema,
+    }),
+    mutationId: Type.Optional(mutationIdSchema),
+    previousVersion: resourceVersionSchema,
+    todoId: cuid2Schema,
+    version: resourceVersionSchema,
+});
+export type TodoUpdatedPayload = Static<typeof todoUpdatedPayloadSchema>;
 
 /** An artifact was created with its first version. */
 export const artifactCreatedPayloadSchema = Type.Object({
@@ -420,6 +473,10 @@ export type HappyAgentEvent =
     | EventEnvelope<"task.joined", TaskMembershipPayload>
     | EventEnvelope<"task.reordered", TaskMembershipPayload>
     | EventEnvelope<"task.left", TaskMembershipPayload>
+    | EventEnvelope<"surface.updated", SurfaceUpdatedPayload>
+    | EventEnvelope<"surface.created", SurfaceCreatedPayload>
+    | EventEnvelope<"todo.created", TodoCreatedPayload>
+    | EventEnvelope<"todo.updated", TodoUpdatedPayload>
     | EventEnvelope<"artifact.created", ArtifactCreatedPayload>
     | EventEnvelope<"artifact.updated", ArtifactUpdatedPayload>
     | EventEnvelope<"artifact.deleted", ArtifactDeletedPayload>
