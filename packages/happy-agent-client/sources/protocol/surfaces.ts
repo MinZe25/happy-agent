@@ -55,9 +55,15 @@ export const surfaceResponseSchema = Type.Object({
 });
 export type SurfaceResponse = Static<typeof surfaceResponseSchema>;
 
-export const createSurfaceRequestSchema = Type.Object(
+const surfaceCreationFields = {
+    id: Type.Optional(surfaceIdSchema),
+    name: surfaceSchema.properties.name,
+    mutationId: Type.Optional(mutationIdSchema),
+};
+
+export const createTodoSurfaceRequestSchema = Type.Object(
     {
-        id: Type.Optional(surfaceIdSchema),
+        ...surfaceCreationFields,
         image: Type.Optional(
             Type.Object(
                 { data: Type.String({ minLength: 1, maxLength: 11_184_812 }) },
@@ -65,11 +71,17 @@ export const createSurfaceRequestSchema = Type.Object(
             ),
         ),
         type: Type.Literal("todo"),
-        name: surfaceSchema.properties.name,
-        mutationId: Type.Optional(mutationIdSchema),
     },
     { additionalProperties: false },
 );
+export const createSeparatorSurfaceRequestSchema = Type.Object(
+    { ...surfaceCreationFields, type: Type.Literal("separator") },
+    { additionalProperties: false },
+);
+export const createSurfaceRequestSchema = Type.Union([
+    createTodoSurfaceRequestSchema,
+    createSeparatorSurfaceRequestSchema,
+]);
 export type CreateSurfaceRequest = Static<typeof createSurfaceRequestSchema>;
 
 export const surfaceMemberRequestSchema = Type.Object(

@@ -6312,15 +6312,15 @@ Response — `200`: `{ "bot": { ... } }` with `avatar` `null`.
 
 A Surface is an instance of a predefined feature with its own typed API, rather than an arbitrary
 document or agent. Every instance has a CUID2 ID and a human name. Multiple independent todo-list
-Surfaces may exist; each owns its todos, history, and members. The supported type is `todo`;
-calendars are a future type, not a current endpoint. The catalog initially has no instances.
+Surfaces may exist; each owns its todos, history, and members. Supported types are `todo` and
+`separator`; calendars are a future type, not a current endpoint. The catalog initially has no instances.
 All onboarded authenticated people may read and modify Surface data, whether
 or not they joined. Joining and leaving control only the person's sidebar. No Surface operation
 creates a workspace, agent, or chat.
 
 ### Surface catalog and members
 
-A Surface object has `id` (CUID2), `type` (`todo` today; future types are additive),
+A Surface object has `id` (CUID2), `type` (`todo` or `separator`; future types are additive),
 `name` (human display text), `image` (`null` or `{ "thumbhash": "..." }`), `members`,
 `version` (UUIDv7), and `updatedAt` (epoch milliseconds).
 Surface IDs always use the daemon generator's 24-character CUID2 form: a lowercase letter
@@ -6377,6 +6377,16 @@ images return `400 invalid_request` without creating anything. `GET /v0/surfaces
 serves those bytes with `Content-Type: image/webp`, a content-derived `ETag`, and the shared
 private image cache policy; matching `If-None-Match` returns `304`. Missing images or Surfaces
 return `404 not_found`. There is no caller-provided path or URL in a Surface response.
+
+A separator is a named, contentless section in a person's Surface sidebar. To create one,
+`POST /v0/surfaces` accepts `{ "type": "separator", "name": "Work", "id": "...",
+"mutationId": "..." }`, with the same optional ID/retry and mutation-echo rules. It uses the same
+creator attribution, join behavior, member ordering, version, and catalog events as other
+Surfaces. Its `image` is always `null`; supplying `image` in separator creation, even as `null`,
+returns `400 invalid_request`. Separators have no content endpoint, do not contain or own the
+Surfaces following them, and do not change their access or membership. They can be independently
+joined, left, and moved with the ordinary Surface routes. Their image endpoint returns
+`404 not_found`.
 
 `POST /v0/surfaces/:surfaceId/join` and `/leave` accept `{}` or `{ "mutationId": "..." }` and
 return `200 { "surface": {...} }`. Unknown Surface IDs return `404 not_found`.
@@ -6461,8 +6471,9 @@ parameters return `400 invalid_request`. Creation and Surface member mutations d
 
 The collection prefix is `/v0/surfaces/todo/:surfaceId`. There is no generic single-Surface read
 route: `GET /v0/surfaces` supplies the catalog; the typed prefix reads one list's todo data.
-Every operation checks the Surface and scopes todo and revision lookups to that instance.
+Every operation checks that the Surface has type `todo` and scopes todo and revision lookups to that instance.
 Unknown Surfaces and todos or revisions belonging to a different Surface return `404 not_found`.
+Using a non-todo Surface with a todo route also returns `404 not_found`.
 Active ordering, creation retry IDs, and history are isolated to their Surface.
 
 - `GET` lists `200 { "todos": [...], "cursor": "..." }`. Optional `scope` is `active` (default),
@@ -6530,6 +6541,10 @@ and nested members. Active admin bots additionally receive the type-specific `cr
 tool, accepting `name`, required explicit `creatorUserId` (an installation-local Happy user ID
 or `null`), and optional absolute `imagePath`, plus `add_surface_user` and
 `remove_surface_user`, accepting `surfaceId` and `userId` (null only for standalone).
+They also receive `create_separator_surface`, accepting only `name` and required explicit
+`creatorUserId`. It creates a separator with the same creator validation and join rules;
+it has no image parameter or filesystem access. Separator creation is durable and requires
+ordinary shared-data Auto review, without Full-access elevation.
 These tools require an actual active admin bot, checked both at tool selection and execution;
 ordinary agents and non-admin or archived bots cannot invoke them. Images are read through the
 ordinary Compute filesystem permission boundary, with reviewed elevation for outside-workspace
