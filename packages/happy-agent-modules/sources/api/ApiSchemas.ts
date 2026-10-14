@@ -12,6 +12,7 @@ export {
 } from "@slopus/happy-agent-client";
 
 import { createTerminalInputSchema, resizeTerminalInputSchema } from "../terminals/index.js";
+import { userSettingValueSchema } from "../userSettings/index.js";
 
 /** A configured runner's ID. */
 const runnerIdSchema = Type.String({ pattern: "^[a-z][a-z0-9_-]{0,63}$" });
@@ -295,6 +296,16 @@ export const draftBodySchema = Type.Object(
             ]),
         ]),
         mutationId: Type.Optional(mutationIdSchema),
+        updatedAt: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+    },
+    { additionalProperties: false },
+);
+
+/** One setting write. The value's schema bounds its depth, so checking it never recurses deeper. */
+export const userSettingBodySchema = Type.Object(
+    {
+        mutationId: Type.Optional(mutationIdSchema),
+        value: userSettingValueSchema,
         updatedAt: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
     },
     { additionalProperties: false },

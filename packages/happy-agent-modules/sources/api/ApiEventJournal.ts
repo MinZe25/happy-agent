@@ -91,7 +91,9 @@ export class ApiEventJournal {
         if (owner !== undefined) return owner === userId;
         // Unowned personal state belongs to standalone mode, never to a team member.
         return (
-            (event.type !== "happy.integration.updated" && event.type !== "agent.draft.updated") ||
+            (event.type !== "happy.integration.updated" &&
+                event.type !== "agent.draft.updated" &&
+                event.type !== "user_settings.updated") ||
             userId === undefined
         );
     }

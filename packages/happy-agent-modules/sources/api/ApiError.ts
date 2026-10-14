@@ -22,6 +22,7 @@ export const apiErrorCodeSchema = Type.Union([
     Type.Literal("sharing_full"),
     Type.Literal("sharing_not_enrolled"),
     Type.Literal("sharing_unavailable"),
+    Type.Literal("settings_full"),
     Type.Literal("storage_full"),
     Type.Literal("too_large"),
     Type.Literal("too_many_streams"),

@@ -86,6 +86,7 @@ import { TitlesModule } from "../titles/index.js";
 import { ToolDiscoveryModule } from "../toolDiscovery/index.js";
 import { UsageModule } from "../usage/index.js";
 import { UserInputModule } from "../userInput/index.js";
+import { UserSettingsModule } from "../userSettings/index.js";
 import { WorkflowsModule } from "../workflows/index.js";
 import { WorkspacesModule } from "../workspaces/index.js";
 import { checkModuleToolParameters } from "./checkModuleToolParameters.js";
@@ -194,6 +195,7 @@ export interface HappyAgentRuntimeModules {
     readonly toolDiscovery: ToolDiscoveryModule;
     readonly usage: UsageModule;
     readonly userInput: UserInputModule;
+    readonly userSettings: UserSettingsModule;
     readonly workflows: WorkflowsModule;
     readonly workspaces: WorkspacesModule;
 }
@@ -533,6 +535,7 @@ export async function startHappyAgentRuntime(
         const profile = new ProfileModule<LibSQLDatabase>(config, bots);
         const team = new TeamModule<LibSQLDatabase>(config, profile);
         registerShutdown("team", async () => team.close());
+        const userSettings = new UserSettingsModule(team);
         const artifactData = new ArtifactDataModule(config, artifacts, profile, team, bots);
         registerShutdown(
             "artifact-data",
@@ -662,6 +665,7 @@ export async function startHappyAgentRuntime(
             bridges,
             exportedBots,
             scheduling,
+            userSettings,
         );
         api = apiModule;
 
@@ -725,6 +729,7 @@ export async function startHappyAgentRuntime(
             toolDiscovery,
             usage,
             userInput,
+            userSettings,
             workflows,
             workspaces,
         };
@@ -755,6 +760,7 @@ export async function startHappyAgentRuntime(
             // Team stores exported bots' guests in both modes; standalone adds its one profile.
             team,
             ...(team.enabled ? [] : [profile]),
+            userSettings,
             git,
             durableFunctions,
             botSettings,

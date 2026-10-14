@@ -11,6 +11,18 @@ describe("ApiEventJournal", () => {
         expect(journal.visibleTo(event, undefined)).toBe(true);
     });
 
+    it("shows a user settings change only to its owner, and standalone ones to no member", () => {
+        const journal = new ApiEventJournal();
+        const standalone = journal.append("user_settings.updated", { setting: "standalone" });
+        const alice = journal.append("user_settings.updated", { setting: "alice" }, 1, "alice123");
+        expect(journal.visibleTo(standalone, "alice123")).toBe(false);
+        expect(journal.visibleTo(standalone, undefined)).toBe(true);
+        expect(journal.visibleTo(alice, "alice123")).toBe(true);
+        expect(journal.visibleTo(alice, "bob456")).toBe(false);
+        expect(journal.visibleTo(alice, undefined)).toBe(false);
+        expect(alice).not.toHaveProperty("ownerId");
+    });
+
     it("keeps private ownership off the wire and retains global cursor progress", () => {
         const journal = new ApiEventJournal(3, () => 1_755_400_000_000);
         const origin = journal.cursor();

@@ -227,6 +227,11 @@ import {
 import { UsageModule, type UsageCurrentContext, type UsageRunSummary } from "../usage/index.js";
 import { UserInputModule, type UserInputEvent } from "../userInput/index.js";
 import {
+    STANDALONE_USER_SETTINGS_OWNER,
+    UserSettingsError,
+    UserSettingsModule,
+} from "../userSettings/index.js";
+import {
     WorkspaceInputError,
     WorkspaceLifecycleError,
     WorkspacesModule,
@@ -291,6 +296,7 @@ import {
     startCloudAuthorizationRequestSchema,
     terminalCreateBodySchema,
     terminalResizeBodySchema,
+    userSettingBodySchema,
     workspaceCreateBodySchema,
 } from "./ApiSchemas.js";
 import { WorkspaceProxy } from "./WorkspaceProxy.js";
@@ -314,6 +320,9 @@ interface ArchivedOwnerAgent {
     readonly archivedAt: number;
 }
 const MAX_JSON_BODY_BYTES = 48 * 1024 * 1024;
+// One setting write carries a value of at most 64 KiB as compact JSON. A body sixteen times that
+// leaves room for any reasonable spacing and escaping, and anything larger is refused unparsed.
+const MAX_USER_SETTING_BODY_BYTES = 1024 * 1024;
 const MAX_SSE_BUFFER_BYTES = 64 * 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
 const MAX_TERMINAL_WIRE_MESSAGE_BYTES = 4 * 1024 * 1024 + 20;
@@ -468,6 +477,7 @@ export class ApiModule implements AgentModule {
     readonly #artifactData: ApiArtifactData | undefined;
     readonly #chatMedia: ChatMediaModule | undefined;
     readonly #exportedBots: ExportedBotsModule | undefined;
+    readonly #userSettings: UserSettingsModule | undefined;
     readonly #live: LiveModule | undefined;
     readonly #runners: RunnersModule | undefined;
     readonly #projects: ProjectsModule;
@@ -608,6 +618,7 @@ export class ApiModule implements AgentModule {
         bridges?: BridgesModule,
         exportedBots?: ExportedBotsModule,
         scheduling?: SchedulingModule,
+        userSettings?: UserSettingsModule,
     ) {
         this.#abort = abort;
         this.#config = config;
@@ -649,6 +660,7 @@ export class ApiModule implements AgentModule {
         this.#chatMedia = chatMedia;
         this.#bridges = bridges;
         this.#exportedBots = exportedBots;
+        this.#userSettings = userSettings;
     }
 
     readonly beforeStart = async (
@@ -1365,6 +1377,33 @@ export class ApiModule implements AgentModule {
                     }
                     throw error;
                 }
+                return;
+            }
+            if (
+                this.#userSettings !== undefined &&
+                request.method === "GET" &&
+                url.pathname === "/v0/user-settings"
+            ) {
+                // Capture first, so a write concurrent with the read is replayed after it.
+                const cursor = this.#journal.cursor();
+                sendJson(response, 200, {
+                    settings: await this.#userSettings.list(ctx),
+                    cursor,
+                });
+                return;
+            }
+            if (
+                this.#userSettings !== undefined &&
+                (request.method === "GET" || request.method === "PUT") &&
+                url.pathname.startsWith("/v0/user-settings/")
+            ) {
+                await this.#handleUserSettingRoute(
+                    ctx,
+                    request,
+                    response,
+                    url.pathname.slice("/v0/user-settings/".length),
+                    this.#userSettings,
+                );
                 return;
             }
             if (request.method === "GET" && url.pathname === "/v0/profile") {
@@ -2439,6 +2478,18 @@ export class ApiModule implements AgentModule {
                 this.#convertSecretEvent(event);
             }),
         );
+        if (this.#userSettings !== undefined)
+            this.#unsubscribe.push(
+                this.#userSettings.onEvent((_eventCtx, event) => {
+                    // The payload never names the owner; the journal keeps it to filter readers.
+                    this.#journal.append(
+                        "user_settings.updated",
+                        { setting: event.setting },
+                        Date.now(),
+                        event.owner === STANDALONE_USER_SETTINGS_OWNER ? undefined : event.owner,
+                    );
+                }),
+            );
     }
 
     #convertSecretEvent(event: SecretEvent): void {
@@ -6693,6 +6744,44 @@ export class ApiModule implements AgentModule {
         }
     }
 
+    /** Read one of the caller's settings, or set or clear it last-write-wins. */
+    async #handleUserSettingRoute(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        key: string,
+        userSettings: UserSettingsModule,
+    ): Promise<void> {
+        try {
+            if (request.method === "GET") {
+                sendJson(response, 200, { setting: await userSettings.get(ctx, key) });
+                return;
+            }
+            const body = await bodyAs(
+                request,
+                userSettingBodySchema,
+                "user setting",
+                MAX_USER_SETTING_BODY_BYTES,
+            );
+            const setting = await this.#withMutationId(
+                body.mutationId,
+                async () =>
+                    await userSettings.save(ctx, key, {
+                        value: body.value,
+                        ...(body.updatedAt === undefined ? {} : { updatedAt: body.updatedAt }),
+                    }),
+            );
+            sendJson(response, 200, { setting });
+        } catch (error: unknown) {
+            if (!(error instanceof UserSettingsError)) throw error;
+            throw new ApiError(
+                error.code === "too_large" ? 413 : error.code === "settings_full" ? 409 : 400,
+                error.code,
+                error.message,
+            );
+        }
+    }
+
     async #handleProfilePatch(
         ctx: Context,
         request: IncomingMessage,
@@ -7039,6 +7128,9 @@ export class ApiModule implements AgentModule {
             ],
             archivedAgents: await this.#archivedAgentResources(ctx, archived),
             ...(await this.#taskBootstrap(ctx)),
+            ...(this.#userSettings === undefined
+                ? {}
+                : { userSettings: await this.#userSettings.list(ctx) }),
             cursor,
         };
     }

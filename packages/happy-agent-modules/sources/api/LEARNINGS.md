@@ -90,6 +90,17 @@ journal pulls, replay, and live delivery keep private payloads off other users' 
 Standalone drafts remain in agent metadata, and existing global drafts are never assigned to
 team users. Ownership stays internal: endpoints, payloads, and the published client are unchanged.
 
+## User settings pass through opaque and owner-filtered
+
+Per-person preferences such as completion sounds and muted or hidden bots lived on one device.
+The API now serves the user settings module's opaque per-key settings at `/v0/user-settings` and
+in desktop bootstrap, owned by the caller and never by a route parameter. The key is taken from
+the path exactly as sent, so a percent-encoded key is refused rather than decoded.
+`user_settings.updated` is appended with its owner and never names it; the journal hides an
+unowned one from every team member, as it does drafts and the Happy integration. The addition does
+not raise the protocol version: clients detect it by the bootstrap field, and older daemons
+answer `404`.
+
 ## Filter archived agents before building catalog resources
 
 Desktop bootstrap used to build every attached agent's activity and resource, discard archived

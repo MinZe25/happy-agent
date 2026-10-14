@@ -43,6 +43,9 @@ export * from "./artifacts/index.js";
 // Artifact data: realtime key-value stores HTML artifacts use to become small shared apps.
 export * from "./artifactData/index.js";
 
+// User settings: each person's opaque key-value preferences, synced across their devices.
+export * from "./userSettings/index.js";
+
 // Tailcat: stable account-free internet exposure, controlled only by active admin bots.
 export * from "./tailcat/index.js";
 export * from "./connections/index.js";
