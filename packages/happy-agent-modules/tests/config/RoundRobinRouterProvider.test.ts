@@ -315,6 +315,69 @@ describe("RoundRobinRouterProvider", () => {
         expect(await textOf(first.run(createRootContext(), request))).toBe("first");
         expect(await textOf(second.run(createRootContext(), request))).toBe("second");
     });
+
+    it("fails over compaction after a terminal credential-recovery failure with the exact safe message", async () => {
+        // The real-session regression in codexConcurrentAuthRecovery.test.ts pins this exact
+        // provider result. This test keeps modules on their published provider dependency.
+        const failure: SessionCompaction = {
+            status: "failed",
+            kind: "inference_error",
+            message:
+                "Codex authentication could not be renewed for this account. Try again; if it keeps failing, sign in to Codex again with the same account.",
+        };
+        const attempts: string[] = [];
+        const firstState = { runs: 0 };
+        const secondState = { runs: 0 };
+        const accounts = {
+            first: new ScriptedProvider(
+                new (class extends ScriptedSession {
+                    override async compact(): Promise<SessionCompaction> {
+                        attempts.push("first");
+                        return failure;
+                    }
+                })("first", [], firstState),
+            ),
+            second: new ScriptedProvider(
+                new (class extends ScriptedSession {
+                    override async compact(): Promise<SessionCompaction> {
+                        attempts.push("second");
+                        return {
+                            status: "completed",
+                            summary: "Healthy compacted context.",
+                            preservedMessages: [],
+                            context: request.context,
+                            usage: {
+                                input: 1,
+                                output: 1,
+                                cacheRead: 0,
+                                cacheWrite: 0,
+                                totalTokens: 2,
+                            },
+                        };
+                    }
+                })("second", [], secondState),
+            ),
+        };
+        const provider = new RoundRobinRouterProvider({
+            candidates: [{ providerId: "first" }, { providerId: "second" }],
+            model: request.model!,
+            random: () => 0,
+            resolve: async (id) => accounts[id as keyof typeof accounts],
+        });
+        const session = await provider.session("agent-a", sessionOptions());
+        try {
+            const result = await session.compact(createRootContext(), { context: request.context });
+            expect(result).toMatchObject({
+                status: "completed",
+                summary: "Healthy compacted context.",
+            });
+            expect(attempts).toEqual(["first", "second"]);
+            expect(firstState.runs).toBe(0);
+            expect(secondState.runs).toBe(0);
+        } finally {
+            await session.destroy();
+        }
+    });
 });
 
 function routedProvider(

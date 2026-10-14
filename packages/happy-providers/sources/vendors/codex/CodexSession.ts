@@ -322,10 +322,21 @@ export class CodexSession extends BaseSession {
                 if (!useSse) this.websocketConnection.reset("compaction did not complete");
                 if (signal?.aborted) return { status: "cancelled", context: this.context };
                 if (isCodexUnauthorizedError(error)) {
-                    const recovered = await recoverCodexUnauthorizedCredential(
-                        this.credential,
-                        unauthorizedRecoveryStep,
-                    );
+                    let recovered;
+                    try {
+                        recovered = await recoverCodexUnauthorizedCredential(
+                            this.credential,
+                            unauthorizedRecoveryStep,
+                        );
+                    } catch {
+                        if (signal?.aborted) return { status: "cancelled", context: this.context };
+                        return {
+                            status: "failed",
+                            kind: "inference_error",
+                            message:
+                                "Codex authentication could not be renewed for this account. Try again; if it keeps failing, sign in to Codex again with the same account.",
+                        };
+                    }
                     if (recovered !== undefined) {
                         unauthorizedRecoveryStep += 1;
                         this.replaceCredential(recovered);
@@ -743,10 +754,35 @@ export class CodexSession extends BaseSession {
                 const message = error instanceof Error ? error.message : String(error);
                 const displayMessage = codexErrorMessage(error, message);
                 if (isCodexUnauthorizedError(error)) {
-                    const recovered = await recoverCodexUnauthorizedCredential(
-                        this.credential,
-                        unauthorizedRecoveryStep,
-                    );
+                    let recovered;
+                    try {
+                        recovered = await recoverCodexUnauthorizedCredential(
+                            this.credential,
+                            unauthorizedRecoveryStep,
+                        );
+                    } catch {
+                        if (signal?.aborted) {
+                            yield { type: "done", state: "cancelled" };
+                        } else {
+                            const diagnostics = classifyCodexProviderError(
+                                error,
+                                message,
+                                reportedAttempt + 1,
+                            ).diagnostics;
+                            yield {
+                                type: "done",
+                                state: "error",
+                                kind: "unknown",
+                                message:
+                                    "Codex authentication could not be renewed for this account. Try again; if it keeps failing, sign in to Codex again with the same account.",
+                                providerError: {
+                                    type: "authentication",
+                                    ...(diagnostics === undefined ? {} : { diagnostics }),
+                                },
+                            };
+                        }
+                        return;
+                    }
                     if (recovered !== undefined) {
                         unauthorizedRecoveryStep += 1;
                         this.replaceCredential(recovered);
