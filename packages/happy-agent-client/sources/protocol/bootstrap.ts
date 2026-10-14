@@ -20,6 +20,7 @@ import { profileSchema } from "./profile.js";
 import { projectSchema } from "./projects.js";
 import { taskMembershipSchema, taskSchema } from "./tasks.js";
 import type { AgentUsageResponse } from "./usage.js";
+import { storedUserSettingSchema } from "./userSettings.js";
 import { workspaceSchema } from "./workspaces.js";
 
 /**
@@ -79,6 +80,11 @@ export const desktopBootstrapResponseSchema = Type.Object({
     taskMemberships: Type.Optional(Type.Array(taskMembershipSchema)),
     /** Every task, archived ones included, oldest first. Absent on older compatible daemons. */
     tasks: Type.Optional(Type.Array(taskSchema)),
+    /**
+     * The caller's own user settings, exactly as `GET /v0/user-settings` lists them. Absent on
+     * daemons without user settings; keep those preferences on the device there.
+     */
+    userSettings: Type.Optional(Type.Array(storedUserSettingSchema)),
     /** Each project's root workspace and the workspaces directly under it. */
     workspaces: Type.Array(workspaceSchema),
 });

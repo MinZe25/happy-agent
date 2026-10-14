@@ -287,6 +287,11 @@ Artifacts are additive and do not increment the protocol version. Clients detect
 `artifact.*` events are absent on older compatible daemons, which also serve none of the artifact
 routes.
 
+User settings are additive and do not increment the protocol version. A daemon that serves them
+always includes `userSettings` in desktop bootstrap and never answers `GET /v0/user-settings` with
+`404`. Older compatible daemons omit the bootstrap field, answer the user-settings routes with
+`404`, and never emit `user_settings.updated`; clients then keep those preferences on the device.
+
 Secret requests are additive and do not increment the protocol version. Older daemons never send a
 question prompt's optional `secretRequest`. A client that does not recognize it renders the prompt
 as an ordinary free-text question; the daemon rejects any answer to it that is not the ID of an
@@ -363,7 +368,8 @@ Failed requests return an appropriate 4xx/5xx status with a JSON body:
   configured), `local_execution_disabled` (409, runners are configured, so nothing runs on the
   daemon's own machine),
   `too_large` (413), `range_not_satisfiable` (416, an artifact file `Range` outside the file),
-  `unsupported` (501), `internal` (500).
+  `settings_full` (409, a person's user settings are at their limit), `unsupported` (501),
+  `internal` (500).
 
 An error body may carry additional fields alongside `error` and `code` when the endpoint
 documents them. A `401` may carry `authentication`, described under Authentication. Unexpected
@@ -1821,6 +1827,123 @@ The request body is the image itself (`Content-Type: image/png`, `image/jpeg`, o
 ### `DELETE /v0/profile/photo`
 
 Removes the photo. Response — `200`: `{ "profile": { ... } }`.
+
+## User settings
+
+User settings are a small key-value store of opaque preferences that belongs to one person, so an
+application can keep a person's choices on the daemon and have them follow that person from device
+to device. The daemon checks only the shape and size of keys and values. It never interprets them,
+and they never reach agents, tools, or model context.
+
+**Owner.** In team mode, settings belong to the authenticated member, keyed by their
+installation-local Happy user ID. A member reads, writes, and receives events for only their own
+settings. In standalone mode, settings belong to the installation's one person. The routes and
+shapes are the same in both modes, and clients never choose an owner. A team member who has not
+saved a profile has no settings: these routes answer `401` like every other route outside
+onboarding (see Authentication), and the member starts with no settings once the profile is saved.
+Standalone settings are never assigned to a team member.
+
+Through `/v0/connections/:id/api/*`, settings belong to the remote daemon and to the person it
+authenticates. A standalone remote's one person is whoever reaches it through that connection. The
+main daemon never stores, caches, or merges a remote's settings.
+
+**Keys.** A key is 1–128 characters from `A–Z`, `a–z`, `0–9`, `.`, `_`, and `-`, starting with a
+letter or digit. Keys are compared exactly and need no percent-encoding in a path. Everything after
+`/v0/user-settings/` is the key; one that does not match this format is `400 invalid_request`.
+Applications prefix their keys with their own name and a dot, such as
+`happy-desktop.completionSound`, so that they do not collide.
+
+**Limits.** A value is at most 64 KiB (65,536 bytes) as compact UTF-8 JSON, with arrays and objects
+nested at most 32 deep. One person holds at most 1,000 keys with a value and at most 1 MiB
+(1,048,576 bytes) of those keys and their compact JSON values together, counted in UTF-8.
+
+**Clears.** A cleared key keeps its `updatedAt` and `version`, so a clear syncs like any other
+change and an older write cannot bring the value back. The daemon keeps each person's 1,000 most
+recent clears. When it forgets older ones, the newest forgotten `updatedAt` becomes a horizon: a
+write carrying an `updatedAt` older than the horizon, to a key the daemon holds nothing for, is
+ignored as stale. Forgetting a clear therefore never lets a stale device restore the value.
+
+**Keeping a copy.** Read `userSettings` from desktop bootstrap, or read `GET /v0/user-settings`,
+and follow events after that response's `cursor`. A snapshot replaces the whole local copy. For
+each `user_settings.updated`, keep the entry with the greater `version` for its key. After a cursor
+gap or daemon replacement, read the settings again. Send a change made while offline with the
+`updatedAt` of when the person made it, and adopt the entry the response returns.
+
+### The setting object
+
+```json
+{
+    "key": "happy-desktop.completionSound",
+    "value": "focused",
+    "updatedAt": 1755400000000,
+    "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e"
+}
+```
+
+- `key` — the setting's key.
+- `value` — any JSON value, or `null` when the key holds no value because it was cleared or never
+  set. A setting cannot hold a JSON `null` of its own. Values round-trip as JSON values, not bytes.
+- `updatedAt` — the time of the last change that applied; last-write-wins compares it (see
+  `PUT`). `null` only when the daemon holds nothing for the key.
+- `version` — the UUIDv7 minted when that change applied. It is greater than every earlier version
+  of the same person's settings, across restarts and clock changes. `null` only when the daemon
+  holds nothing for the key.
+
+### `GET /v0/user-settings`
+
+Response — `200`:
+
+```json
+{
+    "settings": [
+        /* setting objects */
+    ],
+    "cursor": "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f"
+}
+```
+
+- `settings` — every key the daemon holds for the person, in ascending key order, including
+  retained clears with `value: null`. It is bounded by the limits above and never paged.
+- `cursor` — the event cursor captured before the settings were read. Follow events after it and
+  no concurrent change is missed.
+
+### `GET /v0/user-settings/:key`
+
+Response — `200`: `{ "setting": { ... } }`. A key the daemon holds nothing for answers
+`{ "setting": { "key": "...", "value": null, "updatedAt": null, "version": null } }`, not `404`.
+
+### `PUT /v0/user-settings/:key`
+
+Sets or clears one setting.
+
+Request:
+
+```json
+{
+    "mutationId": "...",
+    "value": "focused",
+    "updatedAt": 1755400000000
+}
+```
+
+- `value` — required; the JSON value to store, or `null` to clear the key.
+- `updatedAt` — optional; when the person made this change, by their device's clock. Settings are
+  last-write-wins per key: a write whose `updatedAt` is older than the stored entry's is ignored,
+  so a stale device cannot overwrite a newer change or clear made elsewhere. A time later than the
+  daemon's own clock counts as the daemon's current time, so a device whose clock runs ahead cannot
+  lock a key against later changes. Omitted, the write always applies at the daemon's current time.
+
+Response — `200`: `{ "setting": { ... } }`, the authoritative entry: what this write stored, or the
+stored entry unchanged when the write was ignored as stale. Every applied write, including one that
+repeats the stored value or clears a key the daemon holds nothing for, mints a new `version` and
+emits one `user_settings.updated` after commit, echoing `mutationId`. An ignored write changes
+nothing and emits nothing. Writes to one person's settings are serialized, each compared with what
+the previous one committed. Writes to different keys never affect each other.
+
+A malformed key or body, or a value nested too deeply, is `400 invalid_request`. A value over
+64 KiB is `413 too_large`. An applied write that would add a key beyond 1,000, or grow the person's
+total past 1 MiB, is `409 settings_full`, and the message names the limit; nothing changes. Clears,
+writes that do not grow the total, and writes ignored as stale are never refused as full.
 
 ## Onboarding
 
@@ -7747,6 +7870,16 @@ version rules. Snapshot-to-stream cursor and version-gap recovery rules remain u
   an unowned installation-wide integration event.
     - `integration` (full Happy integration object).
 
+**User settings**
+
+- `user_settings.updated` — a write applied to one of the person's settings: set, changed, or
+  cleared. It is a complete replacement of that one entry rather than a version-chain diff; clients
+  keep the entry with the greater `version` for its key. In team mode only the settings' owner
+  receives it, including journal pulls, replay, and live delivery. The payload never names the
+  owner. A write ignored as stale emits nothing.
+    - `setting` (the complete setting object; `value` is `null` for a clear).
+    - `mutationId` — echoed when the write supplied one.
+
 The set grows with the product; clients skip event types they do not recognize.
 
 ### `GET /v0/events`
@@ -7776,8 +7909,8 @@ Response — `200`:
 `cursor` is where this page ended — pass it as the next `after`. `latestCursor` is the newest
 event the daemon holds, so the client knows how far behind it still is.
 
-In team mode, private Happy integration and draft events are filtered by authenticated owner
-before their payloads are returned. Journal cursors remain opaque installation-wide positions: `cursor`
+In team mode, private Happy integration, draft, and user-settings events are filtered by
+authenticated owner before their payloads are returned. Journal cursors remain opaque installation-wide positions: `cursor`
 advances past scanned events hidden from that user, and `latestCursor` still describes the
 journal, not just visible events. A page may therefore contain no events while advancing its
 cursor. Filtering must not strand pagination behind another user's events or change cursor
@@ -7830,7 +7963,8 @@ envelope.
 In team mode, the same owner filtering applies to replay and live delivery. Hidden Happy
 integration events produce no event frame for another member; resuming after the last visible
 cursor must still deliver all subsequent visible events in journal order. The hello cursor and
-gap rules retain their installation-wide journal meaning. The same rules apply to private draft events.
+gap rules retain their installation-wide journal meaning. The same rules apply to private draft and
+user-settings events.
 Comment heartbeats keep the connection alive through proxies; clients ignore them. A client
 that falls too far behind reading is disconnected rather than buffered without bound, and comes
 back with its last cursor — landing in either the resumed or the gap case above.
@@ -7958,6 +8092,9 @@ Response — `200`:
     "happyIntegration": {
         /* exactly GET /v0/integrations/happy */
     },
+    "userSettings": [
+        /* exactly the settings array from GET /v0/user-settings */
+    ],
     "projects": [
         /* all project objects, catalog order */
     ],
@@ -7988,6 +8125,10 @@ Response — `200`:
   with the same wire shape, never another member's connection or an installation-wide fallback.
   The bootstrap cursor and owner-filtered event stream preserve the same snapshot-to-stream
   guarantee as standalone mode. The separate `cloud` object is unchanged.
+- `userSettings` — exactly the `settings` array from `GET /v0/user-settings`: the authenticated
+  member's own in team mode, the installation's one person's in standalone mode. Current daemons
+  always include it; its absence means the daemon has no user settings, so the client keeps those
+  preferences on the device. Follow `user_settings.updated` from the bootstrap `cursor`.
 - `config.node` — the installation's name and nullable avatar ThumbHash metadata are already
   part of the config object, not a separate bootstrap field. Optional for older compatible
   daemons; `avatar: null` explicitly means no image is set.

@@ -141,6 +141,13 @@ import type {
 import type { BackgroundProcessResponse } from "./protocol/processes.js";
 import type { ProfileResponse, ProfileUpdateRequest } from "./protocol/profile.js";
 import { userIdsSchema, type UsersResponse } from "./protocol/users.js";
+import {
+    userSettingKeySchema,
+    type SaveUserSettingRequest,
+    type UserSettingKey,
+    type UserSettingResponse,
+    type UserSettingsResponse,
+} from "./protocol/userSettings.js";
 import type {
     ArchiveProjectRequest,
     CloneProjectRequest,
@@ -911,6 +918,49 @@ export class HappyAgentClient {
             method: "DELETE",
             path: "v0/profile/photo",
             ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    // User settings
+
+    /**
+     * `GET /v0/user-settings` — the caller's own settings, clears included, and the cursor to
+     * follow `user_settings.updated` from. Older daemons answer `404`.
+     */
+    async getUserSettings(options: RequestOptions = {}): Promise<UserSettingsResponse> {
+        return await this.#json({
+            method: "GET",
+            path: "v0/user-settings",
+            signal: options.signal,
+        });
+    }
+
+    /** `GET /v0/user-settings/:key` — one setting; a key holding nothing is unset, never `404`. */
+    async getUserSetting(
+        key: UserSettingKey,
+        options: RequestOptions = {},
+    ): Promise<UserSettingResponse> {
+        return await this.#json({
+            method: "GET",
+            path: userSettingPath(key),
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * `PUT /v0/user-settings/:key` — sets a value, or clears it with `value: null`. Last-write-wins
+     * by `updatedAt`: the response is the authoritative entry, unchanged when the write was stale.
+     */
+    async saveUserSetting(
+        key: UserSettingKey,
+        request: SaveUserSettingRequest,
+        options: RequestOptions = {},
+    ): Promise<UserSettingResponse> {
+        return await this.#json({
+            method: "PUT",
+            path: userSettingPath(key),
+            json: request,
             signal: options.signal,
         });
     }
@@ -2456,6 +2506,14 @@ export class HappyAgentClient {
  */
 function bodyOf(options: { mutationId?: string }): { mutationId?: string } {
     return options.mutationId === undefined ? {} : { mutationId: options.mutationId };
+}
+
+/** A setting's route; keys need no percent-encoding, so an invalid one is refused before sending. */
+function userSettingPath(key: UserSettingKey): string {
+    if (!Value.Check(userSettingKeySchema, key)) {
+        throw new Error("The user setting key is invalid.");
+    }
+    return `v0/user-settings/${key}`;
 }
 
 function artifactVersionPath(artifactId: Cuid2, version: ArtifactVersionSelector): string {

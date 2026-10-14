@@ -113,6 +113,22 @@ guest is someone who reaches an exported bot from an outside chat service: `kind
 `kind` as `"member"` and a missing `canLogIn` as `true`; older daemons also answer `404` in
 standalone mode.
 
+User settings are the caller's own opaque key-value preferences, kept on the daemon so they follow
+the person across devices: the authenticated member's in team mode, the installation's one person's
+in standalone mode. The daemon checks only shape and size. Prefix keys with your application's name
+and a dot, such as `happy-desktop.completionSound`. Read `userSettings` from desktop bootstrap, or
+use `getUserSettings()`, and follow `user_settings.updated` from that response's `cursor`. A
+snapshot replaces the whole local copy. For each event, keep the entry with the greater `version`
+for its key. `saveUserSetting(key, { value, updatedAt, mutationId })` sets a value, and
+`value: null` clears it. Each key is last-write-wins by `updatedAt`. Send an offline change with the
+time the person made it, and adopt the returned entry: it is unchanged when the write was stale. A
+clear keeps its version, so a stale device cannot bring the value back. `getUserSetting(key)`
+returns an unset entry, never `404`. Invalid keys throw before any request, and the exported
+`MAX_USER_SETTING_*` constants are the specified limits. Discard the copy when the authenticated user
+changes. An absent bootstrap field, or `404` from `getUserSettings()`, means the daemon has no user
+settings, so keep those preferences on the device. Through `connection(id)`, settings belong to the
+remote daemon and the person it authenticates.
+
 The global secrets surface exposes only safe metadata: descriptions, environment-variable names,
 availability, attachments, versions, and timestamps. Raw values appear only in typed create and
 update request bodies. Project, workspace, and exact-agent attachment targets are discriminated by

@@ -45,6 +45,7 @@ import { taskMembershipSchema, taskSchema } from "./tasks.js";
 import type { Terminal } from "./terminals.js";
 import type { AgentContextUsage } from "./usage.js";
 import type { Workspace } from "./workspaces.js";
+import { storedUserSettingSchema } from "./userSettings.js";
 import type { SlashCommand } from "./slashCommands.js";
 import { connectionListResponseSchema } from "./connections.js";
 import { runnerListResponseSchema } from "./runners.js";
@@ -381,6 +382,16 @@ export interface HappyIntegrationUpdatedPayload {
     integration: HappyIntegration;
 }
 
+/**
+ * One of the person's settings changed: a complete replacement of that entry, delivered only to its
+ * owner in team mode. Keep the entry with the greater `version` for its key.
+ */
+export const userSettingsUpdatedPayloadSchema = Type.Object({
+    mutationId: Type.Optional(mutationIdSchema),
+    setting: storedUserSettingSchema,
+});
+export type UserSettingsUpdatedPayload = Static<typeof userSettingsUpdatedPayloadSchema>;
+
 /** One event on the journal. */
 export interface EventEnvelope<TType extends string, TPayload> {
     /** This event's place in the journal; never a resource identity. */
@@ -447,7 +458,8 @@ export type HappyAgentEvent =
     | EventEnvelope<"runners.updated", RunnersUpdatedPayload>
     | EventEnvelope<"profile.updated", ProfileUpdatedPayload>
     | EventEnvelope<"cloud.updated", CloudUpdatedPayload>
-    | EventEnvelope<"happy.integration.updated", HappyIntegrationUpdatedPayload>;
+    | EventEnvelope<"happy.integration.updated", HappyIntegrationUpdatedPayload>
+    | EventEnvelope<"user_settings.updated", UserSettingsUpdatedPayload>;
 
 /** The name of an event this client build knows. */
 export type HappyAgentEventType = HappyAgentEvent["type"];
