@@ -1566,7 +1566,7 @@ export class HappyAgentClient {
         });
     }
 
-    /** Appends; a supplied ID safely resolves an uncertain creation outcome. */
+    /** Adds at the top; a supplied ID safely resolves an uncertain creation outcome. */
     async createTodo(
         surfaceId: SurfaceId,
         request: CreateTodoRequest,

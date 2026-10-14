@@ -59,7 +59,7 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             capabilities: ["Read active, completed, or deleted todos in a Surface."],
             searchKeywords: ["list todos", "checklist items", "completed todos", "deleted todos"],
             description:
-                "List todos in one Surface, active by default. Use completed, deleted, or all to find older items. Keep returned versions for guarded edits. Results are paged.",
+                "List todos in one Surface, active by default. Active text starting with exact '# ' is a section heading, not an outstanding task; exclude headings from task counts. Do not trim text before checking that prefix. Use completed, deleted, or all to find older items. Keep returned versions for guarded edits. Results are paged.",
             parameters: Type.Object(
                 { surfaceId: surfaceIdSchema, scope: Type.Optional(todoListScopeSchema), ...page },
                 { additionalProperties: false },
@@ -84,7 +84,7 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             capabilities: ["Add a todo to a shared Surface."],
             searchKeywords: ["create todo", "add checklist item", "new reminder"],
             description:
-                "Add a plain-text todo at the top of one shared Surface. Explicitly supply authorUserId as a local Happy user ID, or null for no attribution; only null is allowed in standalone mode. The author is immutable and separate from the revision's audit actor. This never creates a chat or joins anyone to the Surface.",
+                "Add a plain-text todo at the top of one shared Surface. For a section heading, start the text with exact '# ' (hash and space); it remains an ordinary ordered todo without a checkbox. Explicitly supply authorUserId as a local Happy user ID, or null for no attribution; only null is allowed in standalone mode. The author is immutable and separate from the revision's audit actor. This never creates a chat or joins anyone to the Surface.",
             parameters: Type.Object(
                 {
                     surfaceId: surfaceIdSchema,

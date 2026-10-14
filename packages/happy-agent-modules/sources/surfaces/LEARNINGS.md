@@ -41,6 +41,14 @@ New todos enter at the top through both HTTP and model tools, using a fractional
 first active item without rewriting its neighbours. Reactivating an existing todo remains a
 different operation: it appends at the end with a fresh key, preserving the restoration rule.
 
+## Section headings are a text convention, not another record type
+
+An active todo beginning with exact `# ` is a section heading with no checkbox and does not count
+as outstanding work. The daemon preserves the entire text without trimming or interpreting other
+Markdown syntax. Creation, editing, ordering, state changes, and permanent history use the same
+todo operations. Clients edit the full text so removing the prefix returns the row to an ordinary
+task; historical row styling remains a client choice.
+
 ## Nothing historical is destroyed
 
 The legacy list hard-deleted todos and allowed reorder to revive completed items. Every change

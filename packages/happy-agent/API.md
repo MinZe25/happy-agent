@@ -6420,6 +6420,16 @@ and no ASCII control characters except tab and newline. `status` is `active`, `c
 timestamp, if any. All timestamps are epoch milliseconds. The version is a UUIDv7 resource
 version. Clients use plain string comparisons for keys, never locale-aware collation.
 
+An active todo whose stored text starts with the exact ASCII prefix `# ` is a section heading.
+Clients render it without a checkbox and omit it from counts of outstanding tasks. Its display
+label is the text after those first two characters, without further trimming or Markdown parsing.
+`## Title`, ` # Title`, `#\tTitle`, and `#Title` are ordinary todos. Editing uses the full stored
+text, including the prefix; adding or removing it changes the presentation without changing the
+record's identity. A heading uses the same active ordering, text updates, deletion, and permanent
+history as any other todo. It has no separate type, field, or route. The API still allows all
+ordinary status changes; completion and deletion preserve its full text, and do not rewrite
+earlier snapshots. This convention does not prescribe how clients style historical rows.
+
 `authorUserId` is an optional additive field containing the installation-local Happy user ID of
 the todo's author, resolvable through `GET /v0/users`, or `null` when no author is attributed or
 in standalone mode. Current daemons always include it. It is set once at creation and appears
@@ -6511,6 +6521,9 @@ or `null`. The model must supply it; the daemon never infers it from the executi
 It sets the todo's immutable author, not the revision actor.
 New todos are inserted at the top, as with HTTP creation. Returning an inactive todo to active
 still appends at the end; it is not a new creation.
+Agents create and edit section headings using the same text-prefix convention. `list_todos`
+returns headings in their ordinary list positions; summaries of outstanding work exclude active
+heading rows from the task count.
 Todo mutation tools supply the current version they read, and receive an explicit conflict on a
 stale version rather than silently overwriting. `list_surfaces` lists instance IDs, types, names,
 and nested members. Active admin bots additionally receive the type-specific `create_todo_surface`

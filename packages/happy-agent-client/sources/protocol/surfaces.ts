@@ -84,6 +84,7 @@ export const reorderSurfaceRequestSchema = Type.Object(
 );
 export type ReorderSurfaceRequest = Static<typeof reorderSurfaceRequestSchema>;
 
+/** Active text starting with exact `# ` is a section heading; stored text is never trimmed. */
 export const todoTextSchema = Type.String({
     minLength: 1,
     maxLength: 10_000,
