@@ -285,6 +285,8 @@ Surfaces are additive and do not increment the protocol version. Clients detect 
 `surfaces` field and the `surface.*` and `todo.*` events are absent on
 older compatible daemons. Surface IDs are CUID2s and types are extensible strings; clients leave
 unknown types unavailable while retaining the rest of the catalog.
+Surface `creatorUserId` and todo `authorUserId` are optional additive response fields; older
+compatible daemons may omit them. Clients treat an absent attribution field as `null`.
 
 Reference tags in agent text, described under "Message content", are additive and do not
 increment the protocol version. Request and response schemas are unchanged; a client that does not
@@ -6321,6 +6323,11 @@ creates a workspace, agent, or chat.
 A Surface object has `id` (CUID2), `type` (`todo` today; future types are additive),
 `name` (human display text), `image` (`null` or `{ "thumbhash": "..." }`), `members`,
 `version` (UUIDv7), and `updatedAt` (epoch milliseconds).
+It also has optional additive `creatorUserId`: the installation-local Happy user ID of its
+creator, resolvable through `GET /v0/users`, or `null` when no creator is attributed or in
+standalone mode. Current daemons always include it. It is set at creation and never changes,
+including when the creator leaves the Surface. Surfaces stored before attribution was added
+read as `creatorUserId: null`; no member or audit identity is used to infer a creator.
 `members` is an array inside the Surface, sorted by `userId` using plain string comparison.
 `members: []` is the sole representation of no joined people. There is no separate member list
 or nullable member field in responses, and no duplicate `userIds` list. The Surface's version
@@ -6348,12 +6355,13 @@ before snapshot reads. Unknown query fields are ignored.
 
 `POST /v0/surfaces` accepts `{ "id": "...", "type": "todo", "name": "Shopping",
 "mutationId": "..." }`; `id` and `mutationId` are optional. It creates one independent empty
-list, joins the authenticated creator at the end of their sidebar, and returns
+list, records the authenticated caller as `creatorUserId` (`null` in standalone mode), joins
+that person at the end of their sidebar, and returns
 `201 { "surface": {...} }`. Repeating a supplied ID returns the existing Surface without changing
 it or rejoining, and emits no event. New creation emits shared `surface.created` containing
 `surface` and optional `mutationId`. Invalid names, IDs, or unsupported types return
 `400 invalid_request`. There is no Surface deletion route; leaving removes it only from the
-caller's sidebar.
+caller's sidebar. HTTP request bodies cannot supply `creatorUserId`.
 
 Creation additionally accepts optional `image` containing base64 `data` for a PNG, JPEG, or
 WebP, at most 8 MiB decoded and 40 million pixels. The daemon normalizes it to a bounded WebP,
@@ -6385,6 +6393,7 @@ Each Todo Surface owns one shared plain list. A todo contains:
 {
     "id": "t4k8m2q9w1e5r7y3u6i0o2p4",
     "surfaceId": "s4k8m2q9w1e5r7y3u6i0o2p4",
+    "authorUserId": "u1x2y3z4a5b6c7d8e9f0g1h2",
     "text": "Pick up groceries",
     "status": "active",
     "orderKey": "5",
@@ -6404,6 +6413,13 @@ and no ASCII control characters except tab and newline. `status` is `active`, `c
 timestamp, if any. All timestamps are epoch milliseconds. The version is a UUIDv7 resource
 version. Clients use plain string comparisons for keys, never locale-aware collation.
 
+`authorUserId` is an optional additive field containing the installation-local Happy user ID of
+the todo's author, resolvable through `GET /v0/users`, or `null` when no author is attributed or
+in standalone mode. Current daemons always include it. It is set once at creation and appears
+unchanged in every full revision snapshot. No edit, status change, deletion, reorder, or
+application of a historical state may change it. Todos and revision snapshots stored before
+attribution was added read as `authorUserId: null`; revision actors are never used to backfill it.
+
 Every creation, text edit, status change, deletion, and reorder atomically
 stores the new full todo snapshot as an immutable revision alongside the latest todo and its
 durable notification intent; publication to the shared event journal follows commit.
@@ -6412,11 +6428,11 @@ A revision is `{ "todo": {...}, "actor": { "userId": null, "agentId": null },
 the identified person whose message the agent is working on for tools; it is `null` in
 standalone mode or when no person is identified. `actor.agentId` is the executing agent ID for
 tools and `null` for HTTP. `source` is `api` or `tool`. These values are resolved from trusted
-execution context and cannot be supplied in request bodies. Revisions retain the full snapshot
-including text and tombstones. Revisions are permanent; ordinary event-journal retention never
-removes todo history. A no-op adds neither a
-revision nor an event. All
-operations participate in a caller's transaction and notify only after commit.
+execution context and cannot be supplied in request bodies. A revision's actor records who
+performed that mutation and is independent of the todo's immutable `authorUserId`. Revisions
+retain the full snapshot including author, text, and tombstones. Revisions are permanent;
+ordinary event-journal retention never removes todo history. A no-op adds neither a revision
+nor an event. All operations participate in a caller's transaction and notify only after commit.
 
 All mutations of existing todos require `If-Match` with the current todo version. Missing or
 malformed headers return `400 invalid_request`; stale ones return `409 conflict` with
@@ -6438,10 +6454,12 @@ Active ordering, creation retry IDs, and history are isolated to their Surface.
   `deletedAt` first, respectively, then ID. `all` groups active, completed, and deleted in
   that order with the same within-group ordering. The cursor precedes snapshot reads.
 - `POST` accepts `{ "text": "Pick up groceries", "id": "...", "mutationId": "..." }`. `id`
-  and `mutationId` are optional. Creation appends an active todo and returns
+  and `mutationId` are optional. Creation records the authenticated caller as `authorUserId`
+  (`null` in standalone mode), appends an active todo, and returns
   `201 { "todo": {...} }`, emitting shared `todo.created`. A repeated supplied ID returns the current todo
   unchanged with `201`, even after deletion or restart, and emits no event; other valid fields
-  are ignored. This ID is the creation retry key; `mutationId` remains only an echo.
+  are ignored. This ID is the creation retry key; `mutationId` remains only an echo. HTTP request
+  bodies cannot supply `authorUserId`, on creation or any subsequent mutation.
 - `GET /:todoId` returns `200 { "todo": {...} }`, including deleted tombstones.
 - `PATCH /:todoId` accepts `{ "text": "...", "status": "completed", "mutationId": "..." }`.
   At least one of `text` or `status` is required. Status is `active`, `completed`, or `deleted`.
@@ -6480,19 +6498,29 @@ updates allow any prior editable state to be applied without rewriting its origi
 Every ordinary agent model receives fixed common tools `list_surfaces`, `list_todos`,
 `create_todo`, `update_todo`, `reorder_todo`, `delete_todo`, and `list_todo_versions`.
 They call the same strict typed operations as the API.
+`create_todo` requires an explicit `authorUserId` parameter: an installation-local Happy user ID
+or `null`. The model must supply it; the daemon never infers it from the execution context.
+It sets the todo's immutable author, not the revision actor.
 Todo mutation tools supply the current version they read, and receive an explicit conflict on a
 stale version rather than silently overwriting. `list_surfaces` lists instance IDs, types, names,
 and nested members. Active admin bots additionally receive the type-specific `create_todo_surface`
-tool, accepting `name` and optional absolute `imagePath`, plus `add_surface_user` and
+tool, accepting `name`, required explicit `creatorUserId` (an installation-local Happy user ID
+or `null`), and optional absolute `imagePath`, plus `add_surface_user` and
 `remove_surface_user`, accepting `surfaceId` and `userId` (null only for standalone).
 These tools require an actual active admin bot, checked both at tool selection and execution;
 ordinary agents and non-admin or archived bots cannot invoke them. Images are read through the
 ordinary Compute filesystem permission boundary, with reviewed elevation for outside-workspace
-or symlink targets. Creation makes an independent list;
-it joins the identified person the agent is working for, or the standalone person, and creates
-no member when a team agent has no identified person. Adding a user appends the Surface to that
-person's sidebar; removing them leaves data and history intact. Team targets must be existing
-local members who can sign in, not exported-bot guests. Admin changes use the same idempotence,
+or symlink targets. Creation makes an independent list and stores the explicit `creatorUserId`,
+never inferring it from execution context. A non-null creator joins at the end of their sidebar;
+in standalone mode the local person joins with null identity. In team mode a null creator
+creates no member, even when the agent has an identified person. Adding a user appends the
+Surface to that person's sidebar; removing them leaves data and history intact. Team targets must be existing
+local members who can sign in, not exported-bot guests. The same existing-member validation
+applies to non-null todo authors and Surface creators: unknown users and exported-bot guests
+are rejected with `not_found`. Null attribution is allowed in team mode; in standalone mode
+only null is allowed, and a non-null attribution is rejected with `invalid_request`. Missing
+or malformed required tool attribution parameters are rejected as invalid arguments without
+creating anything. Admin changes use the same idempotence,
 versions, and shared events as self join/leave. Every todo tool requires `surfaceId`.
 Tools otherwise never join, leave, or reorder anyone's sidebar. Reading or modifying todos never joins
 the caller automatically. Read tools require no review; mutation tools own ordinary shared Auto

@@ -5,12 +5,14 @@ import { HappyAgentClient } from "../sources/HappyAgentClient.js";
 import { HappyAgentApiError } from "../sources/HappyAgentApiError.js";
 import { desktopBootstrapResponseSchema } from "../sources/protocol/bootstrap.js";
 import {
+    surfaceCreatedPayloadSchema,
     surfaceUpdatedPayloadSchema,
     todoCreatedPayloadSchema,
     todoUpdatedPayloadSchema,
     type HappyAgentEvent,
 } from "../sources/protocol/events.js";
 import {
+    createSurfaceRequestSchema,
     createTodoRequestSchema,
     surfaceListResponseSchema,
     surfaceMemberSchema,
@@ -35,6 +37,7 @@ const member: SurfaceMember = {
     joinedAt: now,
 };
 const surface: Surface = {
+    creatorUserId: "user1",
     id: "surface1",
     type: "todo",
     image: null,
@@ -44,6 +47,7 @@ const surface: Surface = {
     version,
 };
 const todo: Todo = {
+    authorUserId: "user2",
     id: "todo1",
     surfaceId: "surface1",
     text: "Pick up groceries",
@@ -62,6 +66,53 @@ const revision: TodoRevision = {
 };
 
 describe("Surface and Todo protocol", () => {
+    it("validates nullable user attribution while accepting older responses without it", () => {
+        const { creatorUserId: _creator, ...olderSurface } = surface;
+        const { authorUserId: _author, ...olderTodo } = todo;
+        expect(Value.Check(surfaceSchema, olderSurface)).toBe(true);
+        expect(Value.Check(todoSchema, olderTodo)).toBe(true);
+        expect(Value.Check(todoRevisionSchema, { ...revision, todo: olderTodo })).toBe(true);
+        expect(surfaceSchema.required).not.toContain("creatorUserId");
+        for (const variant of todoSchema.anyOf) {
+            expect(variant.required).not.toContain("authorUserId");
+        }
+        for (const userId of [null, "user1"]) {
+            expect(Value.Check(surfaceSchema, { ...surface, creatorUserId: userId })).toBe(true);
+            for (const state of [
+                todo,
+                { ...todo, status: "completed", orderKey: null, completedAt: now },
+                { ...todo, status: "deleted", orderKey: null, deletedAt: now },
+            ]) {
+                const snapshot = { ...state, authorUserId: userId };
+                expect(Value.Check(todoSchema, snapshot)).toBe(true);
+                expect(Value.Check(todoRevisionSchema, { ...revision, todo: snapshot })).toBe(true);
+            }
+        }
+        for (const invalid of ["", "workos_user_123", 42, {}, []]) {
+            expect(Value.Check(surfaceSchema, { ...surface, creatorUserId: invalid })).toBe(false);
+            expect(Value.Check(todoSchema, { ...todo, authorUserId: invalid })).toBe(false);
+        }
+    });
+
+    it("carries immutable attribution in creation events and rejects HTTP attribution inputs", () => {
+        expect(Value.Check(surfaceCreatedPayloadSchema, { surface })).toBe(true);
+        expect(Value.Check(todoCreatedPayloadSchema, { todo })).toBe(true);
+        expect(revision.todo.authorUserId).not.toBe(revision.actor.userId);
+        expect(
+            Value.Check(createSurfaceRequestSchema, {
+                name: "Shared list",
+                type: "todo",
+                creatorUserId: "user1",
+            }),
+        ).toBe(false);
+        for (const authorUserId of [null, "user1"]) {
+            expect(Value.Check(createTodoRequestSchema, { text: "New", authorUserId })).toBe(false);
+            expect(Value.Check(updateTodoRequestSchema, { text: "Edit", authorUserId })).toBe(
+                false,
+            );
+        }
+    });
+
     it("nests member records and uses one empty joined-user representation", () => {
         expect(Value.Check(surfaceSchema, surface)).toBe(true);
         expect(Value.Check(surfaceSchema, { ...surface, members: [] })).toBe(true);

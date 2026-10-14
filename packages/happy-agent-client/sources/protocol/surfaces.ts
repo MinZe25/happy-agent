@@ -28,6 +28,8 @@ export const surfaceMemberSchema = Type.Object({
 export type SurfaceMember = Static<typeof surfaceMemberSchema>;
 
 export const surfaceSchema = Type.Object({
+    /** Immutable creator; null means unattributed or standalone. Older daemons omit it. */
+    creatorUserId: Type.Optional(Nullable(userIdSchema)),
     id: surfaceIdSchema,
     image: Nullable(Type.Object({ thumbhash: Type.String() })),
     type: Type.String({ minLength: 1 }),
@@ -85,6 +87,8 @@ export const todoTextSchema = Type.String({
 });
 
 const todoFields = {
+    /** Immutable author, distinct from revision actors. Older daemons omit it. */
+    authorUserId: Type.Optional(Nullable(userIdSchema)),
     createdAt: timestampSchema,
     id: cuid2Schema,
     surfaceId: surfaceIdSchema,
