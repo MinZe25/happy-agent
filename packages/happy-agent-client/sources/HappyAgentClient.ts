@@ -79,12 +79,14 @@ import type {
 import type {
     CreateSurfaceRequest,
     CreateTodoRequest,
+    EnsureSurfaceChatRequest,
     ReorderSurfaceRequest,
     ReorderTodoRequest,
     SurfaceId,
     SurfaceListResponse,
     SurfaceMemberRequest,
     SurfaceResponse,
+    SurfaceChatResponse,
     SurfaceDocumentResponse,
     SurfaceDocumentSnapshotResponse,
     SurfaceDocumentVersionListResponse,
@@ -1554,6 +1556,19 @@ export class HappyAgentClient {
             method: "POST",
             path: `v0/surfaces/${encodeURIComponent(surfaceId)}/reorder`,
             json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** Idempotently opens the Surface's shared chat without joining the caller or sending a message. */
+    async ensureSurfaceChat(
+        surfaceId: SurfaceId,
+        options: RequestOptions & EnsureSurfaceChatRequest = {},
+    ): Promise<SurfaceChatResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/${encodeURIComponent(surfaceId)}/chat`,
+            json: bodyOf(options),
             signal: options.signal,
         });
     }

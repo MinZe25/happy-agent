@@ -10,6 +10,7 @@ import {
     timestampSchema,
 } from "./common.js";
 import { userIdSchema } from "./userId.js";
+import { agentSchema } from "./agents.js";
 
 /** Each list uses the daemon generator's exact 24-character CUID2 format. */
 export const surfaceIdSchema = Type.String({
@@ -82,6 +83,8 @@ export const surfaceTargetSchema = Type.Union([
 export type SurfaceTarget = Static<typeof surfaceTargetSchema>;
 
 export const surfaceSchema = Type.Object({
+    /** One persistent contextual chat, or null before first open; older daemons omit it. */
+    chatAgentId: Type.Optional(Nullable(cuid2Schema)),
     /** Immutable creator; null means unattributed or standalone. Older daemons omit it. */
     creatorUserId: Type.Optional(Nullable(userIdSchema)),
     id: surfaceIdSchema,
@@ -186,6 +189,19 @@ export const surfaceMemberRequestSchema = Type.Object(
     { additionalProperties: false },
 );
 export type SurfaceMemberRequest = Static<typeof surfaceMemberRequestSchema>;
+
+export const ensureSurfaceChatRequestSchema = Type.Object(
+    { mutationId: Type.Optional(mutationIdSchema) },
+    { additionalProperties: false },
+);
+export type EnsureSurfaceChatRequest = Static<typeof ensureSurfaceChatRequestSchema>;
+
+/** A successful ensure always has a ready agent and a non-null association. */
+export const surfaceChatResponseSchema = Type.Object({
+    agent: agentSchema,
+    surface: Type.Object({ ...surfaceSchema.properties, chatAgentId: cuid2Schema }),
+});
+export type SurfaceChatResponse = Static<typeof surfaceChatResponseSchema>;
 
 export const reorderSurfaceRequestSchema = Type.Object(
     { afterId: Nullable(surfaceIdSchema), mutationId: Type.Optional(mutationIdSchema) },

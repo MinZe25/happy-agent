@@ -194,9 +194,9 @@ export const taskMembershipPayloadSchema = Type.Object({
 });
 export type TaskMembershipPayload = Static<typeof taskMembershipPayloadSchema>;
 
-/** A complete replacement of the Surface's nested members after a join, leave, or reorder. */
+/** Members stay present on a chat-only change; chat association is additive. */
 export const surfaceUpdatedPayloadSchema = Type.Object({
-    changes: Type.Pick(surfaceSchema, ["members", "updatedAt"]),
+    changes: Type.Pick(surfaceSchema, ["members", "updatedAt", "chatAgentId"]),
     mutationId: Type.Optional(mutationIdSchema),
     previousVersion: resourceVersionSchema,
     surfaceId: surfaceIdSchema,

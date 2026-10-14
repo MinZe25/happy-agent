@@ -287,6 +287,11 @@ older compatible daemons. Surface IDs are CUID2s and types are extensible string
 unknown types unavailable while retaining the rest of the catalog.
 Surface `creatorUserId` and todo `authorUserId` are optional additive response fields; older
 compatible daemons may omit them. Clients treat an absent attribution field as `null`.
+Surface `chatAgentId`, reference `target`, and dedicated-workspace `surfaceId` are optional
+additive fields. A missing `chatAgentId` is treated as null. Surface chat workspaces have
+`kind: "surface"` and are discovered only through their Surface chat, never ordinary workspace
+listings. An older daemon may reject new Surface types or return `404`/`501` for document or
+chat routes; clients leave those features unavailable without disabling existing todo lists.
 
 Reference tags in agent text, described under "Message content", are additive and do not
 increment the protocol version. Request and response schemas are unchanged; a client that does not
@@ -3090,17 +3095,17 @@ workspace route.
 Fields:
 
 - `id` — stable workspace identifier. The root workspace's ID is the project's ID.
-- `projectId` — the root of this workspace's tree; `null` on a bot or task workspace, which
+- `projectId` — the root of this workspace's tree; `null` on a bot, task, or Surface chat workspace, which
   belongs to no tree.
 - `parentId` — the workspace this one was created under; `null` on the root workspace and on a
-  bot or task workspace.
+  bot, task, or Surface chat workspace.
 - `name`, `nameSource` — display name and where it came from: `"user"` for a chosen name,
   `"generated"` for one the daemon derived. The name is also the branch name behind the
   checkout, so renaming moves the branch.
 - `kind` — how the checkout was made: `"root"` for the project's own folder, `"worktree"` for
   a Git worktree, `"copy"` for a plain folder copy (used when the project cannot support
   worktrees), `"bot"` for a bot's plain created folder, `"task"` for a task's plain created
-  folder.
+  folder, and `"surface"` for a Surface chat's plain created folder.
 - `compute` — where the workspace's files live and where work executes, same shape as on the
   project. A workspace of a runner project is always on that project's runner. A workspace created
   while its project's `defaultWorkspaceCompute` was `"docker"` reports
@@ -3112,7 +3117,7 @@ Fields:
 - `initialization` — the checkout state, same shape as on the project: a workspace answers
   immediately on creation and builds in the background.
 - `base` — what the workspace was created from: the `ref` the caller named and the `commit`
-  it resolved to at creation time. `null` on a bot or task workspace, which is created empty
+  it resolved to at creation time. `null` on a bot, task, or Surface chat workspace, which is created empty
   rather than cut from anything.
 - `git` — the same working-tree summary as on the project, for this workspace's checkout.
 - `botId` — optional additive field, always emitted by current daemons. `null` for every
@@ -3120,6 +3125,8 @@ Fields:
   for how bot workspaces behave.
 - `taskId` — optional additive field, present only on a task's dedicated workspace, where it
   names the owning task. See the tasks chapter for how task workspaces behave.
+- `surfaceId` — optional additive field, present only on a Surface chat's dedicated workspace,
+  where it names the owning Surface. See shared Surface chats for its lifecycle.
 - `creatorAgentId` — the agent that created this workspace, when one did; `null` when a
   person created it directly.
 - `subtaskAgentId` — optional additive field, always emitted by current daemons. The resident
@@ -6318,8 +6325,8 @@ content, history, and members. Supported types are `todo`, `separator`, `documen
 `bot`, and `task`; calendars
 are a future type, not a current endpoint. The catalog initially has no instances.
 All onboarded authenticated people may read and modify Surface data, whether
-or not they joined. Joining and leaving control only the person's sidebar. No Surface operation
-creates a workspace, agent, or chat.
+or not they joined. Joining and leaving control only the person's sidebar. Creating a Surface
+does not create a workspace, agent, or chat; the separate chat-ensure operation below is lazy.
 
 ### Surface catalog and members
 
@@ -6333,6 +6340,9 @@ every malformed `:surfaceId` path returns `404 not_found`. Short words such as `
 `document`, `join`, and `image` are not Surface IDs, so they cannot collide with route names.
 This deliberately corrects the earlier loose ID validation; existing generated IDs are
 unchanged, and stored IDs are never rewritten.
+Optional additive `chatAgentId` is the Surface's one shared chat agent ID, or null before a chat
+exists. Current daemons include it; older compatible daemons may omit it. It is never supplied
+in a creation request. Unsupported chat types, including separators, keep it null.
 It also has optional additive `creatorUserId`: the installation-local Happy user ID of its
 creator, resolvable through `GET /v0/users`, or `null` when no creator is attributed or in
 standalone mode. Current daemons always include it. It is set at creation and never changes,
@@ -6390,6 +6400,10 @@ returns `400 invalid_request`. Separators have no content endpoint, do not conta
 Surfaces following them, and do not change their access or membership. They can be independently
 joined, left, and moved with the ordinary Surface routes. Their image endpoint returns
 `404 not_found`.
+
+Surface IDs are always 24-character CUID2s, so catalog, typed-content, and chat routes cannot
+collide through short route words used as IDs. Paths such as `/v0/surfaces/todo/join` and
+`/v0/surfaces/document/image` contain no valid Surface ID and return `404 not_found`.
 
 `POST /v0/surfaces/:surfaceId/join` and `/leave` accept `{}` or `{ "mutationId": "..." }` and
 return `200 { "surface": {...} }`. Unknown Surface IDs return `404 not_found`.
@@ -6569,8 +6583,10 @@ review and run within the current permission boundary. Durable tool
 replay returns the previously committed result without appending another revision or event.
 
 `surface.updated` carries `surfaceId`, `previousVersion`, `version`, `changes` (the complete new
-`members` plus `updatedAt`), and optional `mutationId`. It is shared so everyone sees the joined
-people. It covers joining, leaving, and reordering; there are no separate member events.
+`members` plus `updatedAt`, and optional `chatAgentId` when the chat is first associated), and
+optional `mutationId`. It is shared so everyone sees the joined people and learns when the chat
+exists. It covers joining, leaving, reordering, and first chat creation; there are no separate
+member events. Existing fields remain present on chat-only changes, with members unchanged.
 `todo.created` carries the full `todo` and optional `mutationId`.
 `todo.updated` carries `surfaceId`, `todoId`, `previousVersion`, `version`, `changes` (the
 changed mutable fields, always including `updatedAt`), and optional `mutationId`. All todo events
@@ -6750,6 +6766,79 @@ creator attribution, creator joins, image handling, durable replay, and Auto per
 boundaries match other typed Surface creation tools. `list_surfaces` resolves targets for the
 trusted current execution identity and returns unavailable when access cannot be established.
 The reference never joins anyone to the target's own task list or changes its existing rights.
+
+### Shared Surface chats
+
+The chat-enabled types are `todo`, `document`, `artifact`, `bot`, and `task`. Each may own exactly
+one shared persistent conversation, created lazily when a person explicitly opens its chat.
+Separators and unsupported types have no chat: their ensure operation returns `409 conflict`
+and leaves `chatAgentId` null. A reference Surface's contextual chat is separate from the target
+bot/task's existing conversation; ordinary reference opening still opens that existing target.
+
+`POST /v0/surfaces/:surfaceId/chat` accepts `{}` or `{ "mutationId": "..." }` and returns
+`200 { "surface": {...}, "agent": {...} }`, where `surface.chatAgentId` equals `agent.id`.
+It requires no `If-Match`. The Surface ID is the idempotency identity; callers cannot provide an
+agent ID, workspace ID, model, permission mode, owner identity, or initial message. Unknown
+Surfaces return `404 not_found`, and unsupported body fields return `400 invalid_request`.
+There is no chat peek route: the catalog's `chatAgentId` already answers whether a chat exists.
+After ensuring it, clients use the ordinary agent read, bootstrap, message, mode, draft, and
+control routes. Sending the first message is a separate ordinary agent `send` with its own
+stable message ID.
+
+The chat route matches only this exact POST path. In particular, it does not capture
+`POST /v0/surfaces/todo/:surfaceId`, document GET/PUT/history routes, or membership routes.
+The Surface ID must be a 24-character CUID2, never a route word such as `todo`, `document`, or
+`chat`. No valid existing method/path pair is repurposed.
+
+The first successful ensure creates the logical agent and its dedicated workspace, sets
+`chatAgentId`, advances the Surface version and `updatedAt`, and persists their notifications
+in one transaction. Concurrent callers and retries after a lost response converge on the same
+agent and workspace; only one association and one version transition commit. After commit,
+`agent.created` precedes `surface.updated` containing the new `chatAgentId`. Only the winning
+creation's optional `mutationId` is echoed. Subsequent ensures return the current Surface and
+agent with no version, membership, message, or event change. Restart never creates a second chat.
+Durable folder-preparation intent precedes filesystem work, and independent preparation belongs
+to the daemon's lifetime, not the HTTP caller. An initialization failure exposes no partial chat
+association; retry resumes the same reserved identities. Transient unavailable initialization
+returns `503 not_initialized`, not an invented ready agent.
+
+The agent is an ordinary parentless, user-visible, non-admin root, with
+`managedByAnotherAgent: false`, `canSendMessages: true` when ready, and `orderKey: null`. It
+belongs to no ordinary root-agent series. Its defaults follow HTTP task/bot creation exactly:
+creation itself runs no inference and sets no special provider/model/effort/permission selection.
+When no last composer mode exists, clients use `GET /v0/config`'s `defaults.providerId`,
+`defaults.modelId`, `defaults.effort`, and `defaults.permissionMode`; every send supplies the
+ordinary required `mode`, and later composer state uses the existing mode endpoint. Creating the
+shared chat never copies an unrelated conversation's selection or elevated permissions from its opener.
+
+In team mode, all permitted readers see the same conversation. Every human message carries its
+authenticated sender in `metadata.userId`, exactly as task chats do; clients cannot substitute
+an owner in the body. Trusted sender context changes with each accepted human message, so the
+agent works for that sender rather than the person who first opened the chat or created the
+Surface. Standalone messages use the existing null/absent local-user convention. Reference
+chat reads, messages, agent snapshots, and events also obey the target's existing read access;
+Surface membership or a known chat ID never bypasses it. A caller lacking that access receives
+`404 not_found`. Target lifecycle state alone does not erase the chat or its history.
+
+The Surface owns one plain, non-Git folder at `<public Happy folder>/Surfaces/<surfaceId>`,
+beside the `Tasks` and `Bots` roots. As with task creation, configured runners place it on the
+default runner using that runner's platform layout (`~/Happy/Surfaces/<surfaceId>` on macOS,
+`~/happy/Surfaces/<surfaceId>` otherwise); without runners it uses the local workload/public
+Happy folder. Configuration owns path resolution. The folder and all three IDs stay fixed.
+Its dedicated workspace has `kind: "surface"`, optional additive `surfaceId`, `botId: null`,
+no `taskId`, `parentId: null`, `projectId: null`, `base: null`, and exactly this primary agent.
+It is discovered through the chat agent's `workspaceId`, not project/workspace listings or
+bootstrap workspace arrays. Its normal file, terminal, service, and proxy operations work by
+workspace ID under the same permission model as task workspaces.
+
+The Surface owns the lifetime. Agent archive, unarchive, and reorder; workspace rename,
+archive, reorder, and child creation; and attaching another root agent all return `409 conflict`.
+Surface membership changes never stop the chat, delete its folder, or discard history, even
+when nobody remains joined. Since Surfaces have no deletion route, their chats and folders
+remain for the Surface's lifetime. The agent's context names its Surface ID, type, and stored
+label, and tells it to use ordinary Surface tools, plus document tools for document content.
+It receives no admin role, no new subtask-creation eligibility, and no implicit join, creation,
+or target permissions. Ensuring or using the chat never joins anyone to a Surface or task list.
 
 ## Tasks
 
@@ -8835,7 +8924,8 @@ Response — `200`:
 There is no global agent-list endpoint and no standalone collection of active agents in
 bootstrap. Active agents are discovered through the ordered `agents` arrays embedded in projects
 and workspaces — and, for bots and tasks, through the single agent embedded in each bot or task
-object. Active
+object. Surface chats are discovered through `Surface.chatAgentId` and ordinary focused agent
+reads, not a separate agent list. Active
 subtask descendants are included recursively on those same agent objects, not in a new top-level
 collection. `archivedAgents` is the one flat collection, and it holds only archived agents. An
 individual agent's history is loaded by ID.
