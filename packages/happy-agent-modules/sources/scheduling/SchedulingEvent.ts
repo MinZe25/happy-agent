@@ -6,7 +6,9 @@ import {
     schedulingAgentIdSchema,
     schedulingEventIdSchema,
     schedulingScheduledMessageSchema,
+    schedulingSuspendedRecordSchema,
     schedulingWaitRecordSchema,
+    schedulingWaitingRecordSchema,
     schedulingWaitResultSchema,
     schedulingWaitIntervalSchema,
 } from "./Scheduling.js";
@@ -28,6 +30,24 @@ export const schedulingEventSchema = Type.Union([
             ...eventEnvelope,
             type: Type.Literal("wait_started"),
             wait: schedulingWaitRecordSchema,
+            activeWait: Type.Optional(Type.Union([schedulingWaitIntervalSchema, Type.Null()])),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...eventEnvelope,
+            type: Type.Literal("wait_suspended"),
+            wait: schedulingSuspendedRecordSchema,
+            activeWait: Type.Optional(Type.Union([schedulingWaitIntervalSchema, Type.Null()])),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...eventEnvelope,
+            type: Type.Literal("wait_resumed"),
+            wait: schedulingWaitingRecordSchema,
             activeWait: Type.Optional(Type.Union([schedulingWaitIntervalSchema, Type.Null()])),
         },
         { additionalProperties: false },

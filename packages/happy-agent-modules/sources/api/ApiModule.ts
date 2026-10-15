@@ -2244,11 +2244,7 @@ export class ApiModule implements AgentModule {
         if (this.#scheduling !== undefined) {
             this.#unsubscribe.push(
                 this.#scheduling.onEventTransactional(async (eventCtx, event) => {
-                    if (
-                        (event.type !== "wait_started" && event.type !== "wait_finished") ||
-                        event.activeWait === undefined
-                    )
-                        return;
+                    if (!("activeWait" in event) || event.activeWait === undefined) return;
                     await this.#events.record(eventCtx, {
                         type: "scheduling.wait-changed",
                         agentId: event.agentId,

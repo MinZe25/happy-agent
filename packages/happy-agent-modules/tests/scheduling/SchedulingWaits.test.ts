@@ -1,6 +1,8 @@
-import type { AgentModuleScope } from "@slopus/happy-agent-base";
+import type { AgentModuleScope, AgentModuleSystemScope } from "@slopus/happy-agent-base";
+import { GracefulShutdown, withLifetime, withShutdown, type Context } from "@steve.kite/stdlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { SchedulingEventListener } from "../../sources/scheduling/SchedulingEvent.js";
 import {
     advance,
     armedAlarms,
@@ -9,6 +11,7 @@ import {
     START_TIME,
     TestAgents,
     useSchedulingClock,
+    type SchedulingHarness,
 } from "./support/schedulingHarness.js";
 
 const agentId = "agenta";
@@ -264,6 +267,188 @@ describe("Scheduling waits", () => {
         }
     });
 
+    it("settles a wait a steering message interrupts, even though the call's own context has ended", async () => {
+        const intervals: unknown[] = [];
+        const record = recordIntervals(intervals);
+        const harness = await schedulingHarness("wait-steered", {
+            // The API records each interval change in agent storage, which refuses a context
+            // whose work has ended.
+            listener: async (ctx, event) => {
+                if (ctx.lifetime?.aborted === true) {
+                    throw new Error(
+                        "The store cannot be used: the work its context belongs to has ended.",
+                    );
+                }
+                await record(ctx, event);
+            },
+        });
+        try {
+            const turn = new AbortController();
+            const turnCtx = withLifetime(harness.database.context, turn.signal);
+            const pending = harness.module.wait(turnCtx, agentId, {
+                id: "waitsteered",
+                duration: { minutes: 30 },
+            });
+            await settle();
+            await advance(5_000);
+
+            // Steering aborts the run, which ends the lifetime of the call holding the wait.
+            turn.abort();
+
+            expect(await pending).toMatchObject({ outcome: "interrupted", elapsedMs: 5_000 });
+            expect(
+                await harness.module.readActiveWait(harness.database.context, agentId),
+            ).toBeNull();
+            expect(intervals).toEqual([
+                { startedAt: START_TIME, dueAt: START_TIME + 1_800_000 },
+                null,
+            ]);
+        } finally {
+            harness.close();
+        }
+    });
+
+    it("stops reporting a wait once its call is answered, even when shutdown left the row waiting", async () => {
+        const intervals: unknown[] = [];
+        const harness = await schedulingHarness("wait-answered-during-shutdown", {
+            listener: recordIntervals(intervals),
+        });
+        try {
+            const daemon = daemonProcess(harness.database.context);
+            const pending = harness.module.wait(daemon.ctx, agentId, {
+                id: "waitorphan",
+                duration: { minutes: 5 },
+            });
+            void pending.catch(() => undefined);
+            await settle();
+            const interval = { startedAt: START_TIME, dueAt: START_TIME + 5 * 60_000 };
+            expect(await harness.module.readActiveWait(harness.database.context, agentId)).toEqual(
+                interval,
+            );
+
+            // Shutdown ends every context of the process before the agent's reload edge, so the
+            // wait leaves its row for replay, and Agent Base can still commit what it threw as
+            // the call's answer. The agent then moves on without that call ever running again.
+            await advance(1_000);
+            daemon.shutDown();
+            await expect(pending).rejects.toThrow("suspended while the daemon restarts");
+            await answerCall(harness, "waitorphan");
+
+            expect(
+                await harness.module.readActiveWait(harness.database.context, agentId),
+            ).toBeNull();
+            expect(intervals).toEqual([interval, null]);
+        } finally {
+            harness.close();
+        }
+    });
+
+    it("stops reporting a wait the moment an abort answers its call, before the wait wakes", async () => {
+        const intervals: unknown[] = [];
+        const harness = await schedulingHarness("wait-answered-by-abort", {
+            listener: recordIntervals(intervals),
+        });
+        try {
+            const turn = new AbortController();
+            const turnCtx = Object.create(harness.database.context, {
+                lifetime: { value: turn.signal },
+            }) as typeof harness.database.context;
+            const pending = harness.module.wait(turnCtx, agentId, {
+                id: "waitabandoned",
+                duration: { hours: 1 },
+            });
+            await settle();
+            await advance(2_000);
+
+            // Agent Base commits the aborted answer first and only then cancels the call.
+            await answerCall(harness, "waitabandoned");
+            expect(
+                await harness.module.readActiveWait(harness.database.context, agentId),
+            ).toBeNull();
+            turn.abort();
+
+            expect(await pending).toMatchObject({ outcome: "interrupted", elapsedMs: 2_000 });
+            expect(intervals).toEqual([
+                { startedAt: START_TIME, dueAt: START_TIME + 3_600_000 },
+                null,
+            ]);
+        } finally {
+            harness.close();
+        }
+    });
+
+    it("reports a wait left by an earlier process only once its call replays", async () => {
+        const first = await schedulingHarness("wait-left-by-restart");
+        const intervals: unknown[] = [];
+        try {
+            const daemon = daemonProcess(first.database.context);
+            const replayed = first.module.wait(daemon.ctx, agentId, {
+                id: "waitreplayed",
+                duration: { hours: 1 },
+            });
+            await settle();
+            const orphaned = first.module.wait(daemon.ctx, "agentb", {
+                id: "waitorphaned",
+                duration: { minutes: 5 },
+            });
+            void replayed.catch(() => undefined);
+            void orphaned.catch(() => undefined);
+            await settle();
+            daemon.shutDown();
+            await settle();
+
+            const second = await schedulingHarness("wait-left-by-restart", {
+                database: first.database,
+                listener: recordIntervals(intervals),
+            });
+            try {
+                // The new process restores every agent before any of them runs, so nothing in it
+                // holds either wait yet and neither is live.
+                await restoreAgent(second, agentId);
+                await restoreAgent(second, "agentb");
+                expect(
+                    await second.module.readActiveWait(second.database.context, agentId),
+                ).toBeNull();
+                expect(
+                    await second.module.readActiveWait(second.database.context, "agentb"),
+                ).toBeNull();
+                expect(intervals).toEqual([null, null]);
+
+                const resumed = second.module.wait(second.database.context, agentId, {
+                    id: "waitreplayed",
+                    duration: { hours: 1 },
+                });
+                await settle();
+                const original = { startedAt: START_TIME, dueAt: START_TIME + 3_600_000 };
+                expect(
+                    await second.module.readActiveWait(second.database.context, agentId),
+                ).toEqual(original);
+                expect(intervals).toEqual([null, null, original]);
+
+                // The orphan's call was answered in the earlier process and never replays; once
+                // its answer is seen, the row is settled rather than left behind.
+                await advance(10 * 60_000);
+                expect(
+                    await second.module.readActiveWait(second.database.context, "agentb"),
+                ).toBeNull();
+                await answerCall(second, "waitorphaned", "agentb");
+                expect(intervals).toEqual([null, null, original]);
+
+                await advance(50 * 60_000);
+                expect(await resumed).toMatchObject({
+                    outcome: "elapsed",
+                    startedAt: START_TIME,
+                    elapsedMs: 3_600_000,
+                });
+                expect(intervals).toEqual([null, null, original, null]);
+            } finally {
+                second.close();
+            }
+        } finally {
+            first.close();
+        }
+    });
+
     it("returns the settled result when the same durable call runs again", async () => {
         const harness = await schedulingHarness("wait-replay");
         try {
@@ -331,3 +516,50 @@ describe("Scheduling waits", () => {
         }
     });
 });
+
+/** Collect every change to the active interval that scheduling announces. */
+function recordIntervals(intervals: unknown[]): SchedulingEventListener {
+    return (_ctx, event) => {
+        if ("activeWait" in event && event.activeWait !== undefined)
+            intervals.push(event.activeWait);
+    };
+}
+
+/** The context a daemon gives its tool calls: shutdown ends its lifetime before anything else. */
+function daemonProcess(ctx: Context): { readonly ctx: Context; readonly shutDown: () => void } {
+    const coordinator = new GracefulShutdown();
+    return {
+        ctx: withShutdown(ctx, coordinator),
+        shutDown: () => void coordinator.shutdown(),
+    };
+}
+
+/** Restore one agent the way the agent system does at start, inside its restoration transaction. */
+async function restoreAgent(harness: SchedulingHarness, agent: string): Promise<void> {
+    await harness.database.context.inTx(async (txCtx) => {
+        await harness.hooks.agentRestoredTransact?.(txCtx, {} as AgentModuleSystemScope, {
+            id: agent,
+            metadata: undefined,
+        });
+    });
+}
+
+/** Commit an answer to one tool call the way Agent Base does, inside its result transaction. */
+async function answerCall(
+    harness: SchedulingHarness,
+    callId: string,
+    agent: string = agentId,
+): Promise<void> {
+    await harness.database.context.inTx(async (txCtx) => {
+        await harness.hooks.afterToolCallTransact?.(
+            txCtx,
+            { agent: { id: agent } } as AgentModuleScope,
+            {
+                role: "tool",
+                callId,
+                content: [{ type: "text", text: "The tool call was aborted." }],
+                isError: true,
+            },
+        );
+    });
+}

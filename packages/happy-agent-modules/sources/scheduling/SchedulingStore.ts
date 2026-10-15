@@ -93,9 +93,9 @@ export function assertSchedulingWaitRecord(value: unknown): asserts value is Sch
     if (record.startedAt > record.dueAt) {
         throw new Error("Scheduling durable wait starts after its due time.");
     }
-    if (record.status === "waiting") {
+    if (record.status === "waiting" || record.status === "suspended") {
         if ("finishedAt" in record || "elapsedMs" in record) {
-            throw new Error("Waiting durable wait has terminal fields.");
+            throw new Error("Unsettled durable wait has terminal fields.");
         }
     } else if (
         record.finishedAt < record.startedAt ||

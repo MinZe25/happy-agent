@@ -1,6 +1,7 @@
 import type { AgentModuleHooks, AgentSystemRef } from "@slopus/happy-agent-base";
 import { vi } from "vitest";
 
+import type { SchedulingEventListener } from "../../../sources/scheduling/SchedulingEvent.js";
 import { SchedulingModule } from "../../../sources/scheduling/SchedulingModule.js";
 import { moduleDatabase, type ModuleDatabase } from "../../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../../support/moduleHooks.js";
@@ -99,6 +100,8 @@ export interface SchedulingHarness {
 export interface SchedulingHarnessOptions {
     readonly agents?: TestAgents;
     readonly database?: ModuleDatabase;
+    /** Subscribed before the module starts, so it also sees what startup recovery announces. */
+    readonly listener?: SchedulingEventListener;
 }
 
 /** A started scheduling module over a real SQLite database, with delivery in hand. */
@@ -108,6 +111,7 @@ export async function schedulingHarness(
 ): Promise<SchedulingHarness> {
     const agents = options.agents ?? new TestAgents();
     const module = new SchedulingModule();
+    if (options.listener !== undefined) module.onEventTransactional(options.listener);
     const database = options.database ?? moduleDatabase(module.migrations, name);
     await database.ready;
     const hooks = await resolveModuleHooks(database.context, module, agents.ref);

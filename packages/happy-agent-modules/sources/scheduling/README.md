@@ -26,9 +26,12 @@ timestamp in seconds or milliseconds, and a date already past resolves at once. 
 24 hours, which the tool descriptions say out loud.
 
 A wait is claimed in a short transaction, suspended outside every transaction, and settled in
-another short transaction, so a day-long wait never holds a write lock. It survives a restart: the
-durable tool call runs again, finds its own row still waiting, and re-enters the suspension for
-whatever time is left.
+another short transaction, so a day-long wait never holds a write lock. It survives a restart: when
+an agent is restored, every row it left waiting is marked suspended; its durable tool call then
+runs again, finds its own row, and resumes it for whatever time is left. A suspended row is never the
+agent's active interval, so a wait whose call does not come back is not reported as live. Any
+answer committed for a wait's call settles that wait in the same transaction, even when the wait
+itself has not woken yet.
 
 Three things end a wait: its time arrives, the turn is aborted, or a message arrives for the agent.
 The last one comes from `interruptWaits`, which Happy Agent calls when a person submits or steers into a
@@ -67,8 +70,10 @@ const stop = scheduling.onEvent((ctx, event) => project(event));
 scheduling.onEventTransactional((ctx, event) => mirror(ctx, event));
 ```
 
-Every subscriber receives one detached, deeply frozen event: `wait_started`, `wait_finished`,
-`message_scheduled`, `scheduled_message_cancelled`, or `scheduled_message_delivery_outcome`.
+Every subscriber receives one detached, deeply frozen event: `wait_started`, `wait_suspended`,
+`wait_resumed`, `wait_finished`, `message_scheduled`, `scheduled_message_cancelled`, or
+`scheduled_message_delivery_outcome`. A wait event carries `activeWait` only when it changes the
+agent's active interval.
 `onEventTransactional` runs inside the transaction that commits the change, so throwing from one
 rejects the mutation that produced it. `onEvent` runs through stdlib `afterCommit(ctx, …)` once the
 outermost transaction has committed; nothing there can undo a committed change, so a failing

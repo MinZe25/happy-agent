@@ -73,6 +73,7 @@ export const schedulingWaitKindSchema = Type.Union([
 ]);
 export const schedulingWaitStatusSchema = Type.Union([
     Type.Literal("waiting"),
+    Type.Literal("suspended"),
     Type.Literal("elapsed"),
     Type.Literal("interrupted"),
 ]);
@@ -116,6 +117,15 @@ export const schedulingWaitingRecordSchema = Type.Object(
     { additionalProperties: false },
 );
 
+/**
+ * A wait an earlier process was holding when it stopped. Nothing holds it until its tool call
+ * replays and resumes it, so it is never reported as the agent's active interval.
+ */
+export const schedulingSuspendedRecordSchema = Type.Object(
+    { ...waitRecordCommon, status: Type.Literal("suspended") },
+    { additionalProperties: false },
+);
+
 const terminalWaitRecordCommon = {
     ...waitRecordCommon,
     finishedAt: schedulingTimestampSchema,
@@ -132,6 +142,7 @@ export const schedulingInterruptedRecordSchema = Type.Object(
 );
 export const schedulingWaitRecordSchema = Type.Union([
     schedulingWaitingRecordSchema,
+    schedulingSuspendedRecordSchema,
     schedulingElapsedRecordSchema,
     schedulingInterruptedRecordSchema,
 ]);
@@ -276,6 +287,7 @@ export type SchedulingWaitUntilInput = Static<typeof schedulingWaitUntilInputSch
 export type SchedulingWaitUntilToolInput = Static<typeof schedulingWaitUntilToolInputSchema>;
 export type SchedulingWaitRecord = Static<typeof schedulingWaitRecordSchema>;
 export type SchedulingWaitingRecord = Static<typeof schedulingWaitingRecordSchema>;
+export type SchedulingSuspendedRecord = Static<typeof schedulingSuspendedRecordSchema>;
 export type SchedulingWaitResult = Static<typeof schedulingWaitResultSchema>;
 export type SchedulingScheduleStatus = Static<typeof schedulingScheduleStatusSchema>;
 export type SchedulingScheduledMessage = Static<typeof schedulingScheduledMessageSchema>;

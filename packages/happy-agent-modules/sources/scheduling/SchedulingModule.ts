@@ -2,11 +2,14 @@ import {
     agentDatabase,
     withAgentDatabase,
     type AgentModule,
+    type AgentModuleAgentLifecycle,
     type AgentModuleHooks,
     type AgentModuleScope,
+    type AgentModuleSystemScope,
     type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
+import type { SessionToolResultMessage } from "@slopus/happy-providers";
 import { type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, detach, shutdown, type Context } from "@steve.kite/stdlib";
@@ -23,6 +26,7 @@ import {
     schedulingScheduleInputSchema,
     schedulingSchedulePageQuerySchema,
     schedulingTimestampSchema,
+    schedulingWaitIdSchema,
     schedulingWaitInputSchema,
     schedulingWaitUntilInputSchema,
     type SchedulingCancelInput,
@@ -30,6 +34,7 @@ import {
     type SchedulingSchedulePage,
     type SchedulingSchedulePageQuery,
     type SchedulingScheduledMessage,
+    type SchedulingSuspendedRecord,
     type SchedulingWaitInput,
     type SchedulingWaitRecord,
     type SchedulingWaitResult,
@@ -52,7 +57,10 @@ import {
     MAX_SCHEDULING_RECOVERY_BATCH,
     type SchedulingStore,
 } from "./SchedulingStore.js";
-import { SchedulingSuspensions } from "./SchedulingSuspensions.js";
+import {
+    SchedulingSuspensions,
+    type SchedulingSuspensionOutcome,
+} from "./SchedulingSuspensions.js";
 import { SchedulingAlarm } from "./SchedulingAlarm.js";
 import { cancellationText, schedulePageText, scheduleText, waitText } from "./schedulingFormat.js";
 import { durationMilliseconds, humanDuration, instantMilliseconds } from "./schedulingTime.js";
@@ -109,7 +117,7 @@ export class SchedulingModule implements AgentModule {
 
     readonly #botSettings: BotSettingsModule | undefined;
     #agents: AgentSystemRef | undefined;
-    #deliveryCtx: Context | undefined;
+    #ownCtx: Context | undefined;
 
     /**
      * @param botSettings Whether a bot keeps the agents it governs from scheduling messages for
@@ -123,21 +131,23 @@ export class SchedulingModule implements AgentModule {
     /**
      * Take the agent collection, then re-arm everything the last process left pending.
      *
-     * Delivery outlives the call that scheduled it, so it runs on a context of the module's own
-     * derived here rather than on a tool call's, which is gone long before the message is due.
+     * Delivery outlives the call that scheduled it, and settling a wait outlives the call that
+     * ended it, so both run on a context of the module's own derived here rather than on a tool
+     * call's, which may be gone by then.
      */
     readonly beforeStart = async (
         ctx: Context,
         agents: AgentSystemRef,
     ): Promise<AgentModuleHooks> => {
         this.#agents = agents;
-        // Detaching drops the database along with the caller's lifetime, and delivery needs it
-        // for the rest of the process's life, so it is carried onto the module's own context.
+        // Detaching drops the database along with the caller's lifetime, and delivery and wait
+        // settlement need it for the rest of the process's life, so it is carried onto the
+        // module's own context.
         const database = agentDatabase(ctx);
         if (database === undefined) {
             throw new Error("Scheduling was started without an agent database.");
         }
-        this.#deliveryCtx = withAgentDatabase(detach(ctx).named("scheduling"), database);
+        this.#ownCtx = withAgentDatabase(detach(ctx).named("scheduling"), database);
         await this.#recoverPending(ctx);
         return this.#hooks;
     };
@@ -162,8 +172,44 @@ export class SchedulingModule implements AgentModule {
         },
         // A message this agent has taken into its conversation is the plainest possible proof that
         // it is no longer idle, so any wait it is still holding ends here.
+        // Restoration runs before any restored agent's loop starts, so no call in this process
+        // holds a wait yet. Each one the last process left waiting is suspended until its own
+        // tool call replays and resumes it; one whose call was already answered never comes back
+        // and must not go on reporting an interval nobody is waiting through.
+        agentRestoredTransact: async (
+            ctx: Context,
+            _scope: AgentModuleSystemScope,
+            agent: AgentModuleAgentLifecycle,
+        ): Promise<void> => {
+            if (!Value.Check(schedulingAgentIdSchema, agent.id)) return;
+            await ctx.inTx(async (txCtx) => {
+                await this.#suspendLeftoverWaits(txCtx, agent.id);
+            });
+        },
         messageAccepted: (_ctx: Context, scope: AgentModuleScope): void => {
             this.#suspensions.interrupt(scope.agent.id);
+        },
+        // A wait is live only while its tool call is. Agent Base can answer the call without the
+        // wait settling first: an abort or close commits its answer before the wait wakes, and a
+        // shutdown can commit the error a wait threw while leaving its row for replay. Whatever
+        // the answer, the wait it belonged to ends in the transaction that records it.
+        afterToolCallTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            result: SessionToolResultMessage,
+        ): Promise<void> => {
+            const agentId = scope.agent.id;
+            if (
+                !Value.Check(schedulingAgentIdSchema, agentId) ||
+                !Value.Check(schedulingWaitIdSchema, result.callId)
+            ) {
+                return;
+            }
+            await ctx.inTx(async (txCtx) => {
+                const wait = await this.#readWait(txCtx, agentId, result.callId);
+                if (wait === undefined || !isUnsettled(wait)) return;
+                await this.#settleWait(txCtx, wait, "interrupted");
+            });
         },
     };
 
@@ -431,7 +477,26 @@ export class SchedulingModule implements AgentModule {
                 if (existing.kind !== kind) {
                     throw new Error("That wait identity belongs to another kind of wait.");
                 }
-                return structuredClone(existing);
+                if (existing.status !== "suspended") return structuredClone(existing);
+                // The call that owns this wait replayed after a restart, so the interval it
+                // started with is live again.
+                const resumed: SchedulingWaitingRecord = {
+                    ...existing,
+                    status: "waiting",
+                    updatedAt: Math.max(this.#now(), existing.updatedAt),
+                };
+                const previousWait = await this.readActiveWait(txCtx, agentId);
+                await this.#writeWait(txCtx, resumed);
+                await this.#announce(
+                    txCtx,
+                    this.#event({
+                        type: "wait_resumed",
+                        agentId,
+                        wait: resumed,
+                        ...(await this.#waitChange(txCtx, agentId, previousWait)),
+                    }),
+                );
+                return resumed;
             }
             const startedAt = this.#now();
             const claimed: SchedulingWaitingRecord = {
@@ -464,35 +529,47 @@ export class SchedulingModule implements AgentModule {
         if (outcome === "interrupted" && shutdown.get(ctx)?.shuttingDown === true) {
             throw new Error("The scheduled wait is suspended while the daemon restarts.");
         }
-        return await ctx.inTx(async (txCtx) => {
+        // An interruption usually means the call's own lifetime has ended, and agent storage
+        // refuses a context whose work is over. Recording how the wait ended belongs to the wait,
+        // not to the call that held it, so it is written on the module's own context.
+        return await this.#requireOwnContext().inTx(async (txCtx) => {
             const before = await this.#readRequiredWait(txCtx, agentId, id);
-            if (before.status !== "waiting") return waitResult(before);
-            const finishedAt =
-                outcome === "elapsed"
-                    ? Math.max(this.#now(), before.dueAt)
-                    : Math.max(this.#now(), before.startedAt);
-            const settled: SchedulingWaitRecord = {
-                ...before,
-                status: outcome,
-                updatedAt: finishedAt,
-                finishedAt,
-                elapsedMs: finishedAt - before.startedAt,
-            };
-            const previousWait = await this.readActiveWait(txCtx, agentId);
-            await this.#writeWait(txCtx, settled);
-            const result = waitResult(settled);
-            await this.#announce(
-                txCtx,
-                this.#event({
-                    type: "wait_finished",
-                    agentId,
-                    wait: settled,
-                    result,
-                    ...(await this.#waitChange(txCtx, agentId, previousWait)),
-                }),
-            );
-            return result;
+            if (!isUnsettled(before)) return waitResult(before);
+            return await this.#settleWait(txCtx, before, outcome);
         });
+    }
+
+    /** Record how an unsettled wait ended and announce it, inside the caller's transaction. */
+    async #settleWait(
+        txCtx: Context,
+        before: SchedulingWaitingRecord | SchedulingSuspendedRecord,
+        outcome: SchedulingSuspensionOutcome,
+    ): Promise<SchedulingWaitResult> {
+        const finishedAt =
+            outcome === "elapsed"
+                ? Math.max(this.#now(), before.dueAt)
+                : Math.max(this.#now(), before.startedAt);
+        const settled: SchedulingWaitRecord = {
+            ...before,
+            status: outcome,
+            updatedAt: finishedAt,
+            finishedAt,
+            elapsedMs: finishedAt - before.startedAt,
+        };
+        const previousWait = await this.readActiveWait(txCtx, before.agentId);
+        await this.#writeWait(txCtx, settled);
+        const result = waitResult(settled);
+        await this.#announce(
+            txCtx,
+            this.#event({
+                type: "wait_finished",
+                agentId: before.agentId,
+                wait: settled,
+                result,
+                ...(await this.#waitChange(txCtx, before.agentId, previousWait)),
+            }),
+        );
+        return result;
     }
 
     async #waitChange(
@@ -505,6 +582,33 @@ export class SchedulingModule implements AgentModule {
             previous?.dueAt === activeWait?.dueAt
             ? {}
             : { activeWait };
+    }
+
+    /** Suspend every wait of this agent still recorded as waiting, earliest first. */
+    async #suspendLeftoverWaits(txCtx: Context, agentId: string): Promise<void> {
+        for (;;) {
+            const wait = await this.#store.readActiveWait(txCtx, agentId);
+            if (wait === undefined) return;
+            assertSchedulingWaitRecord(wait);
+            const suspended: SchedulingSuspendedRecord = {
+                ...wait,
+                status: "suspended",
+                updatedAt: Math.max(this.#now(), wait.updatedAt),
+            };
+            await this.#writeWait(txCtx, suspended);
+            await this.#announce(
+                txCtx,
+                this.#event({
+                    type: "wait_suspended",
+                    agentId,
+                    wait: suspended,
+                    ...(await this.#waitChange(txCtx, agentId, {
+                        startedAt: wait.startedAt,
+                        dueAt: wait.dueAt,
+                    })),
+                }),
+            );
+        }
     }
 
     /** Re-arm every message the previous process left pending, oldest due time first. */
@@ -558,7 +662,7 @@ export class SchedulingModule implements AgentModule {
     async #deliver(scheduleId: string): Promise<void> {
         if (this.#delivering.has(scheduleId)) return;
         this.#delivering.add(scheduleId);
-        const ctx = this.#requireDeliveryContext();
+        const ctx = this.#requireOwnContext();
         try {
             const due = await ctx.inTx(
                 async (txCtx) => await this.#readSchedule(txCtx, scheduleId),
@@ -780,11 +884,11 @@ export class SchedulingModule implements AgentModule {
         return this.#agents;
     }
 
-    #requireDeliveryContext(): Context {
-        if (this.#deliveryCtx === undefined) {
+    #requireOwnContext(): Context {
+        if (this.#ownCtx === undefined) {
             throw new Error("Scheduling has not been started by an agent system yet.");
         }
-        return this.#deliveryCtx;
+        return this.#ownCtx;
     }
 
     #assertAgentId(value: unknown, label: string): asserts value is string {
@@ -812,6 +916,18 @@ type SchedulingEventPayload =
           readonly activeWait?: SchedulingWaitInterval | null;
       }
     | {
+          readonly type: "wait_suspended";
+          readonly agentId: string;
+          readonly wait: SchedulingSuspendedRecord;
+          readonly activeWait?: SchedulingWaitInterval | null;
+      }
+    | {
+          readonly type: "wait_resumed";
+          readonly agentId: string;
+          readonly wait: SchedulingWaitingRecord;
+          readonly activeWait?: SchedulingWaitInterval | null;
+      }
+    | {
           readonly type: "wait_finished";
           readonly agentId: string;
           readonly wait: SchedulingWaitRecord;
@@ -827,8 +943,15 @@ type SchedulingEventPayload =
           readonly schedule: SchedulingScheduledMessage;
       };
 
+/** Whether a wait has yet to record how it ended. */
+function isUnsettled(
+    wait: SchedulingWaitRecord,
+): wait is SchedulingWaitingRecord | SchedulingSuspendedRecord {
+    return wait.status === "waiting" || wait.status === "suspended";
+}
+
 function waitResult(wait: SchedulingWaitRecord): SchedulingWaitResult {
-    if (wait.status === "waiting") throw new Error("A waiting record has no final result.");
+    if (isUnsettled(wait)) throw new Error("An unsettled wait has no final result.");
     const result: SchedulingWaitResult = {
         waitId: wait.id,
         agentId: wait.agentId,
