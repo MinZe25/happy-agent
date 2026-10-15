@@ -2,6 +2,7 @@ import {
     agentDatabaseRows,
     ensureAgentDatabaseConnection,
     type AgentModuleScope,
+    type AgentSystemRef,
 } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
 import { sql } from "drizzle-orm";
@@ -9,6 +10,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ArtifactsModule } from "../../sources/artifacts/index.js";
 import type { BotsModule } from "../../sources/bots/index.js";
 import type { ComputeModule } from "../../sources/compute/index.js";
+import type { ConfigModule } from "../../sources/config/index.js";
+import type { RunnersModule } from "../../sources/runners/index.js";
 import type { TasksModule } from "../../sources/tasks/index.js";
 import type { TeamModule } from "../../sources/team/index.js";
 import { DurableFunctionsModule } from "../../sources/durableFunctions/index.js";
@@ -53,6 +56,8 @@ async function fixture(teamEnabled = true) {
         { get: async () => undefined } as unknown as TasksModule,
         { get: async () => undefined } as unknown as ArtifactsModule,
         compute as unknown as ComputeModule,
+        {} as ConfigModule,
+        { enabled: false } as RunnersModule,
     );
     const db = moduleDatabase([...durable.migrations, ...surfaces.migrations], "surfaces-test");
     ensureAgentDatabaseConnection(db.database);
@@ -61,7 +66,7 @@ async function fixture(teamEnabled = true) {
         db.close();
     });
     await db.ready;
-    const hooks = surfaces.beforeStart(db.context);
+    const hooks = surfaces.beforeStart(db.context, {} as AgentSystemRef);
     return {
         surfaces,
         db,

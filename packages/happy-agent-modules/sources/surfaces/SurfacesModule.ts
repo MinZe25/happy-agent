@@ -2,10 +2,13 @@ import { createId } from "@paralleldrive/cuid2";
 import {
     agentDatabase,
     cuid2Schema,
+    currentAgentEnvironment,
     type AgentKV,
     type AgentModule,
     type AgentModuleHooks,
+    type AgentSystemRef,
 } from "@slopus/happy-agent-base";
+import { computePermissions } from "@slopus/happy-agent-compute";
 import {
     createTodoSurfaceRequestSchema,
     createSeparatorSurfaceRequestSchema,
@@ -46,7 +49,7 @@ import {
 } from "@slopus/happy-agent-client";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { Context } from "@steve.kite/stdlib";
+import { afterCommit, backoff, type Context } from "@steve.kite/stdlib";
 import { DurableFunctionsModule } from "../durableFunctions/index.js";
 import { createUuidV7Factory } from "../utils/createUuidV7.js";
 import { TeamModule } from "../team/index.js";
@@ -54,6 +57,8 @@ import { BotsModule } from "../bots/index.js";
 import { TasksModule } from "../tasks/index.js";
 import { ArtifactsModule } from "../artifacts/index.js";
 import { ComputeModule } from "../compute/index.js";
+import { ConfigModule } from "../config/index.js";
+import type { RunnersModule } from "../runners/index.js";
 import { apiResourceVersion } from "../utils/apiResourceVersion.js";
 import { isUserOriginMetadata } from "../impl/messageOrigin.js";
 import { SurfacesPersistence, surfacesMigrations } from "./persistence/SurfacesPersistence.js";
@@ -66,6 +71,8 @@ import {
 } from "../impl/images/normalizeManagedImage.js";
 import { surfaceImageAssetSchema, type SurfaceImageAsset } from "./SurfaceImageAsset.js";
 import { surfaceReferenceSchema, type SurfaceReference } from "./SurfaceReference.js";
+import { surfaceChatSchema, type SurfaceChat } from "./SurfaceChat.js";
+import { formatSurfaceChatPrompt } from "./impl/formatSurfaceChatPrompt.js";
 import { surfaceTools } from "./tools/surfaceTools.js";
 
 const eventSchema = Type.Union([
@@ -89,6 +96,13 @@ const supportedCreationSchema = Type.Union([
     createBotSurfaceRequestSchema,
     createTaskSurfaceRequestSchema,
 ]);
+/** Types whose content a shared conversation can work on; separators have none. */
+const CHAT_TYPES: ReadonlySet<string> = new Set(["todo", "document", "artifact", "bot", "task"]);
+const PREPARE_CHAT = "surfaces.prepareChat";
+/** How long a person's request waits for a chat's folder and agent before reporting 503. */
+const CHAT_READY_TIMEOUT_MS = 20_000;
+/** The catalog manages chat folders; the agent sandbox does not apply to that work. */
+const PRODUCT = computePermissions("full_access");
 const documentHistoryCursorSchema = Type.String({
     minLength: 36,
     maxLength: 36,
@@ -101,8 +115,10 @@ export class SurfacesModule implements AgentModule {
     readonly migrations = surfacesMigrations;
     readonly #listeners = new Set<Listener>();
     readonly #transactional = new Set<Listener>();
+    readonly #chatWaiters = new Map<string, Set<() => void>>();
     #store!: SurfacesPersistence;
     #kv!: AgentKV;
+    #agents: AgentSystemRef | undefined;
     constructor(
         readonly durable: DurableFunctionsModule,
         readonly team: TeamModule,
@@ -110,6 +126,8 @@ export class SurfacesModule implements AgentModule {
         readonly tasks: TasksModule,
         readonly artifacts: ArtifactsModule,
         readonly compute: ComputeModule,
+        readonly config: ConfigModule,
+        readonly runners: RunnersModule,
     ) {
         durable.register({
             name: "surfaces.notify",
@@ -120,11 +138,28 @@ export class SurfacesModule implements AgentModule {
                 return null;
             },
         });
+        // Folder preparation belongs to the daemon's lifetime and survives a restart; the
+        // association commits only once the folder exists.
+        durable.register({
+            name: PREPARE_CHAT,
+            argumentsSchema: Type.Object({ surfaceId: surfaceIdSchema }),
+            resultSchema: Type.Null(),
+            executor: async (ctx, call) => {
+                await this.#prepareChat(ctx, call.arguments.surfaceId);
+                return null;
+            },
+        });
     }
-    readonly beforeStart = (ctx: Context): AgentModuleHooks => {
+    readonly beforeStart = (ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
         this.#store = new SurfacesPersistence(agentDatabase(ctx)!);
         this.#kv = this.#store.kv();
+        this.#agents = agents;
         return {
+            instructions: async (hookCtx, scope) => {
+                const chat = await this.chatForAgent(hookCtx, scope.agent.id);
+                if (chat === undefined) return "";
+                return formatSurfaceChatPrompt(await this.#surface(hookCtx, chat.surfaceId));
+            },
             tools: async (toolCtx, scope) =>
                 surfaceTools(this, scope, await this.isAdmin(toolCtx, scope.agent.id)),
             messageAcceptedTransact: async (hookCtx, scope, accepted) => {
@@ -253,6 +288,7 @@ export class SurfacesModule implements AgentModule {
                 type: input.type,
                 name: input.name,
                 creatorUserId,
+                chatAgentId: null,
                 image: image === null ? null : { thumbhash: image.thumbhash },
                 members:
                     this.team.enabled && creatorUserId === null
@@ -296,6 +332,84 @@ export class SurfacesModule implements AgentModule {
             });
             return this.#present(tx, surface);
         });
+    }
+    /**
+     * Record the intent to give this Surface its shared chat. Identities and the folder path are
+     * reserved once, so every retry and restart resumes the same ones; the durable preparation
+     * runs after the caller's transaction commits. An existing chat is returned unchanged.
+     */
+    async requestChat(ctx: Context, id: string, mutationId?: string): Promise<Surface> {
+        return ctx.inTx(async (tx) => {
+            const surface = await this.#surface(tx, id);
+            if (!CHAT_TYPES.has(surface.type))
+                throw new SurfaceError("conflict", "This kind of Surface has no chat.");
+            if (surface.chatAgentId != null) return this.#present(tx, surface);
+            if ((await this.#kv.read(tx, `chat.${id}`)) === undefined) {
+                const runnerId = this.runners.enabled ? this.runners.defaultRunnerId : undefined;
+                const chat: SurfaceChat = {
+                    surfaceId: id,
+                    agentId: createId(),
+                    workspaceId: createId(),
+                    path: this.#chatPath(runnerId, id),
+                    ...(runnerId === undefined ? {} : { runnerId }),
+                    ...(mutationId === undefined ? {} : { mutationId }),
+                    reservedAt: Date.now(),
+                };
+                await this.#kv.write(tx, `chat.${id}`, chat);
+            }
+            await this.durable.invoke(tx, {
+                function: PREPARE_CHAT,
+                arguments: { surfaceId: id },
+                operationId: `${PREPARE_CHAT}.${id}`,
+                lockKeys: [`${PREPARE_CHAT}.${id}`],
+            });
+            return this.#present(tx, surface);
+        });
+    }
+    /** Wait, bounded, for a requested chat to commit. The caller owns only this wait. */
+    async awaitChat(ctx: Context, id: string): Promise<{ surface: Surface; chat: SurfaceChat }> {
+        const deadline = Date.now() + CHAT_READY_TIMEOUT_MS;
+        for (;;) {
+            let wake!: () => void;
+            const woken = new Promise<void>((resolve) => (wake = resolve));
+            const waiters = this.#chatWaiters.get(id) ?? new Set();
+            waiters.add(wake);
+            this.#chatWaiters.set(id, waiters);
+            try {
+                const ready = await ctx.inTx(async (tx) => {
+                    const surface = await this.#surface(tx, id);
+                    if (surface.chatAgentId == null) return undefined;
+                    return {
+                        surface: await this.#present(tx, surface),
+                        chat: checked(surfaceChatSchema, await this.#kv.read(tx, `chat.${id}`)),
+                    };
+                });
+                if (ready !== undefined) return ready;
+                const remaining = deadline - Date.now();
+                if (remaining <= 0)
+                    throw new SurfaceError(
+                        "not_initialized",
+                        "The Surface chat is still being prepared. Try again shortly.",
+                    );
+                let timer: NodeJS.Timeout | undefined;
+                await Promise.race([
+                    woken,
+                    new Promise<void>((resolve) => (timer = setTimeout(resolve, remaining))),
+                ]);
+                clearTimeout(timer);
+            } finally {
+                waiters.delete(wake);
+                if (waiters.size === 0) this.#chatWaiters.delete(id);
+            }
+        }
+    }
+    /** The committed chat whose agent this is, if any. Reservations alone are never reported. */
+    async chatForAgent(ctx: Context, agentId: string): Promise<SurfaceChat | undefined> {
+        return this.#chatBy(ctx, `chat-agent.${agentId}`);
+    }
+    /** The committed chat whose dedicated workspace this is, if any. */
+    async chatForWorkspace(ctx: Context, workspaceId: string): Promise<SurfaceChat | undefined> {
+        return this.#chatBy(ctx, `chat-workspace.${workspaceId}`);
     }
     async image(ctx: Context, id: string): Promise<SurfaceImageAsset> {
         return ctx.inTx(async (tx) => {
@@ -705,6 +819,100 @@ export class SurfacesModule implements AgentModule {
             throw new Error("A document revision cannot be overwritten.");
         await this.#kv.write(ctx, `document.${document.surfaceId}`, document);
     }
+    async #chatBy(ctx: Context, key: string): Promise<SurfaceChat | undefined> {
+        const surfaceId = await this.#kv.read(ctx, key);
+        if (surfaceId === undefined) return undefined;
+        return checked(surfaceChatSchema, await this.#kv.read(ctx, `chat.${String(surfaceId)}`));
+    }
+    #chatPath(runnerId: string | undefined, surfaceId: string): string {
+        if (runnerId === undefined) {
+            const local = this.runners.machineHome(undefined);
+            return local === undefined
+                ? this.config.surfacePath(surfaceId)
+                : this.config.surfacePathOn(local.home, local.platform, surfaceId);
+        }
+        const home = this.runners.home(runnerId);
+        if (home === undefined)
+            throw new SurfaceError(
+                "not_initialized",
+                `The runner ${this.runners.displayName(runnerId)} has never connected, so it has nowhere to put a Surface chat folder yet.`,
+            );
+        return this.config.surfacePathOn(
+            home,
+            this.runners.platform(runnerId) ?? "linux",
+            surfaceId,
+        );
+    }
+    /**
+     * Make the reserved folder, then create the agent and name it on the Surface in one
+     * transaction. A folder left by an interrupted attempt is taken up again; an association that
+     * already exists makes this a no-op, so concurrent requests and restarts converge.
+     */
+    async #prepareChat(ctx: Context, id: string): Promise<void> {
+        const reserved = await this.#kv.read(ctx, `chat.${id}`);
+        if (reserved === undefined) return;
+        const chat = checked(surfaceChatSchema, reserved);
+        if ((await this.#surface(ctx, id)).chatAgentId != null) return;
+        await backoff(
+            ctx,
+            async () => {
+                const machine = await this.runners.machine(chat.runnerId);
+                await machine.fs.mkdir(PRODUCT, chat.path, { recursive: true });
+            },
+            { timeout: 5 * 60_000 },
+        );
+        await ctx.inTx(async (tx) => {
+            const current = await this.#surface(tx, id);
+            if (current.chatAgentId != null) return;
+            const now = Date.now();
+            await this.#requireAgents().create(
+                tx,
+                {
+                    provenance: { createdAt: now },
+                    environment: { ...currentAgentEnvironment(), workingDirectory: chat.path },
+                    metadata: { title: current.name, updatedAt: now, version: 1 },
+                    modules: {
+                        compute: {
+                            cwd: chat.path,
+                            ...(chat.runnerId === undefined ? {} : { runnerId: chat.runnerId }),
+                            secretScope: { workspaceId: chat.workspaceId },
+                        },
+                    },
+                },
+                { id: chat.agentId, parent: null },
+            );
+            await this.#kv.write(tx, `chat-agent.${chat.agentId}`, id);
+            await this.#kv.write(tx, `chat-workspace.${chat.workspaceId}`, id);
+            const surface: Surface = {
+                ...current,
+                chatAgentId: chat.agentId,
+                updatedAt: now,
+                version: createUuidV7Factory(Date.now, current.version)(),
+            };
+            await this.#kv.write(tx, `surface.${id}`, surface);
+            await this.#event(tx, {
+                type: "surface.updated",
+                payload: {
+                    surfaceId: id,
+                    previousVersion: current.version,
+                    version: surface.version,
+                    changes: {
+                        members: current.members,
+                        updatedAt: now,
+                        chatAgentId: chat.agentId,
+                    },
+                    ...echo(chat.mutationId),
+                },
+            });
+            afterCommit(tx, () => {
+                for (const wake of this.#chatWaiters.get(id) ?? []) wake();
+            });
+        });
+    }
+    #requireAgents(): AgentSystemRef {
+        if (this.#agents === undefined) throw new Error("Surfaces have not started.");
+        return this.#agents;
+    }
     async #stored(ctx: Context): Promise<Surface[]> {
         return (await this.#kv.list(ctx, "surface.")).map((row) => readSurface(row.value));
     }
@@ -821,7 +1029,11 @@ export class SurfacesModule implements AgentModule {
 /** Older snapshots have no attribution; reads never infer it or rewrite stored history. */
 function readSurface(value: unknown): Surface {
     const surface = checked(surfaceSchema, value);
-    return { ...surface, creatorUserId: surface.creatorUserId ?? null };
+    return {
+        ...surface,
+        creatorUserId: surface.creatorUserId ?? null,
+        chatAgentId: surface.chatAgentId ?? null,
+    };
 }
 function readTodo(value: unknown): Todo {
     const todo = checked(todoSchema, value);

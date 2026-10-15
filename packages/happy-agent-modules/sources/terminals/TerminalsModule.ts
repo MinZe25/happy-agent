@@ -8,6 +8,7 @@ import { createUuidV7Factory } from "../events/index.js";
 import { BotsModule } from "../bots/index.js";
 import { ProjectsModule, type Project } from "../projects/index.js";
 import { RunnersModule } from "../runners/index.js";
+import type { SurfacesModule } from "../surfaces/index.js";
 import type { TasksModule } from "../tasks/index.js";
 import { WorkspacesModule } from "../workspaces/index.js";
 
@@ -55,6 +56,7 @@ export class TerminalsModule {
     readonly #runners: RunnersModule;
     readonly #scopes = new Map<string, TerminalCollection>();
     readonly #tasks: TasksModule | undefined;
+    readonly #surfaces: SurfacesModule | undefined;
     readonly #workspaces: WorkspacesModule;
     /** Closures started by an archival, so shutdown and tests can wait for them. */
     readonly #closures = new Set<Promise<void>>();
@@ -78,9 +80,11 @@ export class TerminalsModule {
         runners: RunnersModule,
         bots?: BotsModule,
         tasks?: TasksModule,
+        surfaces?: SurfacesModule,
     ) {
         this.#bots = bots;
         this.#tasks = tasks;
+        this.#surfaces = surfaces;
         this.#projects = projects;
         this.#runners = runners;
         this.#workspaces = workspaces;
@@ -428,6 +432,9 @@ export class TerminalsModule {
                 }
                 return { kind: "machine", path: task.path, runnerId: task.runnerId };
             }
+            const chat = await this.#surfaces?.chatForWorkspace(ctx, scope.workspaceId);
+            if (chat !== undefined && chat.surfaceId === scope.projectId)
+                return { kind: "machine", path: chat.path, runnerId: chat.runnerId };
         }
         const project = await this.#projects.get(ctx, scope.projectId);
         if (project === undefined) {

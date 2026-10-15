@@ -31,3 +31,13 @@ image flag, and target version are never copied or synchronized. A missing, dele
 target reads as unavailable without its ID. Shared events carry the stored record alone, never
 the resolved projection. The three admin creation tools share the image and replay handling of
 the other typed creation tools.
+
+Every Surface type except separators can own one shared chat, created only when a person opens
+it. The request reserves the agent ID, workspace ID, and folder path in `chat.*` and invokes the
+durable `surfaces.prepareChat` function in the same transaction. Preparation belongs to the
+daemon's lifetime: it makes the folder under Configuration's `Surfaces` root on the task-layout
+runner, then creates the parentless agent, writes the agent and workspace indexes, and names the
+agent on the Surface in one transaction. The HTTP caller only waits, at most 20 seconds, for that
+commit. Tasks, bots, files, terminals, services, bridges, and the API ask this module whether an
+agent or workspace belongs to a chat; the Surface, not those catalogs, owns its lifetime. The chat
+agent's context names the Surface and receives the ordinary, non-admin Surface tools.

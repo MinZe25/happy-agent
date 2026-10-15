@@ -515,27 +515,6 @@ export async function startHappyAgentRuntime(
             bots,
             tasks,
         );
-        const services = new ServicesModule(
-            config,
-            compute.computeModule,
-            workspaces,
-            projects,
-            bots,
-            tasks,
-            durableFunctions,
-            events,
-        );
-        const node = new NodeModule(config, bots, compute.computeModule, durableFunctions);
-        const skillFolders = new SkillFoldersModule(config, bots);
-        const tailcat = new TailcatModule(config, bots, durableFunctions);
-        registerShutdown("tailcat", async (shutdownCtx) => await tailcat.close(shutdownCtx));
-        const terminals = new TerminalsModule(projects, workspaces, runners, bots, tasks);
-        registerShutdown("terminals", async () => await terminals.close());
-        const bridges = new BridgesModule(projects, workspaces, runners, bots, tasks);
-        registerShutdown("bridges", async () => await bridges.close());
-        const files = new ProjectFilesModule(projects, workspaces, git, runners, bots, tasks);
-        registerShutdown("files", async () => await files.close());
-
         const profile = new ProfileModule<LibSQLDatabase>(config, bots);
         const team = new TeamModule<LibSQLDatabase>(config, profile);
         registerShutdown("team", async () => team.close());
@@ -547,7 +526,39 @@ export async function startHappyAgentRuntime(
             tasks,
             artifacts,
             compute.computeModule,
+            config,
+            runners,
         );
+        const services = new ServicesModule(
+            config,
+            compute.computeModule,
+            workspaces,
+            projects,
+            bots,
+            tasks,
+            durableFunctions,
+            events,
+            surfaces,
+        );
+        const node = new NodeModule(config, bots, compute.computeModule, durableFunctions);
+        const skillFolders = new SkillFoldersModule(config, bots);
+        const tailcat = new TailcatModule(config, bots, durableFunctions);
+        registerShutdown("tailcat", async (shutdownCtx) => await tailcat.close(shutdownCtx));
+        const terminals = new TerminalsModule(projects, workspaces, runners, bots, tasks, surfaces);
+        registerShutdown("terminals", async () => await terminals.close());
+        const bridges = new BridgesModule(projects, workspaces, runners, bots, tasks, surfaces);
+        registerShutdown("bridges", async () => await bridges.close());
+        const files = new ProjectFilesModule(
+            projects,
+            workspaces,
+            git,
+            runners,
+            bots,
+            tasks,
+            surfaces,
+        );
+        registerShutdown("files", async () => await files.close());
+
         const artifactData = new ArtifactDataModule(config, artifacts, profile, team, bots);
         registerShutdown(
             "artifact-data",

@@ -18,6 +18,7 @@ import { BotsModule } from "../bots/index.js";
 import { createUuidV7Factory } from "../events/index.js";
 import { ProjectsModule } from "../projects/index.js";
 import { RunnersModule } from "../runners/index.js";
+import type { SurfacesModule } from "../surfaces/index.js";
 import type { TasksModule } from "../tasks/index.js";
 import { WorkspacesModule } from "../workspaces/index.js";
 
@@ -107,6 +108,7 @@ export class BridgesModule implements AgentModule {
     readonly #runners: RunnersModule;
     readonly #bots: BotsModule | undefined;
     readonly #tasks: TasksModule | undefined;
+    readonly #surfaces: SurfacesModule | undefined;
     readonly #listeners = new Set<BridgeEventListener>();
     readonly #nextVersion = createUuidV7Factory();
     /** Every bridge from admission to its end, established or not, keyed by ID. */
@@ -135,12 +137,14 @@ export class BridgesModule implements AgentModule {
         runners: RunnersModule,
         bots?: BotsModule,
         tasks?: TasksModule,
+        surfaces?: SurfacesModule,
     ) {
         this.#projects = projects;
         this.#workspaces = workspaces;
         this.#runners = runners;
         this.#bots = bots;
         this.#tasks = tasks;
+        this.#surfaces = surfaces;
 
         // Archiving is the decision that a folder is nobody's any more. Its bridges end with it,
         // and the catalogs that own the decision never need to know bridges exist.
@@ -591,6 +595,13 @@ export class BridgesModule implements AgentModule {
                 keys: [workspaceId, task.id],
             };
         }
+        const chat = await this.#surfaces?.chatForWorkspace(ctx, workspaceId);
+        if (chat !== undefined)
+            return {
+                workspaceId,
+                compute: chat.runnerId === undefined ? "host" : "runner",
+                keys: [workspaceId, chat.surfaceId],
+            };
         const project = await this.#projects.get(ctx, workspaceId);
         if (project !== undefined) {
             if (project.status !== "active") throw notAvailable();

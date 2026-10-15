@@ -14,6 +14,7 @@ import { GitRevisionFileTooLargeError, type GitModule } from "../git/index.js";
 import type { BotsModule } from "../bots/index.js";
 import type { ProjectsModule } from "../projects/index.js";
 import { LocalExecutionDisabledError, type RunnersModule } from "../runners/index.js";
+import type { SurfacesModule } from "../surfaces/index.js";
 import type { TasksModule } from "../tasks/index.js";
 import type { WorkspacesModule } from "../workspaces/index.js";
 import { MachineFileIndex } from "./impl/MachineFileIndex.js";
@@ -183,6 +184,7 @@ export class ProjectFilesModule implements AgentModule {
     readonly #machineIndex: MachineFileIndex;
     readonly #runners: RunnersModule;
     readonly #tasks: TasksModule | undefined;
+    readonly #surfaces: SurfacesModule | undefined;
     readonly #workspaces: WorkspacesModule;
     readonly #writeLocks = new Map<string, Promise<void>>();
     #closed = false;
@@ -200,9 +202,11 @@ export class ProjectFilesModule implements AgentModule {
         runners: RunnersModule,
         bots?: BotsModule,
         tasks?: TasksModule,
+        surfaces?: SurfacesModule,
     ) {
         this.#bots = bots;
         this.#tasks = tasks;
+        this.#surfaces = surfaces;
         this.#git = git;
         this.#index = new WorkspaceFileIndex(git);
         this.#machineIndex = new MachineFileIndex(git);
@@ -309,6 +313,19 @@ export class ProjectFilesModule implements AgentModule {
             projectId: task.id,
             workspaceId: task.workspaceId,
             ...(await this.#canonicalRoot(task.runnerId, task.path)),
+        };
+    }
+
+    /** Resolve one Surface chat workspace through the Surface catalog that owns its folder. */
+    async resolveSurfaceRoot(ctx: Context, workspaceId: string): Promise<ProjectFileRoot> {
+        const chat = await this.#surfaces?.chatForWorkspace(ctx, workspaceId);
+        if (chat === undefined) {
+            throw new ProjectFileError(404, "missing", "The workspace was not found.");
+        }
+        return {
+            projectId: chat.surfaceId,
+            workspaceId: chat.workspaceId,
+            ...(await this.#canonicalRoot(chat.runnerId, chat.path)),
         };
     }
 

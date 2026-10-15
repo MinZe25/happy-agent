@@ -42,6 +42,19 @@ or archived targets read as unavailable with no identifying fields, and creation
 as not found. Shared creation events carry only the stored record, so a caller-relative
 projection is never published. A reference joins nobody to the target and grants no rights.
 
+## A Surface chat is reserved before it is prepared
+
+A shared chat has to come out the same under concurrent opens, lost responses, restarts, and a
+slow or failing folder. Opening one reserves its agent, workspace, and folder in one transaction
+with a durable preparation intent keyed by the Surface, so every retry resumes those identities.
+The daemon, not the HTTP request, makes the folder; the agent, its indexes, and the Surface's
+`chatAgentId` commit together only afterwards. The caller waits a bounded time and otherwise
+gets `503 not_initialized`, never a partial association. The chat's agent is announced after its
+initial slash-command discovery and before the `surface.updated` that names it, like bot and task
+agents. Separators have no content and get no chat. The Surface owns the chat's lifetime, so agent
+and workspace archive, reorder, rename, child creation, and attaching another agent all conflict.
+The agent works for each message's sender, holds no admin role, and never joins anyone.
+
 ## Attribution is explicit and remains separate from audit actors
 
 Todo records and Surfaces did not retain their author or creator. Todos now carry immutable

@@ -1422,6 +1422,11 @@ export class ConfigModule implements AgentModule {
         return join(this.configuration.paths.publicHome, "Tasks");
     }
 
+    /** The public root for Surface chat folders, beside the task and bot folders. */
+    get surfacesHome(): string {
+        return join(this.configuration.paths.publicHome, "Surfaces");
+    }
+
     /** Installed global skills live on this daemon's machine, independently of its config home. */
     get globalSkillsRoot(): string {
         return join(this.#environment.HOME?.trim() || homedir(), ".agents", "skills");
@@ -1644,6 +1649,14 @@ export class ConfigModule implements AgentModule {
             throw new Error("The task folder name cannot name a folder.");
         }
         return join(this.tasksHome, folderName);
+    }
+
+    /** One Surface's chat folder, named by its immutable CUID2. */
+    surfacePath(surfaceId: string): string {
+        if (!/^[a-z][a-z0-9]{23}$/.test(surfaceId)) {
+            throw new Error("The Surface ID cannot name a folder.");
+        }
+        return join(this.surfacesHome, surfaceId);
     }
 
     private constructor(
@@ -2770,6 +2783,14 @@ export class ConfigModule implements AgentModule {
             throw new Error("The task folder name cannot name a folder.");
         }
         return join(home, platform === "darwin" ? "Happy" : "happy", "Tasks", folderName);
+    }
+
+    /** A Surface chat folder on a runner with this home and platform, laid out like task folders. */
+    surfacePathOn(home: string, platform: NodeJS.Platform, surfaceId: string): string {
+        if (!/^[a-z][a-z0-9]{23}$/.test(surfaceId)) {
+            throw new Error("The Surface ID cannot name a folder.");
+        }
+        return join(home, platform === "darwin" ? "Happy" : "happy", "Surfaces", surfaceId);
     }
 
     /** The folder managed workspaces live under on a runner with this home and platform. */

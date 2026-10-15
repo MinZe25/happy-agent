@@ -14,6 +14,7 @@ import type {
 } from "../artifacts/index.js";
 import type { BotRecord } from "../bots/index.js";
 import type { Profile } from "../profile/index.js";
+import type { SurfaceChat } from "../surfaces/index.js";
 import { STANDALONE_TASK_MEMBER, type TaskMembership, type TaskRecord } from "../tasks/index.js";
 import {
     ProjectsModule,
@@ -276,6 +277,39 @@ export function taskWorkspaceResource(
         createdAt: task.createdAt,
         updatedAt: task.workspaceUpdatedAt,
         archivedAt: task.archivedAt ?? null,
+        agents: [agent],
+        subtaskAgentId: null,
+    };
+}
+
+/** The unlisted workspace owned by one Surface's shared chat, shaped like a task's. */
+export function surfaceWorkspaceResource(
+    chat: SurfaceChat,
+    agent: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+    return {
+        id: chat.workspaceId,
+        projectId: null,
+        parentId: null,
+        botId: null,
+        surfaceId: chat.surfaceId,
+        name: chat.surfaceId,
+        nameSource: "generated",
+        kind: "surface",
+        compute:
+            chat.runnerId === undefined
+                ? { type: "host", path: chat.path }
+                : { type: "runner", runnerId: chat.runnerId, path: chat.path },
+        status: "active",
+        initialization: { status: "ready", attempt: 0, error: null },
+        base: null,
+        git: null,
+        creatorAgentId: null,
+        orderKey: "5",
+        version: apiResourceVersion(chat.reservedAt, 1, chat.workspaceId),
+        createdAt: chat.reservedAt,
+        updatedAt: chat.reservedAt,
+        archivedAt: null,
         agents: [agent],
         subtaskAgentId: null,
     };

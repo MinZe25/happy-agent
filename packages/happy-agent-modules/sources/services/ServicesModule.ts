@@ -27,6 +27,7 @@ import { Value } from "@sinclair/typebox/value";
 import { afterCommit, backoff, detach, type Context } from "@steve.kite/stdlib";
 
 import type { BotsModule } from "../bots/index.js";
+import type { SurfacesModule } from "../surfaces/index.js";
 import type { TasksModule } from "../tasks/index.js";
 import type { ComputeModule } from "../compute/index.js";
 import type { ConfigModule } from "../config/index.js";
@@ -99,6 +100,7 @@ export class ServicesModule implements AgentModule {
         readonly tasks: TasksModule,
         readonly durableFunctions: DurableFunctionsModule,
         readonly events: EventsModule,
+        readonly surfaces?: SurfacesModule,
     ) {
         durableFunctions.register({
             name: EXECUTE_SERVICE,
@@ -220,6 +222,9 @@ export class ServicesModule implements AgentModule {
                     path: task.path,
                     available: task.status === "active",
                 };
+            const chat = await this.surfaces?.chatForAgent(ctx, current);
+            if (chat !== undefined)
+                return { workspaceId: chat.workspaceId, path: chat.path, available: true };
             if (this.config.configuration.values.features.workspaces) {
                 const workspaceId = await this.workspaces.workspaceForAgent(ctx, current);
                 if (workspaceId !== undefined) return await this.workspace(ctx, workspaceId);
@@ -246,6 +251,8 @@ export class ServicesModule implements AgentModule {
         const task = await this.tasks.forWorkspace(ctx, workspaceId);
         if (task !== undefined)
             return { workspaceId, path: task.path, available: task.status === "active" };
+        const chat = await this.surfaces?.chatForWorkspace(ctx, workspaceId);
+        if (chat !== undefined) return { workspaceId, path: chat.path, available: true };
         const project = await this.projects.get(ctx, workspaceId);
         if (project !== undefined)
             return {

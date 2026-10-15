@@ -29,6 +29,7 @@ import {
     surfaceIdSchema,
     surfaceMemberRequestSchema,
     reorderSurfaceRequestSchema,
+    ensureSurfaceChatRequestSchema,
     createTodoRequestSchema,
     updateTodoRequestSchema,
     updateSurfaceDocumentRequestSchema,
@@ -279,6 +280,7 @@ import {
     taskMembershipResource,
     taskResource,
     taskWorkspaceResource,
+    surfaceWorkspaceResource,
     terminalResource,
     workspaceResource,
 } from "./ApiResourceProjection.js";
@@ -2491,7 +2493,17 @@ export class ApiModule implements AgentModule {
         );
         if (this.#surfaces !== undefined)
             this.#unsubscribe.push(
-                this.#surfaces.onEvent((_ctx, event) => {
+                this.#surfaces.onEvent(async (eventCtx, event) => {
+                    // A new chat's agent is announced before the Surface that names it.
+                    if (
+                        event.type === "surface.updated" &&
+                        typeof event.payload.changes.chatAgentId === "string"
+                    )
+                        await this.#announceSurfaceChat(
+                            eventCtx,
+                            event.payload.changes.chatAgentId,
+                            event.payload.mutationId,
+                        );
                     this.#journal.append(event.type, event.payload);
                 }),
             );
@@ -3657,6 +3669,30 @@ export class ApiModule implements AgentModule {
         this.#journal.append("agent.created", { agent });
     }
 
+    /** Announce a Surface chat's new agent once, echoing the winning ensure request. */
+    async #announceSurfaceChat(
+        ctx: Context,
+        agentId: string,
+        mutationId: string | undefined,
+    ): Promise<void> {
+        if (this.#announcedAgentCreations.has(agentId)) return;
+        const chat = await this.#surfaces?.chatForAgent(ctx, agentId);
+        if (chat === undefined) return;
+        // As for bots and tasks, initial slash-command discovery belongs to the settled snapshot.
+        await this.#slashCommands.catalog(ctx, agentId);
+        await this.#agentEventChains.get(agentId);
+        await this.#queueAgentWork(ctx, agentId, undefined, async () => undefined);
+        const agent = await this.#buildAgentResource(ctx, agentId, chat.workspaceId, null, {
+            userVisible: true,
+        });
+        if (agent === undefined || this.#announcedAgentCreations.has(agentId)) return;
+        boundedAdd(this.#announcedAgentCreations, agentId, MAX_ANNOUNCED_AGENT_CREATIONS);
+        this.#journal.append("agent.created", {
+            agent,
+            ...(mutationId === undefined ? {} : { mutationId }),
+        });
+    }
+
     async #refreshParentSubagents(ctx: Context, childAgentId: string): Promise<void> {
         const agents = this.#agentSystem();
         const parentAgentId = await agents.parentOf(ctx, childAgentId);
@@ -3702,6 +3738,13 @@ export class ApiModule implements AgentModule {
                     409,
                     "conflict",
                     "A task workspace already has its one permanent agent.",
+                );
+            }
+            if (ownership.surfaceId !== undefined) {
+                throw new ApiError(
+                    409,
+                    "conflict",
+                    "A Surface chat workspace already has its one permanent agent.",
                 );
             }
             const baseEnvironment = currentAgentEnvironment();
@@ -3894,6 +3937,13 @@ export class ApiModule implements AgentModule {
                         "Archive or unarchive this agent through its task.",
                     );
                 }
+                if ((await this.#surfaces?.chatForAgent(ctx, agentId)) !== undefined) {
+                    throw new ApiError(
+                        409,
+                        "conflict",
+                        "A Surface's shared chat lasts as long as its Surface.",
+                    );
+                }
                 await this.#assertUserControlledAgent(ctx, agentId, true);
                 const body = await bodyAs(request, emptyMutationBodySchema, "agent archival");
                 const config = await this.#agentSystem().config(ctx, agentId);
@@ -3935,6 +3985,13 @@ export class ApiModule implements AgentModule {
                 }
                 if ((await this.#tasks?.forAgent(ctx, agentId)) !== undefined) {
                     throw new ApiError(409, "conflict", "Reorder this agent through its task.");
+                }
+                if ((await this.#surfaces?.chatForAgent(ctx, agentId)) !== undefined) {
+                    throw new ApiError(
+                        409,
+                        "conflict",
+                        "A Surface's shared chat has no place among ordinary agents.",
+                    );
                 }
                 await this.#assertUserControlledAgent(ctx, agentId);
                 const body = await bodyAs(request, reorderBodySchema, "agent reorder");
@@ -4613,7 +4670,8 @@ export class ApiModule implements AgentModule {
             (options.userVisible ??
                 (orderKey != null ||
                     (await this.#bots.forAgent(ctx, agentId)) !== undefined ||
-                    (await this.#tasks?.forAgent(ctx, agentId)) !== undefined));
+                    (await this.#tasks?.forAgent(ctx, agentId)) !== undefined ||
+                    (await this.#surfaces?.chatForAgent(ctx, agentId)) !== undefined));
         const children = await this.#agentSystem().childOf(ctx, agentId);
         const [processes, questions, runningSubagents, activeRunId, subtasks] = await Promise.all([
             this.#compute.listProcesses(ctx, agentId),
@@ -4695,6 +4753,7 @@ export class ApiModule implements AgentModule {
     async #agentOrderKey(ctx: Context, agentId: string): Promise<string | null> {
         if ((await this.#bots.forAgent(ctx, agentId)) !== undefined) return null;
         if ((await this.#tasks?.forAgent(ctx, agentId)) !== undefined) return null;
+        if ((await this.#surfaces?.chatForAgent(ctx, agentId)) !== undefined) return null;
         const workspaceId = this.#config.configuration.values.features.workspaces
             ? await this.#workspaces.workspaceForAgent(ctx, agentId)
             : undefined;
@@ -4721,6 +4780,8 @@ export class ApiModule implements AgentModule {
             if (bot !== undefined) return bot.workspaceId;
             const task = await this.#tasks?.forAgent(ctx, current);
             if (task !== undefined) return task.workspaceId;
+            const chat = await this.#surfaces?.chatForAgent(ctx, current);
+            if (chat !== undefined) return chat.workspaceId;
             const workspaceId = this.#config.configuration.values.features.workspaces
                 ? await this.#workspaces.workspaceForAgent(ctx, current)
                 : undefined;
@@ -5337,7 +5398,9 @@ export class ApiModule implements AgentModule {
                 return false;
             }
             const membership =
-                /^\/v0\/surfaces\/([a-z][a-z0-9]*)\/(join|leave|reorder|image)$/.exec(url.pathname);
+                /^\/v0\/surfaces\/([a-z][a-z0-9]*)\/(join|leave|reorder|image|chat)$/.exec(
+                    url.pathname,
+                );
             if (membership !== null) {
                 const id = membership[1]!;
                 if (!Value.Check(surfaceIdSchema, id)) return false;
@@ -5356,6 +5419,26 @@ export class ApiModule implements AgentModule {
                     return true;
                 }
                 if (request.method !== "POST" || operation === "image") return false;
+                if (operation === "chat") {
+                    const body = await optionalBodyAs(
+                        request,
+                        ensureSurfaceChatRequestSchema,
+                        "Surface chat",
+                        2048,
+                    );
+                    await surfaces.requestChat(ctx, id, body.mutationId);
+                    const { surface, chat } = await surfaces.awaitChat(ctx, id);
+                    const agent = await this.#buildAgentResource(
+                        ctx,
+                        chat.agentId,
+                        chat.workspaceId,
+                        null,
+                        { userVisible: true },
+                    );
+                    if (agent === undefined) throw new Error("The Surface chat has no agent.");
+                    sendJson(response, 200, { surface, agent });
+                    return true;
+                }
                 if (operation === "reorder") {
                     const body = await bodyAs(
                         request,
@@ -5594,7 +5677,9 @@ export class ApiModule implements AgentModule {
                       ? 409
                       : error.code === "forbidden"
                         ? 403
-                        : 400,
+                        : error.code === "not_initialized"
+                          ? 503
+                          : 400,
                 error.code,
                 error.message,
                 error.todo === undefined
@@ -6087,6 +6172,13 @@ export class ApiModule implements AgentModule {
                     "A task workspace cannot have child workspaces.",
                 );
             }
+            if ((await this.#surfaces?.chatForWorkspace(ctx, body.parentId)) !== undefined) {
+                throw new ApiError(
+                    409,
+                    "conflict",
+                    "A Surface chat workspace cannot have child workspaces.",
+                );
+            }
             const root = await this.#projects.get(ctx, body.parentId);
             let projectId: string;
             if (root !== undefined) {
@@ -6157,6 +6249,13 @@ export class ApiModule implements AgentModule {
                 if ((await this.#tasks?.forWorkspace(ctx, workspaceId)) !== undefined) {
                     throw new ApiError(409, "conflict", "Rename this workspace through its task.");
                 }
+                if ((await this.#surfaces?.chatForWorkspace(ctx, workspaceId)) !== undefined) {
+                    throw new ApiError(
+                        409,
+                        "conflict",
+                        "A Surface chat workspace is named by its Surface.",
+                    );
+                }
                 const project = await this.#projects.get(ctx, workspaceId);
                 if (project !== undefined) {
                     throw new ApiError(
@@ -6205,6 +6304,13 @@ export class ApiModule implements AgentModule {
                 action[2] === "archive"
                     ? "Archive this workspace through its task."
                     : "Reorder this workspace through its task.",
+            );
+        }
+        if ((await this.#surfaces?.chatForWorkspace(ctx, workspaceId)) !== undefined) {
+            throw new ApiError(
+                409,
+                "conflict",
+                "A Surface chat workspace lasts as long as its Surface and has no order.",
             );
         }
         if ((await this.#projects.get(ctx, workspaceId)) !== undefined) {
@@ -6277,6 +6383,18 @@ export class ApiModule implements AgentModule {
             if (agent === undefined) throw new Error("The task workspace has no agent.");
             return taskWorkspaceResource(task, agent);
         }
+        const chat = await this.#surfaces?.chatForWorkspace(ctx, workspaceId);
+        if (chat !== undefined) {
+            const agent = await this.#buildAgentResource(
+                ctx,
+                chat.agentId,
+                chat.workspaceId,
+                null,
+                { userVisible: true },
+            );
+            if (agent === undefined) throw new Error("The Surface chat workspace has no agent.");
+            return surfaceWorkspaceResource(chat, agent);
+        }
         const project = await this.#projects.get(ctx, workspaceId);
         if (project !== undefined) {
             if (project.status === "archived" || project.archivedAt !== undefined) {
@@ -6337,6 +6455,7 @@ export class ApiModule implements AgentModule {
         // A bot's or task's one agent is always embedded and visible; its lifecycle owns archival.
         if ((await this.#bots.forAgent(ctx, agentId)) !== undefined) return;
         if ((await this.#tasks?.forAgent(ctx, agentId)) !== undefined) return;
+        if ((await this.#surfaces?.chatForAgent(ctx, agentId)) !== undefined) return;
         const workspaceId = this.#config.configuration.values.features.workspaces
             ? await this.#workspaces.workspaceForAgent(ctx, agentId)
             : undefined;
@@ -6420,14 +6539,16 @@ export class ApiModule implements AgentModule {
         if (fileRoute !== null) {
             const workspaceId = fileRoute[1] as string;
             const kind = fileRoute[2] as "files" | "file-tree" | "file" | "file-revision";
-            const { projectId, childWorkspaceId, botId, taskId } =
+            const { projectId, childWorkspaceId, botId, taskId, surfaceId } =
                 await this.#resolveWorkspaceScope(ctx, workspaceId);
             const root =
                 botId !== undefined
                     ? await this.#files.resolveBotRoot(ctx, workspaceId)
                     : taskId !== undefined
                       ? await this.#files.resolveTaskRoot(ctx, workspaceId)
-                      : await this.#files.resolveRoot(ctx, projectId, childWorkspaceId);
+                      : surfaceId !== undefined
+                        ? await this.#files.resolveSurfaceRoot(ctx, workspaceId)
+                        : await this.#files.resolveRoot(ctx, projectId, childWorkspaceId);
             if (kind === "files" && request.method === "GET") {
                 const query = queryAs(
                     {
@@ -6567,6 +6688,7 @@ export class ApiModule implements AgentModule {
     ): Promise<{
         readonly botId?: string;
         readonly taskId?: string;
+        readonly surfaceId?: string;
         readonly childWorkspaceId?: string;
         readonly docker?: { readonly image: string };
         readonly projectId: string;
@@ -6600,6 +6722,17 @@ export class ApiModule implements AgentModule {
                 root: task.path,
                 ...(task.runnerId === undefined ? {} : { runnerId: task.runnerId }),
                 scope: { projectId: task.id, workspaceId: task.workspaceId },
+            };
+        }
+        const chat = await this.#surfaces?.chatForWorkspace(ctx, workspaceId);
+        if (chat !== undefined) {
+            return {
+                surfaceId: chat.surfaceId,
+                childWorkspaceId: chat.workspaceId,
+                projectId: chat.surfaceId,
+                root: chat.path,
+                ...(chat.runnerId === undefined ? {} : { runnerId: chat.runnerId }),
+                scope: { projectId: chat.surfaceId, workspaceId: chat.workspaceId },
             };
         }
         const project = await this.#projects.get(ctx, workspaceId);
@@ -7319,6 +7452,7 @@ export class ApiModule implements AgentModule {
             return;
         }
         if (target.type === "workspace") {
+            if ((await this.#surfaces?.chatForWorkspace(ctx, target.id)) !== undefined) return;
             const owner =
                 (await this.#bots.forWorkspace(ctx, target.id)) ??
                 (await this.#tasks?.forWorkspace(ctx, target.id));
