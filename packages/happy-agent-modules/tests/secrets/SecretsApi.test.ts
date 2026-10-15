@@ -1,4 +1,4 @@
-import { agentDatabaseRun } from "@slopus/happy-agent-base";
+import { agentDatabaseRows, agentDatabaseRun } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
 import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
@@ -224,6 +224,168 @@ describe("SecretsModule public catalog", () => {
                     availableToAgents: false,
                 }),
             ).resolves.toMatchObject({ availableToAgents: false });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("deletes a user-created secret with every grant only at its current version", async () => {
+        const module = new SecretsModule();
+        const database = moduleDatabase(module.migrations, "secrets-api-user-deletion");
+        await database.ready;
+        try {
+            const events: unknown[] = [];
+            module.onEvent((_ctx, event) => {
+                events.push(event);
+            });
+            const created = await module.createCatalogSecret(database.context, {
+                id: "deletedsecret",
+                description: "Deleted credentials",
+                environment: { TOKEN: "deleted-hidden-value" },
+            });
+            for (const target of [
+                { type: "project", id: "projectone" },
+                { type: "workspace", id: "workspaceone" },
+                { type: "agent", id: "agentone" },
+            ] as const) {
+                await module.attachCatalogSecret(database.context, created.id, target);
+            }
+            await module.attach(database.context, "global", "agentone", created.id);
+            const grants = async () =>
+                Number(
+                    (
+                        await agentDatabaseRows<{ count: number }>(
+                            database.context.db,
+                            sql`SELECT
+                                (SELECT COUNT(*) FROM happy_agent_secret_api_attachments) +
+                                (SELECT COUNT(*) FROM happy_agent_secret_attachments) AS count`,
+                        )
+                    )[0]?.count,
+                );
+            expect(await grants()).toBe(4);
+
+            await expect(
+                module.deleteCatalogSecret(
+                    database.context,
+                    created.id,
+                    "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e",
+                ),
+            ).rejects.toMatchObject({ current: created });
+            await expect(module.catalogSecret(database.context, created.id)).resolves.toEqual(
+                created,
+            );
+            expect(await grants()).toBe(4);
+
+            await expect(
+                module.deleteCatalogSecret(database.context, created.id, created.version),
+            ).resolves.toEqual(created);
+            await expect(
+                module.catalogSecret(database.context, created.id),
+            ).resolves.toBeUndefined();
+            await expect(
+                module.resolveForCommandTargets(database.context, [
+                    { type: "project", id: "projectone" },
+                    { type: "workspace", id: "workspaceone" },
+                    { type: "agent", id: "agentone" },
+                ]),
+            ).resolves.toEqual({ environment: {}, hiddenEnvironmentVariables: [] });
+            expect(await grants()).toBe(0);
+            await expect(
+                module.deleteCatalogSecret(database.context, created.id, created.version),
+            ).resolves.toBeUndefined();
+
+            expect(events.at(-1)).toMatchObject({
+                type: "secret_api_removed",
+                secretId: created.id,
+                previousVersion: created.version,
+            });
+            expect(
+                events.filter((event) => (event as { type: string }).type === "secret_api_removed"),
+            ).toHaveLength(1);
+            expect(JSON.stringify(events)).not.toContain("deleted-hidden-value");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("refuses to delete a managed secret and leaves its grants", async () => {
+        const module = new SecretsModule();
+        const database = moduleDatabase(module.migrations, "secrets-api-managed-deletion");
+        await database.ready;
+        try {
+            const created = await module.createCatalogSecret(database.context, {
+                id: "ownedsecret",
+                description: "Owned credentials",
+                environment: { TOKEN: "owned-hidden-value" },
+            });
+            await module.attachCatalogSecret(database.context, created.id, {
+                type: "agent",
+                id: "agentone",
+            });
+            await agentDatabaseRun(
+                database.context.db,
+                sql`UPDATE happy_agent_secrets SET kind = ${"managed-feature"}
+                    WHERE owner_agent_id = ${"global"} AND id = ${created.id}`,
+            );
+            await expect(
+                module.deleteCatalogSecret(database.context, created.id, created.version),
+            ).rejects.toBeInstanceOf(SecretApiConflictError);
+            await expect(module.catalogSecret(database.context, created.id)).resolves.toMatchObject(
+                { managed: true },
+            );
+            await expect(
+                module.listCatalogAttachments(database.context, created.id),
+            ).resolves.toMatchObject({ attachments: [{ target: { id: "agentone" } }] });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rolls a deletion back with the caller's transaction", async () => {
+        const module = new SecretsModule();
+        const database = moduleDatabase(module.migrations, "secrets-api-deletion-transaction");
+        await database.ready;
+        try {
+            const events: unknown[] = [];
+            module.onEvent((_ctx, event) => {
+                events.push(event);
+            });
+            const created = await module.createCatalogSecret(database.context, {
+                id: "txsecret",
+                description: "Transactional credentials",
+                environment: { TOKEN: "tx-hidden-value" },
+            });
+            await module.attachCatalogSecret(database.context, created.id, {
+                type: "agent",
+                id: "agentone",
+            });
+            const before = events.length;
+
+            await expect(
+                database.context.inTx(async (txCtx) => {
+                    await expect(
+                        module.deleteCatalogSecret(txCtx, created.id, created.version),
+                    ).resolves.toEqual(created);
+                    await expect(module.catalogSecret(txCtx, created.id)).resolves.toBeUndefined();
+                    throw new Error("caller rollback");
+                }),
+            ).rejects.toThrow("caller rollback");
+            await expect(module.catalogSecret(database.context, created.id)).resolves.toEqual(
+                created,
+            );
+            await expect(
+                module.listCatalogAttachments(database.context, created.id),
+            ).resolves.toMatchObject({ attachments: [{ target: { id: "agentone" } }] });
+            expect(events).toHaveLength(before);
+
+            await database.context.inTx(async (txCtx) => {
+                await module.deleteCatalogSecret(txCtx, created.id, created.version);
+                expect(events).toHaveLength(before);
+            });
+            expect(events.at(-1)).toMatchObject({
+                type: "secret_api_removed",
+                secretId: created.id,
+            });
         } finally {
             database.close();
         }

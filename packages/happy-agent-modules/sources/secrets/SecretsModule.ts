@@ -68,6 +68,7 @@ import {
     secretApiPageSchema,
     secretApiTargetSchema,
     secretApiUpdateInputSchema,
+    secretApiVersionSchema,
     type SecretApiAttachment,
     type SecretApiAttachmentListQuery,
     type SecretApiAttachmentPage,
@@ -336,6 +337,50 @@ export class SecretsModule implements AgentModule {
                           result.secret.updatedAt,
                       )
                     : undefined,
+            };
+        });
+    }
+
+    /**
+     * Delete one user-created secret and every direct grant in one version-checked change. Returns
+     * the final safe metadata, or `undefined` when no such secret exists.
+     */
+    async deleteCatalogSecret(
+        ctx: Context,
+        secretId: string,
+        expectedVersion: string,
+    ): Promise<SecretApiRecord | undefined> {
+        this.#assertApiInput(secretApiIdSchema, secretId, "catalog secret ID");
+        this.#assertApiInput(secretApiVersionSchema, expectedVersion, "catalog secret version");
+        return await this.#runTransaction(ctx, "catalog delete", async (txCtx) => {
+            const result = await this.#apiStore.remove(
+                txCtx,
+                GLOBAL_SECRET_OWNER_ID,
+                secretId,
+                expectedVersion,
+            );
+            if (result.type === "not_found") return { result: undefined };
+            if (result.type === "conflict") {
+                throw new SecretApiConflictError("The secret has changed.", result.current);
+            }
+            if (result.type === "managed") {
+                throw new SecretApiConflictError(
+                    "This secret is managed by another daemon feature.",
+                    result.current,
+                );
+            }
+            return {
+                result: result.previous,
+                event: this.#event(
+                    {
+                        type: "secret_api_removed",
+                        secretId: result.previous.id,
+                        previousVersion: result.previous.version,
+                    },
+                    GLOBAL_SECRET_OWNER_ID,
+                    this.#newEventId(),
+                    Date.now(),
+                ),
             };
         });
     }

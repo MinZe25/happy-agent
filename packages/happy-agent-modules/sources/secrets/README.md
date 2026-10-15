@@ -120,6 +120,14 @@ is passed separately as `scopeRef` when attaching or resolving command secrets.
   is a no-op that returns the same reference and emits no further event.
 - `remove(ctx, actingAgentId, secretId): Promise<boolean>` — removes a secret and its attachments
   atomically through the store; returns whether anything changed.
+- `deleteCatalogSecret(ctx, secretId, expectedVersion): Promise<SecretApiRecord | undefined>` —
+  the person-facing catalog deletion behind `DELETE /v0/secrets/:secretId`. It removes one
+  user-created secret and every typed and legacy grant in one transaction and returns the final
+  safe metadata, or `undefined` when no such secret exists. A stale version or a managed secret
+  throws `SecretApiConflictError` carrying the current safe record. It emits `secret_api_removed`
+  and joins a caller's `ctx.tx`. No model-facing tool reaches it.
+- `retireManagedCatalogSecret(ctx, managedKind, secretId): Promise<boolean>` — lets the daemon
+  feature that owns a managed secret retire it, with the same atomic removal and event.
 - `attach(ctx, actingAgentId, scopeRef, secretId)` and the `(ctx, actingAgentId, input: SecretAttachInput)` overload — returns `Promise<SecretAttachment>`, the same operation as the tool.
 - `attachWithReference(...)` — same overloads as `attach`, but returns
   `Promise<SecretAttachReferenceResult>` (`{ attachment, secret }`), which is what the tool actually

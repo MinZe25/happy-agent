@@ -198,6 +198,120 @@ describe("Secrets API routes", () => {
             previousVersion: disabled.secret.version,
         });
     });
+
+    it("deletes a secret with its grants behind If-Match and emits secret.removed", async () => {
+        const fixture = await secretsApiFixture();
+        const rawValue = "deleted-route-hidden-value";
+        const created = await fixture.client.createSecret({
+            id: "deleteme",
+            description: "Doomed credentials",
+            environment: { DOOMED_TOKEN: rawValue },
+        });
+        await fixture.client.attachSecret("deleteme", { type: "agent", id: "agentone" });
+        const cursor = fixture.api.cursor();
+
+        await expect(
+            fixture.client.deleteSecret("missing", undefined, { ifMatch: created.secret.version }),
+        ).rejects.toMatchObject({ status: 404, code: "not_found" });
+        const rotated = await fixture.client.updateSecret(
+            "deleteme",
+            { description: "Rotated doomed credentials" },
+            { ifMatch: created.secret.version },
+        );
+        await expect(
+            fixture.client.deleteSecret("deleteme", undefined, {
+                ifMatch: created.secret.version,
+            }),
+        ).rejects.toSatisfy((error: unknown) => {
+            if (!(error instanceof HappyAgentApiError)) return false;
+            const body = error.body as Record<string, unknown>;
+            return (
+                error.status === 409 &&
+                error.code === "conflict" &&
+                body["currentVersion"] === rotated.secret.version &&
+                JSON.stringify(body["secret"]) === JSON.stringify(rotated.secret) &&
+                !JSON.stringify(body).includes(rawValue)
+            );
+        });
+        await expect(fixture.client.getSecret("deleteme")).resolves.toEqual(rotated);
+
+        const deleted = await fixture.client.deleteSecret(
+            "deleteme",
+            { mutationId: "delete-secret" },
+            { ifMatch: rotated.secret.version },
+        );
+        expect(deleted).toEqual(rotated);
+        expect(JSON.stringify(deleted)).not.toContain(rawValue);
+        await expect(fixture.client.getSecret("deleteme")).rejects.toMatchObject({ status: 404 });
+        await expect(fixture.client.listSecretAttachments("deleteme")).rejects.toMatchObject({
+            status: 404,
+        });
+        await expect(
+            fixture.client.listSecrets({ targetType: "agent", targetId: "agentone" }),
+        ).resolves.toEqual({ secrets: [], nextCursor: null });
+        await expect(
+            fixture.client.deleteSecret("deleteme", undefined, { ifMatch: rotated.secret.version }),
+        ).rejects.toMatchObject({ status: 404 });
+
+        const events = await fixture.client.getEvents({ after: cursor });
+        expect(events.events.map((event) => event.type)).toEqual([
+            "secret.updated",
+            "secret.removed",
+        ]);
+        expect(events.events[1]?.payload).toEqual({
+            mutationId: "delete-secret",
+            secretId: "deleteme",
+            previousVersion: rotated.secret.version,
+        });
+        expect(JSON.stringify(events)).not.toContain(rawValue);
+    });
+
+    it("requires If-Match and refuses managed secrets without changing them", async () => {
+        const fixture = await secretsApiFixture();
+        const created = await fixture.client.createSecret({
+            id: "ownedbyfeature",
+            description: "Feature credentials",
+            environment: { FEATURE_TOKEN: "feature-hidden-value" },
+        });
+        await fixture.client.attachSecret("ownedbyfeature", { type: "agent", id: "agentone" });
+
+        const response = await fixture.fetch("http://happy-agent.test/v0/secrets/ownedbyfeature", {
+            method: "DELETE",
+            headers: { authorization: `Bearer ${fixture.token}` },
+        });
+        expect(response.status).toBe(400);
+
+        await agentDatabaseRun(
+            fixture.context.db,
+            sql`UPDATE happy_agent_secrets SET kind = ${"test-managed"}
+                WHERE owner_agent_id = ${"global"} AND id = ${"ownedbyfeature"}`,
+        );
+        const cursor = fixture.api.cursor();
+        await expect(
+            fixture.client.deleteSecret("ownedbyfeature", undefined, {
+                ifMatch: created.secret.version,
+            }),
+        ).rejects.toSatisfy((error: unknown) => {
+            if (!(error instanceof HappyAgentApiError)) return false;
+            const body = error.body as Record<string, unknown>;
+            return (
+                error.status === 409 &&
+                error.code === "conflict" &&
+                body["currentVersion"] === created.secret.version &&
+                (body["secret"] as Record<string, unknown>)["managed"] === true &&
+                !JSON.stringify(body).includes("feature-hidden-value")
+            );
+        });
+        await expect(fixture.client.getSecret("ownedbyfeature")).resolves.toMatchObject({
+            secret: { managed: true },
+        });
+        await expect(fixture.client.listSecretAttachments("ownedbyfeature")).resolves.toMatchObject(
+            { attachments: [{ target: { type: "agent", id: "agentone" } }] },
+        );
+        await expect(fixture.client.getEvents({ after: cursor })).resolves.toMatchObject({
+            events: [],
+        });
+    });
 });
 
 async function secretsApiFixture() {
@@ -257,17 +371,14 @@ async function secretsApiFixture() {
     await api.markReady();
     const token = api.token();
     if (token === undefined) throw new Error("The API fixture did not create a token.");
-    const client = new HappyAgentClient({
-        endpoint: "http://happy-agent.test",
-        fetch: apiFetch(api, database.context),
-        token,
-    });
+    const fetch = apiFetch(api, database.context);
+    const client = new HappyAgentClient({ endpoint: "http://happy-agent.test", fetch, token });
     cleanups.push(async () => {
         await api.close();
         database.close();
         await rm(directory, { force: true, recursive: true });
     });
-    return { api, client, context: database.context, secrets };
+    return { api, client, context: database.context, fetch, secrets, token };
 }
 
 function apiFetch(api: ApiModule, context: Context): typeof fetch {

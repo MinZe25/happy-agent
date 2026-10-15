@@ -17,9 +17,21 @@ safe variable-name list did not change. Events carry safe before/after metadata 
 grant and never carry the stored environment. Legacy records whose IDs cannot be represented by
 the public contract stay outside the catalog during the storage upgrade.
 
-There is no user-facing catalog deletion. A daemon feature may retire a managed secret only by
-presenting the exact managed kind that owns it. Retirement atomically removes the secret and all
-legacy and typed grants, then emits the final safe version through `secret.removed`.
+## Deletion is for people, and it takes every grant with it
+
+A person deletes a user-created secret through `deleteCatalogSecret`, which backs
+`DELETE /v0/secrets/:secretId`. Deletion is version-checked like an update and removes the secret
+together with every typed and legacy grant in one change, so no agent can select a secret that is
+gone. The secret row is deleted first, conditioned on the expected version; grants are removed only
+when that row matched, so a lost race changes nothing even if a caller's outer transaction catches
+the conflict. A managed secret is refused because the feature that owns it is responsible for it.
+
+Steve chose humans only: there is deliberately no `delete_secret` agent tool. Detaching remains the
+agent-facing way to revoke access.
+
+A daemon feature may retire a managed secret only by presenting the exact managed kind that owns
+it. Retirement shares the same row-then-grants removal. Both paths emit the final safe version
+through `secret_api_removed`, which the API publishes as `secret.removed`.
 
 ## Attachment changes are permission decisions
 

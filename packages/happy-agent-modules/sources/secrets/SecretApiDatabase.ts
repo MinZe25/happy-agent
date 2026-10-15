@@ -5,7 +5,7 @@ import {
 } from "@slopus/happy-agent-base";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { Context } from "@steve.kite/stdlib";
 
 import {
@@ -162,6 +162,12 @@ export type SecretApiRemoveManagedResult =
     | { readonly type: "not_owned"; readonly current: SecretApiRecord }
     | { readonly type: "removed"; readonly previous: SecretApiRecord };
 
+export type SecretApiRemoveResult =
+    | { readonly type: "not_found" }
+    | { readonly type: "conflict"; readonly current: SecretApiRecord }
+    | { readonly type: "managed"; readonly current: SecretApiRecord }
+    | { readonly type: "removed"; readonly previous: SecretApiRecord };
+
 export interface SecretApiDatabase {
     readonly get: (
         ctx: Context,
@@ -187,6 +193,12 @@ export interface SecretApiDatabase {
         expectedVersion: string,
         input: SecretApiUpdateInput,
     ) => Promise<SecretApiUpdateResult>;
+    readonly remove: (
+        ctx: Context,
+        ownerId: string,
+        secretId: string,
+        expectedVersion: string,
+    ) => Promise<SecretApiRemoveResult>;
     readonly removeManaged: (
         ctx: Context,
         ownerId: string,
@@ -391,29 +403,35 @@ export function createSecretApiDatabase(): SecretApiDatabase {
             if (secret.version !== version) return { type: "conflict", current: secret };
             return { type: "updated", changed: true, previous, secret };
         },
+        remove: async (ctx, ownerId, secretId, expectedVersion) => {
+            const row = await rowFor(ctx, ownerId, secretId);
+            if (row === undefined || !publicRowAvailable(row)) return { type: "not_found" };
+            const previous = publicRecord(row);
+            if (previous.version !== expectedVersion) {
+                return { type: "conflict", current: previous };
+            }
+            if (previous.managed) return { type: "managed", current: previous };
+            const removed = await removeWithGrants(
+                ctx,
+                ownerId,
+                secretId,
+                sql`kind IS NULL AND public_version = ${expectedVersion}`,
+            );
+            if (!removed) {
+                const current = await rowFor(ctx, ownerId, secretId);
+                if (current === undefined || !publicRowAvailable(current)) {
+                    return { type: "not_found" };
+                }
+                return { type: "conflict", current: publicRecord(current) };
+            }
+            return { type: "removed", previous };
+        },
         removeManaged: async (ctx, ownerId, secretId, managedKind) => {
             const row = await rowFor(ctx, ownerId, secretId);
             if (row === undefined || !publicRowAvailable(row)) return { type: "not_found" };
             const previous = publicRecord(row);
             if (row.kind !== managedKind) return { type: "not_owned", current: previous };
-            await agentDatabaseRun(
-                ctx.db,
-                sql`DELETE FROM ${sql.raw(ATTACHMENTS_TABLE)}
-                    WHERE owner_agent_id = ${ownerId} AND secret_id = ${secretId}`,
-            );
-            await agentDatabaseRun(
-                ctx.db,
-                sql`DELETE FROM ${sql.raw(LEGACY_ATTACHMENTS_TABLE)}
-                    WHERE owner_agent_id = ${ownerId} AND secret_id = ${secretId}`,
-            );
-            await agentDatabaseRun(
-                ctx.db,
-                sql`DELETE FROM ${sql.raw(SECRETS_TABLE)}
-                    WHERE owner_agent_id = ${ownerId} AND id = ${secretId}
-                      AND kind = ${managedKind}`,
-            );
-            const after = await rowFor(ctx, ownerId, secretId);
-            if (after !== undefined) {
+            if (!(await removeWithGrants(ctx, ownerId, secretId, sql`kind = ${managedKind}`))) {
                 throw new Error("Secrets API database did not retire the managed secret.");
             }
             return { type: "removed", previous };
@@ -577,6 +595,36 @@ function publicAttachment(row: SecretApiAttachmentRow): SecretApiAttachment {
         throw new Error("Secrets API database contains an invalid attachment.");
     }
     return structuredClone(attachment);
+}
+
+/**
+ * Remove one secret row that still satisfies `condition`, then every typed and legacy grant naming
+ * it. Grants stay untouched when the row no longer matches.
+ */
+async function removeWithGrants(
+    ctx: Context,
+    ownerId: string,
+    secretId: string,
+    condition: SQL,
+): Promise<boolean> {
+    const removed = await agentDatabaseRows<{ id: string }>(
+        ctx.db,
+        sql`DELETE FROM ${sql.raw(SECRETS_TABLE)}
+            WHERE owner_agent_id = ${ownerId} AND id = ${secretId} AND ${condition}
+            RETURNING id`,
+    );
+    if (removed.length === 0) return false;
+    await agentDatabaseRun(
+        ctx.db,
+        sql`DELETE FROM ${sql.raw(ATTACHMENTS_TABLE)}
+            WHERE owner_agent_id = ${ownerId} AND secret_id = ${secretId}`,
+    );
+    await agentDatabaseRun(
+        ctx.db,
+        sql`DELETE FROM ${sql.raw(LEGACY_ATTACHMENTS_TABLE)}
+            WHERE owner_agent_id = ${ownerId} AND secret_id = ${secretId}`,
+    );
+    return true;
 }
 
 async function attachmentFor(

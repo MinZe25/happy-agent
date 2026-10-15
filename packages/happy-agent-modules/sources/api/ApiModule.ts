@@ -41,6 +41,7 @@ import {
     closeLiveSessionRequestSchema,
     liveDesktopIdSchema,
     createSecretRequestSchema,
+    deleteSecretRequestSchema,
     secretAttachmentMutationRequestSchema,
     updateSecretRequestSchema,
     archiveBotRequestSchema,
@@ -7426,6 +7427,32 @@ export class ApiModule implements AgentModule {
                             expectedVersion,
                             input,
                         ),
+                );
+                if (secret === undefined) throw notFound("The secret was not found.");
+                sendJson(response, 200, { secret });
+            } catch (error: unknown) {
+                throw secretMutationError(error);
+            }
+            return true;
+        }
+        if (request.method === "DELETE") {
+            const current = await this.#secrets.catalogSecret(ctx, secretId);
+            if (current === undefined) throw notFound("The secret was not found.");
+            const expectedVersion = requireIfMatch(request, current.version, {
+                currentVersion: current.version,
+                secret: current,
+            });
+            const body = await optionalBodyAs(
+                request,
+                deleteSecretRequestSchema,
+                "secret deletion",
+                2 * 1_024,
+            );
+            try {
+                const secret = await this.#withMutationId(
+                    body.mutationId,
+                    async () =>
+                        await this.#secrets.deleteCatalogSecret(ctx, secretId, expectedVersion),
                 );
                 if (secret === undefined) throw notFound("The secret was not found.");
                 sendJson(response, 200, { secret });
