@@ -26,6 +26,7 @@ import { createId } from "@paralleldrive/cuid2";
 import {
     closeWorkspaceBridgeRequestSchema,
     createSurfaceRequestSchema,
+    surfaceIdSchema,
     surfaceMemberRequestSchema,
     reorderSurfaceRequestSchema,
     createTodoRequestSchema,
@@ -5342,6 +5343,7 @@ export class ApiModule implements AgentModule {
                 /^\/v0\/surfaces\/([a-z][a-z0-9]*)\/(join|leave|reorder|image)$/.exec(url.pathname);
             if (membership !== null) {
                 const id = membership[1]!;
+                if (!Value.Check(surfaceIdSchema, id)) return false;
                 const operation = membership[2]!;
                 if (operation === "image" && request.method === "GET") {
                     const image = await surfaces.image(ctx, id);
@@ -5399,6 +5401,7 @@ export class ApiModule implements AgentModule {
                 );
             if (match === null) return false;
             const surfaceId = match[1]!;
+            if (!Value.Check(surfaceIdSchema, surfaceId)) return false;
             const todoId = match[2];
             const action = match[3];
             const selectedVersion = match[4];

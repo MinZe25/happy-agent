@@ -191,7 +191,11 @@ describe("installation-owned Surface state", () => {
         ).toContain("outside-workspace");
         f.revoke();
         await expect(
-            add.execute(ctx, { surfaceId: "surface1", userId: "alice" }, {} as never),
+            add.execute(
+                ctx,
+                { surfaceId: "s12345678901234567890123", userId: "alice" },
+                {} as never,
+            ),
         ).rejects.toMatchObject({ code: "forbidden" });
         await expect(create.execute(ctx, { name: "Denied" }, {} as never)).rejects.toMatchObject({
             code: "forbidden",
@@ -210,15 +214,18 @@ describe("installation-owned Surface state", () => {
         const createSurface = tools.find((tool) => tool.name === "create_todo_surface")!;
         const createTodo = tools.find((tool) => tool.name === "create_todo")!;
         expect(Value.Check(createSurface.parameters, { name: "Missing" })).toBe(false);
-        expect(Value.Check(createTodo.parameters, { surfaceId: "surface1", text: "Missing" })).toBe(
-            false,
-        );
+        expect(
+            Value.Check(createTodo.parameters, {
+                surfaceId: "s12345678901234567890123",
+                text: "Missing",
+            }),
+        ).toBe(false);
         expect(Value.Check(createSurface.parameters, { name: "Valid", creatorUserId: null })).toBe(
             true,
         );
         expect(
             Value.Check(createTodo.parameters, {
-                surfaceId: "surface1",
+                surfaceId: "s12345678901234567890123",
                 text: "Valid",
                 authorUserId: null,
             }),
@@ -358,7 +365,7 @@ describe("installation-owned Surface state", () => {
         const ctx = db.context;
         const surface = await s.create(
             ctx,
-            { id: "oldsurface", type: "todo", name: "Old" },
+            { id: "s12345678901234567890123", type: "todo", name: "Old" },
             "alice",
         );
         const actor = { userId: "alice", agentId: "admin" };

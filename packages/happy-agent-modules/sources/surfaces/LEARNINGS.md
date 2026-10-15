@@ -6,6 +6,12 @@ The initial design used `todo` as a singleton ID. Each Surface instead has a CUI
 a predefined type, allowing several independently named todo lists with optional managed images.
 Todo operations require the instance ID under `/v0/surfaces/todo/:surfaceId` and cannot cross lists.
 
+Surface IDs must use the generator's exact 24-character CUID2 form. The earlier loose alphabet
+check admitted route words such as `todo`, `join`, and `image`, making membership and content
+paths ambiguous. Creation and reorder anchors now share the strict client schema, and every
+Surface path checks it before parsing a body or version: malformed body IDs return 400, while
+malformed paths return 404. Existing generated identities remain unchanged; no IDs are rewritten.
+
 ## Members belong inside their Surface
 
 A separate response-level membership array duplicated relationships and complicated the model.
