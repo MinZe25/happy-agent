@@ -4629,6 +4629,53 @@ All existing messages remain valid without `error`. When present:
   guessing their behavior, parsing them as commands, or rejecting the error message. Recognized
   actions are suggestions requiring a person to invoke them, never automatic execution.
 
+Credential disclosure follows the authenticated caller principal on every ordinary read. Only
+the standalone user and the team installation's existing owner identity may receive the observed
+credential source and host, source-specific recovery steps, and supplied commands. Every other
+caller receives the withheld projection: `credentialSource: null` (so no host is disclosed),
+generic source-agnostic `recovery.steps`, and omitted `recovery.commands`. `recovery.actions`
+remains unchanged because its suggestions are source-agnostic. Unknown authority fails closed.
+Team membership, agent or Surface creation, bot or task ownership, Surface membership,
+and peer or installation transport credentials are not evidence of the team owner's identity.
+Apply this projection per caller at read time to history and any other message-bearing response,
+including bootstrap, event pulls, live delivery, replay, pending-event flushes, and both
+`message.created` and `message.updated`; never change the stored message or shared event journal.
+
+The ordinary error text and other shared user-safe diagnostics must themselves be source-agnostic.
+They never contain the credential location, configuration key or environment-variable name,
+host label, native configuration directory, or a source-specific command. Source-specific advice
+belongs only in the projectable structured fields. Preserve the complete remaining user-safe text,
+including paragraphs and newlines; withholding structured fields must not leave the same details
+exposed in prose.
+
+An ordinary agent read opened from a Surface reference or contextual chat uses that same caller
+rule, irrespective of the UI entry point. By contrast, any Surface-owned or other shared payload,
+snapshot, or reference preview embedding messages or error details always uses the withheld
+projection for every reader, including the installation owner. Any stored shared copy is created
+from the withheld form; the original message remains unchanged. Surface membership and shared
+view access never grant diagnostic authority. These rules also govern future message-bearing
+Surface views. Peer-visible errors are limited to the withheld projection or existing safe
+code/text diagnostics; credential source, host, source-specific recovery steps, and commands
+never cross the peer boundary. This grants no new fields or operations to the separate
+`API_P2P.md` contract; its existing safe admission and connection diagnostics remain unchanged.
+
+Non-HTTP readers follow the same disclosure boundary. Agent-facing transcript tools, collaboration
+reports, history excerpts, summaries, and `ask_chief` diagnostic context use the withheld form or
+omit structured error details entirely, even when acting for the installation owner. Captured
+credential source and host are display-only provenance and never become model input; neither
+source-specific recovery steps nor supplied commands are inserted into model context. An
+authenticated client session reached through a relay, including the mobile app, remains an
+ordinary per-principal read. Generated outbound integration messages, notifications, push text,
+and webhooks use the withheld form unless the destination is verified as a private channel
+belonging only to the authorized standalone user or team installation owner. Telegram access or
+a relay connection alone proves no such ownership. Uncertain destinations are withheld.
+Project before persisting or sending an outbound copy; never copy authorized details into a
+shared outbox and rely on its eventual reader to hide them.
+
+Observation history dumps, logs, telemetry, crash reports, and other diagnostic exports omit
+authorized credential details or use the withheld form unless written only to owner-private
+local storage. Diagnostic data sent off the machine always uses the withheld form.
+
 Clients preserve paragraphs and newlines, wrap the full user-safe error text, and do not use a
 single-line scroller or clip it to a fixed-height row. Details supplement that text; they never
 replace it with a shortened diagnostic. Existing history text bounds and credential redaction
