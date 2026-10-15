@@ -14,6 +14,8 @@ import {
 import {
     createSurfaceRequestSchema,
     createTodoRequestSchema,
+    reorderSurfaceRequestSchema,
+    surfaceIdSchema,
     surfaceListResponseSchema,
     surfaceMemberSchema,
     surfaceOrderKeySchema,
@@ -31,6 +33,7 @@ import {
 const version = "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e";
 const nextVersion = "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f";
 const now = 1_755_400_000_000;
+const surfaceId = "s12345678901234567890123";
 const member: SurfaceMember = {
     userId: "user1",
     orderKey: "5",
@@ -38,7 +41,7 @@ const member: SurfaceMember = {
 };
 const surface: Surface = {
     creatorUserId: "user1",
-    id: "surface1",
+    id: surfaceId,
     type: "todo",
     image: null,
     name: "Todo",
@@ -49,7 +52,7 @@ const surface: Surface = {
 const todo: Todo = {
     authorUserId: "user2",
     id: "todo1",
-    surfaceId: "surface1",
+    surfaceId,
     text: "Pick up groceries",
     status: "active",
     orderKey: "5",
@@ -66,6 +69,36 @@ const revision: TodoRevision = {
 };
 
 describe("Surface and Todo protocol", () => {
+    it("requires the generator's exact 24-character CUID2 format for Surface identities", () => {
+        for (const id of [surfaceId, "a".repeat(24), `z${"0".repeat(23)}`]) {
+            expect(Value.Check(surfaceIdSchema, id)).toBe(true);
+            expect(
+                Value.Check(createSurfaceRequestSchema, { type: "todo", name: "List", id }),
+            ).toBe(true);
+            expect(Value.Check(reorderSurfaceRequestSchema, { afterId: id })).toBe(true);
+        }
+        for (const id of [
+            "todo",
+            "document",
+            "join",
+            "leave",
+            "reorder",
+            "image",
+            "a".repeat(23),
+            "a".repeat(25),
+            "1".repeat(24),
+            "A".repeat(24),
+            `${surfaceId}\n`,
+            "",
+        ]) {
+            expect(Value.Check(surfaceIdSchema, id)).toBe(false);
+            expect(
+                Value.Check(createSurfaceRequestSchema, { type: "todo", name: "List", id }),
+            ).toBe(false);
+            expect(Value.Check(reorderSurfaceRequestSchema, { afterId: id })).toBe(false);
+        }
+    });
+
     it("validates nullable user attribution while accepting older responses without it", () => {
         const { creatorUserId: _creator, ...olderSurface } = surface;
         const { authorUserId: _author, ...olderTodo } = todo;
@@ -127,9 +160,7 @@ describe("Surface and Todo protocol", () => {
             "cursor",
             "surfaces",
         ]);
-        expect(Value.Check(surfaceSchema, { ...surface, id: "calendar", type: "calendar" })).toBe(
-            true,
-        );
+        expect(Value.Check(surfaceSchema, { ...surface, type: "calendar" })).toBe(true);
         expect(Value.Check(surfaceSchema, { ...surface, id: "Todo/List" })).toBe(false);
     });
 
@@ -196,7 +227,7 @@ describe("Surface and Todo protocol", () => {
                 occurredAt: now,
                 type: "surface.updated",
                 payload: {
-                    surfaceId: "surface1",
+                    surfaceId,
                     previousVersion: version,
                     version: nextVersion,
                     changes: { members: [], updatedAt: now },
@@ -208,7 +239,7 @@ describe("Surface and Todo protocol", () => {
                 occurredAt: now,
                 type: "todo.updated",
                 payload: {
-                    surfaceId: "surface1",
+                    surfaceId,
                     todoId: todo.id,
                     previousVersion: version,
                     version: nextVersion,
@@ -225,7 +256,7 @@ describe("Surface and Todo protocol", () => {
         }
         expect(
             Value.Check(todoUpdatedPayloadSchema, {
-                surfaceId: "surface1",
+                surfaceId,
                 todoId: todo.id,
                 previousVersion: version,
                 version: nextVersion,

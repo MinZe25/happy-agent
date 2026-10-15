@@ -11,8 +11,12 @@ import {
 } from "./common.js";
 import { userIdSchema } from "./userId.js";
 
-/** Each list is an independent CUID2-identified instance. */
-export const surfaceIdSchema = Type.String({ pattern: "^[a-z][a-z0-9]{1,31}$" });
+/** Each list uses the daemon generator's exact 24-character CUID2 format. */
+export const surfaceIdSchema = Type.String({
+    minLength: 24,
+    maxLength: 24,
+    pattern: "^[a-z][a-z0-9]{23}$",
+});
 export type SurfaceId = Static<typeof surfaceIdSchema>;
 
 /** The same decimal fractional keys used by other installation catalogs. */

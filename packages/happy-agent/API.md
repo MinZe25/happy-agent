@@ -6323,6 +6323,13 @@ creates a workspace, agent, or chat.
 A Surface object has `id` (CUID2), `type` (`todo` today; future types are additive),
 `name` (human display text), `image` (`null` or `{ "thumbhash": "..." }`), `members`,
 `version` (UUIDv7), and `updatedAt` (epoch milliseconds).
+Surface IDs always use the daemon generator's 24-character CUID2 form: a lowercase letter
+followed by 23 lowercase letters or digits (`^[a-z][a-z0-9]{23}$`). Caller-supplied creation IDs
+and reorder anchors use this same format. Invalid body IDs return `400 invalid_request`;
+every malformed `:surfaceId` path returns `404 not_found`. Short words such as `todo`,
+`document`, `join`, and `image` are not Surface IDs, so they cannot collide with route names.
+This deliberately corrects the earlier loose ID validation; existing generated IDs are
+unchanged, and stored IDs are never rewritten.
 It also has optional additive `creatorUserId`: the installation-local Happy user ID of its
 creator, resolvable through `GET /v0/users`, or `null` when no creator is attributed or in
 standalone mode. Current daemons always include it. It is set at creation and never changes,
