@@ -91,6 +91,9 @@ import { mcpConnectionFingerprint } from "./mcpConnectionFingerprint.js";
 const DEFAULT_PAGE_SIZE = 50;
 const DEFAULT_OUTPUT_CHARACTERS = 12_000;
 const GLOBAL_CATALOG = "global";
+/** A failed server is retried after this delay, doubling while it keeps failing. */
+const RETRY_FIRST_DELAY_MS = 1_000;
+const RETRY_MAX_DELAY_MS = 5 * 60_000;
 const outputCharactersSchema = Type.Integer({
     minimum: MIN_MCP_OUTPUT_CHARACTERS,
     maximum: MAX_MCP_OUTPUT_CHARACTERS,
@@ -145,10 +148,24 @@ interface McpCatalog {
     readonly servers: ReadonlyMap<string, McpCatalogServer>;
 }
 
+/** What starting one pooled server takes, kept so a failed server can be started again. */
+interface McpConnectionInput {
+    readonly config: McpServerConfig;
+    readonly name: string;
+    readonly runnerId: string | undefined;
+}
+
 interface McpPooledConnection {
     readonly references: Set<string>;
+    readonly input: McpConnectionInput;
     readonly connection?: McpClientConnection;
     readonly failure?: string;
+}
+
+/** A failed server's background retry: how often it has failed again, and the pending attempt. */
+interface McpRetry {
+    readonly attempts: number;
+    readonly timer?: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -168,6 +185,7 @@ export class McpModule implements AgentModule {
     readonly #reloadLock: AsyncLock = asyncLock({ reentry: "allow" });
     readonly #catalogs = new Map<string, McpCatalog>();
     readonly #pool = new Map<string, McpPooledConnection>();
+    readonly #retries = new Map<string, McpRetry>();
     readonly #agentWorkspaces = new Map<string, string>();
     readonly #workspaceAgents = new Map<string, Set<string>>();
     readonly #archivedWorkspaces = new Set<string>();
@@ -181,6 +199,7 @@ export class McpModule implements AgentModule {
     readonly #agentUsers = new Map<string, string>();
     #context: Context | undefined;
     #serversContext: Context | undefined;
+    #retriesContext: Context | undefined;
     #initialReload: Promise<void> | undefined;
     #closePromise: Promise<void> | undefined;
     #closed = false;
@@ -457,6 +476,7 @@ export class McpModule implements AgentModule {
         this.#closed = true;
         this.#unsubscribeWorkspaceEvents();
         this.#unsubscribeRunnerUpdates();
+        this.#scheduleRetries();
         const close = async (): Promise<void> => {
             const connections = [...this.#pool.values()].flatMap((entry) =>
                 entry.connection === undefined ? [] : [entry.connection],
@@ -1205,14 +1225,7 @@ export class McpModule implements AgentModule {
         catalogs: ReadonlyMap<string, HappyAgentConfigValues["mcpServers"]>,
     ): Promise<void> {
         const desiredCatalogs = new Map<string, McpCatalog>();
-        const connectionInputs = new Map<
-            string,
-            {
-                readonly config: McpServerConfig;
-                readonly name: string;
-                readonly runnerId: string | undefined;
-            }
-        >();
+        const connectionInputs = new Map<string, McpConnectionInput>();
         for (const [catalogId, servers] of catalogs) {
             const desired = new Map<string, McpCatalogServer>();
             for (const [name, config] of Object.entries(servers)) {
@@ -1240,16 +1253,13 @@ export class McpModule implements AgentModule {
                 try {
                     return {
                         connectionId,
-                        connection: this.#runners.native(input.runnerId)
-                            ? await McpClientConnection.connect(input.name, input.config)
-                            : await McpClientConnection.connect(input.name, input.config, {
-                                  ctx: this.#serversLifetime(ctx),
-                                  machine: await this.#runners.machine(input.runnerId),
-                              }),
+                        input,
+                        connection: await this.#connect(ctx, input),
                     } as const;
                 } catch (error) {
                     return {
                         connectionId,
+                        input,
                         failure: errorMessage(error),
                     } as const;
                 }
@@ -1259,15 +1269,14 @@ export class McpModule implements AgentModule {
             if (attempt === undefined) continue;
             const references =
                 this.#pool.get(attempt.connectionId)?.references ?? new Set<string>();
-            this.#pool.set(attempt.connectionId, {
-                references,
-                ...(attempt.connection === undefined ? {} : { connection: attempt.connection }),
-                ...(attempt.failure === undefined ? {} : { failure: attempt.failure }),
-            });
-            const { connection, connectionId } = attempt;
-            if (connection !== undefined) {
-                connection.client.onclose = () =>
-                    this.#recordStopped(connectionId, connection, "The MCP server stopped.");
+            if (attempt.connection === undefined) {
+                this.#pool.set(attempt.connectionId, {
+                    references,
+                    input: attempt.input,
+                    failure: attempt.failure,
+                });
+            } else {
+                this.#adopt(attempt.connectionId, references, attempt.input, attempt.connection);
             }
         }
 
@@ -1286,6 +1295,7 @@ export class McpModule implements AgentModule {
             this.#catalogs.set(catalogId, desired);
         }
         await this.#closeUnreferencedConnections();
+        this.#scheduleRetries();
     }
 
     async #removeCatalog(catalogId: string): Promise<void> {
@@ -1295,6 +1305,7 @@ export class McpModule implements AgentModule {
             this.#pool.get(connectionId)?.references.delete(catalogId);
         }
         await this.#closeUnreferencedConnections();
+        this.#scheduleRetries();
     }
 
     async #closeUnreferencedConnections(): Promise<void> {
@@ -1307,11 +1318,105 @@ export class McpModule implements AgentModule {
         await Promise.allSettled(closing.map(async (connection) => await connection.close()));
     }
 
-    /** A live connection that ended is a failure, which the next reload starts again. */
+    /** A live connection that ended is a failure, which is retried in the background. */
     #recordStopped(connectionId: string, connection: McpClientConnection, failure: string): void {
         const pooled = this.#pool.get(connectionId);
         if (pooled?.connection !== connection) return;
-        this.#pool.set(connectionId, { references: pooled.references, failure });
+        this.#pool.set(connectionId, {
+            references: pooled.references,
+            input: pooled.input,
+            failure,
+        });
+        this.#scheduleRetries();
+    }
+
+    /** Start one pooled server, on its runner when it has one. */
+    async #connect(ctx: Context, input: McpConnectionInput): Promise<McpClientConnection> {
+        return this.#runners.native(input.runnerId)
+            ? await McpClientConnection.connect(input.name, input.config)
+            : await McpClientConnection.connect(input.name, input.config, {
+                  ctx: this.#serversLifetime(ctx),
+                  machine: await this.#runners.machine(input.runnerId),
+              });
+    }
+
+    /** Make a started server the live connection behind its pool entry. */
+    #adopt(
+        connectionId: string,
+        references: Set<string>,
+        input: McpConnectionInput,
+        connection: McpClientConnection,
+    ): void {
+        this.#pool.set(connectionId, { references, input, connection });
+        connection.client.onclose = () =>
+            this.#recordStopped(connectionId, connection, "The MCP server stopped.");
+    }
+
+    /**
+     * Keep exactly one retry, pending or running, for every failed server a catalog still uses, and
+     * none for anything else. A server that failed at startup or stopped later would otherwise stay
+     * failed until someone reloaded by hand, while sessions that had already found its tools lost
+     * them.
+     */
+    #scheduleRetries(): void {
+        for (const [connectionId, retry] of this.#retries) {
+            const pooled = this.#pool.get(connectionId);
+            if (this.#closed || pooled?.failure === undefined || pooled.references.size === 0) {
+                clearTimeout(retry.timer);
+                this.#retries.delete(connectionId);
+            }
+        }
+        if (this.#closed || this.#context === undefined) return;
+        for (const [connectionId, pooled] of this.#pool) {
+            if (pooled.failure === undefined || pooled.references.size === 0) continue;
+            if (!this.#retries.has(connectionId)) this.#armRetry(connectionId, 0);
+        }
+    }
+
+    #armRetry(connectionId: string, attempts: number): void {
+        const delay = Math.min(RETRY_MAX_DELAY_MS, RETRY_FIRST_DELAY_MS * 2 ** attempts);
+        const timer = setTimeout(() => void this.#retry(connectionId), delay);
+        timer.unref();
+        this.#retries.set(connectionId, { attempts, timer });
+    }
+
+    /**
+     * Start a failed server again off every caller's path, and adopt it only if it is still failed
+     * and still used once it is up: a reload may have started it meanwhile, or released it.
+     */
+    async #retry(connectionId: string): Promise<void> {
+        const scheduled = this.#retries.get(connectionId);
+        const pooled = this.#pool.get(connectionId);
+        const root = this.#context;
+        if (this.#closed || scheduled === undefined || pooled?.failure === undefined) return;
+        if (root === undefined) return;
+        // The entry stays while the attempt runs, so nothing arms a second attempt beside it.
+        const running: McpRetry = { attempts: scheduled.attempts };
+        this.#retries.set(connectionId, running);
+        this.#retriesContext ??= detach(root).named("mcp-server-retries");
+        const ctx = this.#retriesContext;
+        let connection: McpClientConnection | undefined;
+        let failure = pooled.failure;
+        try {
+            connection = await this.#connect(ctx, pooled.input);
+        } catch (error) {
+            failure = errorMessage(error);
+        }
+        await this.#reloadLock.runInLock(ctx, async () => {
+            const current = this.#pool.get(connectionId);
+            const owned = this.#retries.get(connectionId) === running;
+            if (owned) this.#retries.delete(connectionId);
+            if (this.#closed || current?.failure === undefined || current.references.size === 0) {
+                await connection?.close().catch(() => undefined);
+            } else if (connection === undefined) {
+                this.#pool.set(connectionId, { ...current, failure });
+                if (owned) this.#armRetry(connectionId, running.attempts + 1);
+            } else {
+                this.#adopt(connectionId, current.references, current.input, connection);
+                ctx.log.info(`MCP server ${current.input.name} connected again.`);
+            }
+            this.#scheduleRetries();
+        });
     }
 
     /** Fail every server on a runner that is not connected, and stop what it holds of them. */

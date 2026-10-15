@@ -100,6 +100,34 @@ against that same request's tools. Sending an empty tool list makes an otherwise
 fail with `Tool reference 'web_fetch' not found in available tools`. Keep the definitions and the
 opaque historical results intact; `pause_after_compaction` still stops at the native checkpoint.
 
+### References to withdrawn tools
+
+Keeping the caller's definitions is not enough when the tool set shrinks. An MCP server that fails
+to reconnect, or a model whose tool set lacks a tool an earlier search found, removes a definition
+that stored `tool_search_tool_result` blocks still reference, and every later inference and
+compaction then fails with that same 400. Nothing in the transcript can recover from it.
+
+So while serializing each request, inference and compaction alike, the adapter collects every
+`tool_reference` the outgoing messages replay and compares it with the request's `tools`:
+
+- With native tool search in the request, each missing tool is declared after the caller's tools,
+  in order of first reference, as a deferred placeholder: the referenced name, the description
+  `Unavailable: an earlier search found this tool, but it is no longer offered. Calls to it fail.`,
+  an empty object schema, and `defer_loading: true`. The history is sent byte for byte. If the
+  model calls the placeholder, the call reaches the caller as a tool it does not have, and the
+  agent loop answers it with an error tool result.
+- Without native tool search, `defer_loading` is not valid, so only the dangling references are
+  left out of that request's copy of the result. The rest of the result keeps its position.
+
+Neither path changes caller-owned history. Once the tool is offered again, its real definition
+replaces the placeholder and the stored reference resolves normally. The placeholder is a
+request-local projection of a name the caller's own history already contains, not a tool the
+adapter adds to the session; it is the only way to send that history unchanged.
+
+Both Mantle and Runtime build requests through the same `createAnthropicRequest`, so both carry
+this behavior. The direct Anthropic API goes through the Claude Code SDK, which owns its own
+request history.
+
 ### Server tools across client-tool results
 
 An Anthropic `tool_use` response can contain both a client call and an unfinished native server
@@ -155,6 +183,9 @@ and tools, and the captured Claude golden response stream.
 `tests/anthropicBedrockCompactionTools.test.ts` exercises tool-search inference, native compaction,
 and checkpoint continuation through the real SDK with scripted HTTP responses. It verifies both
 session-level and selected-model tool definitions and leaves the caller's history unchanged.
+`tests/anthropicBedrockToolReferences.test.ts` replays a search result that references a tool the
+session no longer offers, with and without native tool search, through inference and compaction,
+against a scripted endpoint that rejects dangling references the way Bedrock does.
 `tests/anthropicBedrock.live.test.ts` performs a real preferred-endpoint turn and a real native
 compaction followed by a checkpoint-replay turn when `RIG_LIVE_TEST=1` and a bearer token are
 available.

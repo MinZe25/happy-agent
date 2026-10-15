@@ -60,6 +60,20 @@ never came back after the runner restarted. A runner that disconnects now fails 
 once with a message naming it and stops them; a connection that ends on its own is recorded as
 failed; and the runner's return reloads every failed server.
 
+## Failed servers come back on their own
+
+A server that failed at startup stayed failed until someone ran `reload_mcp_servers`. In the case
+that exposed this, a server hung on an expired login after a daemon restart and was marked failed
+when its startup timed out. Its tools dropped out of every session, and a long-running Bedrock
+session whose native tool search had found one of those tools then failed every request. Each
+pooled server now keeps what it took to start it. While a catalog still uses a failed server, the
+module retries it in the background, first after one second and then with the delay doubling up
+to five minutes. Exactly one retry exists per server, pending or running. The attempt connects
+outside the reload lock and adopts the connection only if the server is still failed and still
+used. A reload that got there first, a released catalog, or shutdown closes the late connection
+instead. The retry is in-memory, like the connections it restores: after a restart, the initial
+reload starts every server again, so durable execution would add nothing.
+
 ## A bot with its own Linux user gets no shared stdio servers
 
 Stdio servers are pooled per machine, and with `[execution]` the machine is the default workload

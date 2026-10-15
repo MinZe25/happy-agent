@@ -10,7 +10,10 @@ The module connects enabled user-wide stdio and Streamable HTTP servers concurre
 The first durable session in a workspace activates its workspace catalog; the last archived
 session or workspace archival releases it. Identical normalized configurations share one client
 and process across catalogs. A failed server is reported as failed without preventing unrelated
-servers or the daemon from starting. `reload_mcp_servers` reconciles the caller's workspace by
+servers or the daemon from starting. A server that fails to start, or stops later, is started again
+in the background while any catalog still uses it: first after one second, then with the delay
+doubling up to five minutes. A retry runs outside every request and reload, so a slow server never
+delays a turn. `reload_mcp_servers` reconciles the caller's workspace by
 default and the user-wide catalog with `global = true`; `configure_mcp_server` updates one
 user-wide server without exposing or replacing unrelated records and then performs the same online
 reconciliation.

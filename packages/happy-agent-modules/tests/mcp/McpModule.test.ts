@@ -318,6 +318,58 @@ describe("McpModule production discovery", () => {
         }
     });
 
+    it("retries a server that timed out at startup without a manual reload", async () => {
+        const root = await temporaryRoot();
+        const gate = gatedStdio(root, "slow-start", "slow");
+        const { module } = await configuredModule(
+            { slow: { ...gate.server, startupTimeoutMs: 300 } },
+            root,
+        );
+        try {
+            const hooks = await resolveModuleHooks(ctx, module);
+            const before = (await hooks.tools!(ctx, scope())).map((tool) => tool.name);
+            expect(before).not.toContain("mcp__slow__echo");
+            await expect(module.listServerPage(ctx, "agent-a")).resolves.toMatchObject({
+                servers: [{ name: "slow", status: "failed", toolCount: 0 }],
+            });
+
+            await writeFile(gate.release, "release", "utf8");
+
+            await expect
+                .poll(async () => (await module.listServerPage(ctx, "agent-a")).servers, {
+                    timeout: 10_000,
+                })
+                .toMatchObject([{ name: "slow", status: "connected", toolCount: 1 }]);
+            const after = (await hooks.tools!(ctx, scope())).map((tool) => tool.name);
+            expect(after).toContain("mcp__slow__echo");
+            await expect(echo(module, "agent-a", "slow", "back")).resolves.toBe("slow:back");
+        } finally {
+            await module.close();
+        }
+    });
+
+    it("restarts a server whose process stopped", async () => {
+        const { module } = await configuredModule({ docs: stdio("docs") });
+        try {
+            await (
+                await resolveModuleHooks(ctx, module)
+            ).tools!(ctx, scope());
+            const first = await processId(module, "agent-a", "docs");
+
+            process.kill(Number(first), "SIGKILL");
+
+            await expect
+                .poll(
+                    async () => await processId(module, "agent-a", "docs").catch(() => undefined),
+                    { timeout: 10_000 },
+                )
+                .toMatch(/^\d+$/u);
+            expect(await processId(module, "agent-a", "docs")).not.toBe(first);
+        } finally {
+            await module.close();
+        }
+    });
+
     it("waits for an in-flight reconcile before closing every connection", async () => {
         const { module, root } = await configuredModule({ initial: stdio("initial") });
         const gate = gatedStdio(root, "close-race", "replacement");
@@ -341,8 +393,8 @@ describe("McpModule production discovery", () => {
     });
 });
 
-async function configuredModule(servers: Record<string, ReturnType<typeof stdio>>) {
-    const root = await temporaryRoot();
+async function configuredModule(servers: Record<string, ReturnType<typeof stdio>>, root?: string) {
+    root ??= await temporaryRoot();
     await write(
         root,
         join(process.platform === "darwin" ? "Happy/Config" : "happy/config", "mcp.toml"),

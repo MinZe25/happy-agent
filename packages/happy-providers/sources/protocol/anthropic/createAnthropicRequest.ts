@@ -3,6 +3,7 @@ import type { MessageCreateParamsStreaming } from "@anthropic-ai/sdk/resources/b
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionReasoningEffort, SessionStructuredOutput } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
+import { withAnthropicToolReferences } from "@/protocol/anthropic/anthropicToolReferences.js";
 import { toAnthropicMessages } from "@/protocol/anthropic/toAnthropicMessages.js";
 import { toAnthropicSystem } from "@/protocol/anthropic/toAnthropicSystem.js";
 import {
@@ -24,14 +25,19 @@ export function createAnthropicRequest(options: {
 }): AnthropicRequest {
     const effort = resolveEffort(options.effort);
     const system = toAnthropicSystem(options);
-    const tools = toAnthropicTools(options.tools);
+    const hasToolSearch = options.tools.some(isAnthropicToolSearchTool);
+    const { messages, tools } = withAnthropicToolReferences(
+        toAnthropicMessages(options.context.messages),
+        toAnthropicTools(options.tools),
+        hasToolSearch,
+    );
     const hasCompaction = options.context.messages.some((message) => message.role === "compaction");
     const requestsCompaction = options.compaction !== undefined;
     const usesCompaction = requestsCompaction || hasCompaction;
     const betas = ["context-1m-2025-08-07", "interleaved-thinking-2025-05-14"];
     if (usesCompaction) betas.push("compact-2026-01-12");
     if (options.structuredOutput !== undefined) betas.push("structured-outputs-2025-12-15");
-    if (options.tools.some(isAnthropicToolSearchTool)) {
+    if (hasToolSearch) {
         betas.push("tool-search-tool-2025-10-19");
     }
     return {
@@ -63,7 +69,7 @@ export function createAnthropicRequest(options: {
                   },
               }),
         max_tokens: 64_000,
-        messages: toAnthropicMessages(options.context.messages),
+        messages,
         model: options.model,
         stream: true,
         ...(system.length === 0 ? {} : { system }),
