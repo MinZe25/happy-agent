@@ -10,6 +10,9 @@ import {
     createTodoSurfaceRequestSchema,
     createSeparatorSurfaceRequestSchema,
     createDocumentSurfaceRequestSchema,
+    createArtifactSurfaceRequestSchema,
+    createBotSurfaceRequestSchema,
+    createTaskSurfaceRequestSchema,
     surfaceDocumentSchema,
     surfaceDocumentRevisionSchema,
     surfaceDocumentVersionSummarySchema,
@@ -32,6 +35,7 @@ import {
     type CreateTodoRequest,
     type UpdateTodoRequest,
     type Surface,
+    type SurfaceTarget,
     type Todo,
     type TodoRevision,
     type TodoListScope,
@@ -47,7 +51,10 @@ import { DurableFunctionsModule } from "../durableFunctions/index.js";
 import { createUuidV7Factory } from "../utils/createUuidV7.js";
 import { TeamModule } from "../team/index.js";
 import { BotsModule } from "../bots/index.js";
+import { TasksModule } from "../tasks/index.js";
+import { ArtifactsModule } from "../artifacts/index.js";
 import { ComputeModule } from "../compute/index.js";
+import { apiResourceVersion } from "../utils/apiResourceVersion.js";
 import { isUserOriginMetadata } from "../impl/messageOrigin.js";
 import { SurfacesPersistence, surfacesMigrations } from "./persistence/SurfacesPersistence.js";
 import { SurfaceError } from "./SurfaceError.js";
@@ -58,6 +65,7 @@ import {
     MAX_MANAGED_IMAGE_BYTES as MAX_SURFACE_IMAGE_BYTES,
 } from "../impl/images/normalizeManagedImage.js";
 import { surfaceImageAssetSchema, type SurfaceImageAsset } from "./SurfaceImageAsset.js";
+import { surfaceReferenceSchema, type SurfaceReference } from "./SurfaceReference.js";
 import { surfaceTools } from "./tools/surfaceTools.js";
 
 const eventSchema = Type.Union([
@@ -77,6 +85,9 @@ const supportedCreationSchema = Type.Union([
     createTodoSurfaceRequestSchema,
     createSeparatorSurfaceRequestSchema,
     createDocumentSurfaceRequestSchema,
+    createArtifactSurfaceRequestSchema,
+    createBotSurfaceRequestSchema,
+    createTaskSurfaceRequestSchema,
 ]);
 const documentHistoryCursorSchema = Type.String({
     minLength: 36,
@@ -96,6 +107,8 @@ export class SurfacesModule implements AgentModule {
         readonly durable: DurableFunctionsModule,
         readonly team: TeamModule,
         readonly bots: BotsModule,
+        readonly tasks: TasksModule,
+        readonly artifacts: ArtifactsModule,
         readonly compute: ComputeModule,
     ) {
         durable.register({
@@ -189,9 +202,10 @@ export class SurfacesModule implements AgentModule {
             }),
         ).toString("base64");
     }
+    /** The catalog as its caller sees it, with each reference target resolved for that caller. */
     async list(ctx: Context): Promise<Surface[]> {
         return ctx.inTx(async (tx) =>
-            (await this.#kv.list(tx, "surface.")).map((row) => readSurface(row.value)),
+            Promise.all((await this.#stored(tx)).map((surface) => this.#present(tx, surface))),
         );
     }
     async create(
@@ -202,6 +216,8 @@ export class SurfacesModule implements AgentModule {
         actor?: SurfaceActor,
     ): Promise<Surface> {
         const input = checked(supportedCreationSchema, request);
+        const reference = referenceFor(input);
+        if (reference !== undefined) checked(surfaceReferenceSchema, reference);
         let image: SurfaceImageAsset | null = null;
         if (input.type !== "separator" && input.image !== undefined) {
             try {
@@ -225,7 +241,12 @@ export class SurfacesModule implements AgentModule {
             await this.#validateUser(tx, creatorUserId);
             const id = input.id ?? createId();
             const old = await this.#kv.read(tx, `surface.${id}`);
-            if (old !== undefined) return readSurface(old);
+            if (old !== undefined) return this.#present(tx, readSurface(old));
+            if (
+                reference !== undefined &&
+                (await this.#resolve(tx, reference)).state === "unavailable"
+            )
+                throw new SurfaceError("not_found", "The referenced item was not found.");
             const now = Date.now();
             const surface = {
                 id,
@@ -248,6 +269,7 @@ export class SurfacesModule implements AgentModule {
             } satisfies Surface;
             await this.#kv.write(tx, `surface.${id}`, surface);
             if (image !== null) await this.#kv.write(tx, `image.${id}`, image);
+            if (reference !== undefined) await this.#kv.write(tx, `reference.${id}`, reference);
             if (input.type === "document") {
                 const revisionActor = actor ?? {
                     userId: await this.owner(tx),
@@ -272,7 +294,7 @@ export class SurfacesModule implements AgentModule {
                 type: "surface.created",
                 payload: { surface, ...echo(input.mutationId) },
             });
-            return surface;
+            return this.#present(tx, surface);
         });
     }
     async image(ctx: Context, id: string): Promise<SurfaceImageAsset> {
@@ -302,7 +324,7 @@ export class SurfacesModule implements AgentModule {
                 (action === "join" && member !== undefined) ||
                 (action === "leave" && member === undefined)
             )
-                return current;
+                return this.#present(tx, current);
             let members = [...current.members];
             if (action === "join")
                 members.push({
@@ -314,7 +336,7 @@ export class SurfacesModule implements AgentModule {
             else {
                 if (member === undefined)
                     throw new SurfaceError("conflict", "Join this Surface before reordering it.");
-                const own = (await this.list(tx))
+                const own = (await this.#stored(tx))
                     .flatMap((s) =>
                         s.members
                             .filter((m) => m.userId === userId)
@@ -322,7 +344,7 @@ export class SurfacesModule implements AgentModule {
                     )
                     .sort(byOrder);
                 const key = reorderedKey(own, id, afterId);
-                if (key === undefined) return current;
+                if (key === undefined) return this.#present(tx, current);
                 members = members.map((m) => (m.userId === userId ? { ...m, orderKey: key } : m));
             }
             members.sort((a, b) => compareStrings(a.userId ?? "", b.userId ?? ""));
@@ -343,7 +365,7 @@ export class SurfacesModule implements AgentModule {
                     ...echo(mutationId),
                 },
             });
-            return surface;
+            return this.#present(tx, surface);
         });
     }
     async listTodos(
@@ -683,6 +705,63 @@ export class SurfacesModule implements AgentModule {
             throw new Error("A document revision cannot be overwritten.");
         await this.#kv.write(ctx, `document.${document.surfaceId}`, document);
     }
+    async #stored(ctx: Context): Promise<Surface[]> {
+        return (await this.#kv.list(ctx, "surface.")).map((row) => readSurface(row.value));
+    }
+    /** Shared records never hold a target projection; it is resolved for each read. */
+    async #present(ctx: Context, surface: Surface): Promise<Surface> {
+        if (!isReferenceType(surface.type)) return surface;
+        const stored = await this.#kv.read(ctx, `reference.${surface.id}`);
+        return {
+            ...surface,
+            target: Value.Check(surfaceReferenceSchema, stored)
+                ? await this.#resolve(ctx, stored)
+                : { type: surface.type, state: "unavailable" },
+        };
+    }
+    /**
+     * Every authenticated person may read every bot, task, and artifact, so availability is the
+     * target's own lifecycle. Unavailable projections never carry the target's identity.
+     */
+    async #resolve(ctx: Context, reference: SurfaceReference): Promise<SurfaceTarget> {
+        if (reference.type === "artifact") {
+            const artifact = await this.artifacts.get(ctx, reference.artifactId);
+            if (artifact === undefined || artifact.status !== "active")
+                return { type: "artifact", state: "unavailable" };
+            return {
+                type: "artifact",
+                state: "available",
+                artifactId: artifact.id,
+                name: artifact.title,
+                hasImage: artifact.type === "image" || artifact.type === "image_series",
+                version: apiResourceVersion(artifact.updatedAt, artifact.revision, artifact.id),
+            };
+        }
+        if (reference.type === "bot") {
+            const bot = await this.bots.get(ctx, reference.botId);
+            if (bot === undefined || bot.status !== "active")
+                return { type: "bot", state: "unavailable" };
+            return {
+                type: "bot",
+                state: "available",
+                botId: bot.id,
+                name: bot.name,
+                hasImage: bot.avatar !== undefined,
+                version: apiResourceVersion(bot.updatedAt, bot.version, bot.id),
+            };
+        }
+        const task = await this.tasks.get(ctx, reference.taskId);
+        if (task === undefined || task.status !== "active")
+            return { type: "task", state: "unavailable" };
+        return {
+            type: "task",
+            state: "available",
+            taskId: task.id,
+            name: task.name,
+            hasImage: false,
+            version: apiResourceVersion(task.updatedAt, task.version, task.id),
+        };
+    }
     async #surface(ctx: Context, id: string, type?: Surface["type"]): Promise<Surface> {
         checked(surfaceIdSchema, id);
         const value = await this.#kv.read(ctx, `surface.${id}`);
@@ -702,7 +781,7 @@ export class SurfacesModule implements AgentModule {
             throw new SurfaceError("not_found", "The Surface user was not found.");
     }
     async #memberTail(ctx: Context, userId: string | null): Promise<string> {
-        const keys = (await this.list(ctx))
+        const keys = (await this.#stored(ctx))
             .flatMap((s) => s.members.filter((m) => m.userId === userId).map((m) => m.orderKey))
             .sort(compareStrings);
         return surfaceOrderKey(keys.at(-1) ?? null, null);
@@ -754,6 +833,15 @@ function readRevision(value: unknown): TodoRevision {
         ...revision,
         todo: { ...revision.todo, authorUserId: revision.todo.authorUserId ?? null },
     };
+}
+function isReferenceType(type: string): type is SurfaceReference["type"] {
+    return type === "artifact" || type === "bot" || type === "task";
+}
+function referenceFor(input: Static<typeof supportedCreationSchema>): SurfaceReference | undefined {
+    if (input.type === "artifact") return { type: "artifact", artifactId: input.artifactId };
+    if (input.type === "bot") return { type: "bot", botId: input.botId };
+    if (input.type === "task") return { type: "task", taskId: input.taskId };
+    return undefined;
 }
 function echo(mutationId?: string) {
     return mutationId === undefined ? {} : { mutationId };

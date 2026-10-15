@@ -540,7 +540,14 @@ export async function startHappyAgentRuntime(
         const team = new TeamModule<LibSQLDatabase>(config, profile);
         registerShutdown("team", async () => team.close());
         const userSettings = new UserSettingsModule(team);
-        const surfaces = new SurfacesModule(durableFunctions, team, bots, compute.computeModule);
+        const surfaces = new SurfacesModule(
+            durableFunctions,
+            team,
+            bots,
+            tasks,
+            artifacts,
+            compute.computeModule,
+        );
         const artifactData = new ArtifactDataModule(config, artifacts, profile, team, bots);
         registerShutdown(
             "artifact-data",

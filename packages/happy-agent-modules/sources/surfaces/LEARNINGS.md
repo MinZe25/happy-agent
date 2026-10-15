@@ -31,6 +31,17 @@ A sidebar section does not own the Surfaces beneath it. A separator uses the sam
 ordering, creator attribution, and events as every Surface, but accepts neither an image nor todo
 content. Its dedicated admin tool needs shared-data review only, with no filesystem access.
 
+## References resolve their target on every read
+
+Copying a bot's, task's, or artifact's title into the Surface would drift as soon as the target
+was renamed. A reference Surface instead keeps an immutable label and a separately stored target
+binding. Reads resolve the target's live name, image flag, and own version; the Surface's version
+and events stay unchanged when only the target changes. Every authenticated person can already
+read every bot, task, and artifact, so availability follows the target's lifecycle alone. Deleted
+or archived targets read as unavailable with no identifying fields, and creation refuses them
+as not found. Shared creation events carry only the stored record, so a caller-relative
+projection is never published. A reference joins nobody to the target and grants no rights.
+
 ## Attribution is explicit and remains separate from audit actors
 
 Todo records and Surfaces did not retain their author or creator. Todos now carry immutable

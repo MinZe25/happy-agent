@@ -1,6 +1,7 @@
 # Surfaces
 
-Shared typed feature instances, including todo lists, Markdown documents, and contentless sidebar separators, with each person's sidebar order on the
+Shared typed feature instances, including todo lists, Markdown documents, contentless sidebar
+separators, and references to artifacts, bots, and tasks, with each person's sidebar order on the
 nested member record. All heads and immutable revisions live in module-owned AgentKV storage.
 
 ```text
@@ -23,3 +24,10 @@ Guarded replacements, including clearing or applying historical text, never chan
 version. History listing reads a bounded range of separately stored metadata summaries, not full
 document text. Every revision retains its actor, source, and immutable mutation ID for uncertain-save
 recovery. Ordinary models can read, update, and list versions; only active admin bots create them.
+
+Reference Surfaces store only an immutable binding to their target beside the shared record.
+Every read resolves it against the owning Artifacts, Bots, or Tasks module, so the live name,
+image flag, and target version are never copied or synchronized. A missing, deleted, or archived
+target reads as unavailable without its ID. Shared events carry the stored record alone, never
+the resolved projection. The three admin creation tools share the image and replay handling of
+the other typed creation tools.

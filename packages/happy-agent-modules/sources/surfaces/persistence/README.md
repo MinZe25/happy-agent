@@ -8,3 +8,6 @@ All SQL stays here. Revision reads use indexed key ranges and a SQL limit before
 snapshots and audit metadata; `document-summary.*` stores the matching immutable metadata alone
 so bounded history pages never read full text. All three writes and the durable notification
 intent share the caller's transaction. Neither revisions nor summaries are pruned with events.
+
+`reference.*` holds each reference Surface's immutable target binding. It is written once, with
+the Surface, and never projected into events or reused across callers.

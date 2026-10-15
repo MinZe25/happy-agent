@@ -1,5 +1,10 @@
 import { createId } from "@paralleldrive/cuid2";
-import { defineAgentTool, cuid2Schema, type AgentModuleScope } from "@slopus/happy-agent-base";
+import {
+    defineAgentTool,
+    cuid2Schema,
+    type AgentKV,
+    type AgentModuleScope,
+} from "@slopus/happy-agent-base";
 import { Type } from "@sinclair/typebox";
 import {
     surfaceIdSchema,
@@ -25,11 +30,34 @@ const page = {
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
 };
 const textResult = (result: unknown) => [{ type: "text" as const, text: JSON.stringify(result) }];
+const imagePath = Type.Optional(
+    Type.String({
+        minLength: 1,
+        maxLength: 4096,
+        pattern: "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\u0000]*$",
+    }),
+);
+const fromImage = (path: string | undefined) =>
+    path === undefined ? "" : ` from image ${JSON.stringify(path)}`;
+const referenceRules =
+    "The name is the Surface's permanent label, shown when the target is unavailable; while available, people see the target's live name. A missing, deleted, or archived target is rejected as not found. Explicitly supply creatorUserId as a local Happy user ID or null; only null is allowed in standalone mode. A named creator joins at the end of their sidebar; null joins nobody in team mode and the local person in standalone mode. Optionally supply an absolute PNG, JPEG, or WebP image path (8 MiB maximum) for the Surface's own picture.";
+const imageAccess =
+    "Access: shared data write and, when supplied, filesystem image read; outside-workspace and symlink targets require Full access";
 
 /** Fixed common arrays; model providers never affect the Surface tool or permission contract. */
 export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, admin: boolean) {
-    const actor = (ctx: Parameters<SurfacesModule["actor"]>[0]) =>
-        surfaces.actor(ctx, scope.agent.id, scope.kv);
+    type ToolContext = Parameters<SurfacesModule["actor"]>[0];
+    const actor = (ctx: ToolContext) => surfaces.actor(ctx, scope.agent.id, scope.kv);
+    /** Replays reuse the creation's first identity and image bytes rather than rereading the file. */
+    const creation = async (ctx: ToolContext, call: { kv: AgentKV }, path: string | undefined) => {
+        await surfaces.requireAdmin(ctx, scope.agent.id);
+        const id = await call.kv.getOrCreate(ctx, "surfaceId", createId);
+        if (path === undefined) return { id };
+        const data = await call.kv.getOrCreate(ctx, "image", () =>
+            surfaces.imageFromPath(ctx, scope.agent.id, path),
+        );
+        return { id, image: { data } };
+    };
     const ordinary = [
         defineAgentTool({
             name: "list_surfaces",
@@ -37,7 +65,7 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             capabilities: ["Find shared Surfaces and their members."],
             searchKeywords: ["list surfaces", "shared todo lists", "sidebar members"],
             description:
-                "List shared Surface instances, their IDs, names, types, and joined people. Each todo tool requires a Surface ID. Results are paged.",
+                "List shared Surface instances, their IDs, names, types, and joined people. Artifact, bot, and task Surfaces include their target's live name and ID while it is available, or an unavailable state without them. Each todo or document tool requires a Surface ID. Results are paged.",
             parameters: Type.Object(page, { additionalProperties: false }),
             returnType: Type.Object({
                 surfaces: Type.Array(surfaceSchema),
@@ -334,13 +362,7 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
                 {
                     name: surfaceNameSchema,
                     creatorUserId: surfaceMemberSchema.properties.userId,
-                    imagePath: Type.Optional(
-                        Type.String({
-                            minLength: 1,
-                            maxLength: 4096,
-                            pattern: "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\u0000]*$",
-                        }),
-                    ),
+                    imagePath,
                 },
                 { additionalProperties: false },
             ),
@@ -351,30 +373,18 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             shouldRunInFullAccessInAutoMode: (input, ctx) =>
                 surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath),
             describeAutoPermissionAction: (input) =>
-                `creating a shared todo Surface${input.imagePath === undefined ? "" : ` from image ${JSON.stringify(input.imagePath)}`}. Access: shared data write and, when supplied, filesystem image read; outside-workspace and symlink targets require Full access`,
-            execute: async (ctx, input, call) => {
-                await surfaces.requireAdmin(ctx, scope.agent.id);
-                const id = await call.kv.getOrCreate(ctx, "surfaceId", createId);
-                const image =
-                    input.imagePath === undefined
-                        ? undefined
-                        : {
-                              data: await call.kv.getOrCreate(ctx, "image", () =>
-                                  surfaces.imageFromPath(ctx, scope.agent.id, input.imagePath!),
-                              ),
-                          };
-                return surfaces.create(
+                `creating a shared todo Surface${fromImage(input.imagePath)}. ${imageAccess}`,
+            execute: async (ctx, input, call) =>
+                surfaces.create(
                     ctx,
                     {
-                        id,
+                        ...(await creation(ctx, call, input.imagePath)),
                         type: "todo",
                         name: input.name,
-                        ...(image === undefined ? {} : { image }),
                     },
                     input.creatorUserId,
                     scope.agent.id,
-                );
-            },
+                ),
             toLLM: textResult,
         }),
         defineAgentTool({
@@ -389,13 +399,7 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
                     name: surfaceNameSchema,
                     creatorUserId: surfaceMemberSchema.properties.userId,
                     text: Type.Optional(surfaceDocumentTextSchema),
-                    imagePath: Type.Optional(
-                        Type.String({
-                            minLength: 1,
-                            maxLength: 4096,
-                            pattern: "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\u0000]*$",
-                        }),
-                    ),
+                    imagePath,
                 },
                 { additionalProperties: false },
             ),
@@ -406,32 +410,131 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             shouldRunInFullAccessInAutoMode: (input, ctx) =>
                 surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath),
             describeAutoPermissionAction: (input) =>
-                `creating a shared Markdown document Surface${input.imagePath === undefined ? "" : ` from image ${JSON.stringify(input.imagePath)}`}. Access: shared data write and, when supplied, filesystem image read; outside-workspace and symlink targets require Full access`,
-            execute: async (ctx, input, call) => {
-                await surfaces.requireAdmin(ctx, scope.agent.id);
-                const id = await call.kv.getOrCreate(ctx, "surfaceId", createId);
-                const image =
-                    input.imagePath === undefined
-                        ? undefined
-                        : {
-                              data: await call.kv.getOrCreate(ctx, "image", () =>
-                                  surfaces.imageFromPath(ctx, scope.agent.id, input.imagePath!),
-                              ),
-                          };
-                return surfaces.create(
+                `creating a shared Markdown document Surface${fromImage(input.imagePath)}. ${imageAccess}`,
+            execute: async (ctx, input, call) =>
+                surfaces.create(
                     ctx,
                     {
-                        id,
+                        ...(await creation(ctx, call, input.imagePath)),
                         type: "document",
                         name: input.name,
                         ...(input.text === undefined ? {} : { text: input.text }),
-                        ...(image === undefined ? {} : { image }),
                     },
                     input.creatorUserId,
                     scope.agent.id,
                     await actor(ctx),
-                );
-            },
+                ),
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "create_artifact_surface",
+            defer: true,
+            capabilities: ["Create a Surface that points at an existing artifact as an admin bot."],
+            searchKeywords: ["artifact surface", "pin artifact to sidebar", "artifact reference"],
+            description: `Admin bots only: create a Surface pointing at one existing, undeleted artifact so people can keep it in their sidebar. It neither copies nor changes the artifact. ${referenceRules}`,
+            parameters: Type.Object(
+                {
+                    name: surfaceNameSchema,
+                    creatorUserId: surfaceMemberSchema.properties.userId,
+                    artifactId: cuid2Schema,
+                    imagePath,
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: (input, ctx) =>
+                surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath),
+            describeAutoPermissionAction: (input) =>
+                `creating a shared Surface referencing artifact ${JSON.stringify(input.artifactId)}${fromImage(input.imagePath)}. ${imageAccess}`,
+            execute: async (ctx, input, call) =>
+                surfaces.create(
+                    ctx,
+                    {
+                        ...(await creation(ctx, call, input.imagePath)),
+                        type: "artifact",
+                        name: input.name,
+                        artifactId: input.artifactId,
+                    },
+                    input.creatorUserId,
+                    scope.agent.id,
+                ),
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "create_bot_surface",
+            defer: true,
+            capabilities: ["Create a Surface that points at an existing bot as an admin bot."],
+            searchKeywords: ["bot surface", "pin bot to sidebar", "bot reference"],
+            description: `Admin bots only: create a Surface pointing at one existing, active bot so people can keep it in their sidebar. Opening it shows that bot's existing conversation; it grants no access and changes nothing about the bot. ${referenceRules}`,
+            parameters: Type.Object(
+                {
+                    name: surfaceNameSchema,
+                    creatorUserId: surfaceMemberSchema.properties.userId,
+                    botId: cuid2Schema,
+                    imagePath,
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: (input, ctx) =>
+                surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath),
+            describeAutoPermissionAction: (input) =>
+                `creating a shared Surface referencing bot ${JSON.stringify(input.botId)}${fromImage(input.imagePath)}. ${imageAccess}`,
+            execute: async (ctx, input, call) =>
+                surfaces.create(
+                    ctx,
+                    {
+                        ...(await creation(ctx, call, input.imagePath)),
+                        type: "bot",
+                        name: input.name,
+                        botId: input.botId,
+                    },
+                    input.creatorUserId,
+                    scope.agent.id,
+                ),
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "create_task_surface",
+            defer: true,
+            capabilities: ["Create a Surface that points at an existing task as an admin bot."],
+            searchKeywords: ["task surface", "pin task to sidebar", "task reference"],
+            description: `Admin bots only: create a Surface pointing at one existing, active task so people can keep it in their sidebar. Opening it shows that task's existing conversation; it never joins anyone to the task or changes who may archive it. ${referenceRules}`,
+            parameters: Type.Object(
+                {
+                    name: surfaceNameSchema,
+                    creatorUserId: surfaceMemberSchema.properties.userId,
+                    taskId: cuid2Schema,
+                    imagePath,
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: (input, ctx) =>
+                surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath),
+            describeAutoPermissionAction: (input) =>
+                `creating a shared Surface referencing task ${JSON.stringify(input.taskId)}${fromImage(input.imagePath)}. ${imageAccess}`,
+            execute: async (ctx, input, call) =>
+                surfaces.create(
+                    ctx,
+                    {
+                        ...(await creation(ctx, call, input.imagePath)),
+                        type: "task",
+                        name: input.name,
+                        taskId: input.taskId,
+                    },
+                    input.creatorUserId,
+                    scope.agent.id,
+                ),
             toLLM: textResult,
         }),
         defineAgentTool({
