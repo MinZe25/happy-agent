@@ -314,6 +314,11 @@ question prompt's optional `secretRequest`. A client that does not recognize it 
 as an ordinary free-text question; the daemon rejects any answer to it that is not the ID of an
 existing secret available to agents, so a value typed into that field is never stored.
 
+Secret deletion through `DELETE /v0/secrets/:secretId` is additive and does not increment the
+protocol version. An older compatible daemon answers that route with `404` even for a secret that
+`GET /v0/secrets/:secretId` still returns; clients then treat deletion as unavailable. The
+`secret.removed` event is unchanged.
+
 Subtasks are additive and do not increment the protocol version. The agent's optional `subtask`
 boolean defaults to `false` when absent; the workspace's optional `subtaskAgentId` defaults to
 `null`. Clients use the explicit capability flags for interaction, not ancestry alone.
@@ -2574,8 +2579,8 @@ but does not disclose what changed inside the value.
 - `environmentVariables` — the bundle's variable names, sorted lexically. Names match
   `[A-Za-z_][A-Za-z0-9_]*`, are case-insensitively unique, and never reveal their values.
 - `managed` — `false` for a secret created through this API; `true` when another daemon feature or
-  integration owns its lifecycle. Managed secrets are visible here but cannot be updated through
-  the public secret mutation endpoint.
+  integration owns its lifecycle. Managed secrets are visible here but cannot be updated or
+  deleted through the public secret mutation endpoints.
 - `availableToAgents` — whether an attachment may grant agents access to the secret. A secret set
   to `false` has no attachments.
 - `version` — the UUIDv7 concurrency version used by `If-Match` and `secret.updated`.
@@ -2715,9 +2720,24 @@ never its values. Response — `200`: `{ "secret": { ... } }`. A changed secret 
 `secret.updated`; a request that leaves description, environment, and availability identical does
 not advance the version or emit an event.
 
-There is no public secret-removal endpoint in this contract. Detaching revokes grants but does not
-remove the global catalog entry. If a daemon feature retires a managed secret that it owns, the
-secret and its direct attachments disappear atomically through `secret.removed`.
+### `DELETE /v0/secrets/:secretId`
+
+Deletes one user-created secret together with all of its direct attachments, in one atomic change.
+Requires `If-Match` with the secret version. The optional JSON body is `{ "mutationId": "..." }`;
+an empty body is equivalent to `{}`.
+
+Every project, workspace, and agent grant of the secret is removed with it, so no agent can select
+the secret afterwards. Detaching alone revokes grants but leaves the catalog entry in place.
+
+`404` when no such secret exists. A managed secret is a `409` conflict because the daemon feature
+that owns it is responsible for its lifecycle. A stale `If-Match` returns the standard `409` with
+`currentVersion` and the safe current `secret`, never its values.
+
+Response — `200`: `{ "secret": { ... } }`, the deleted secret's final safe metadata. Values are
+never included. The deletion emits `secret.removed` with the optional `mutationId`.
+
+If a daemon feature retires a managed secret that it owns, the secret and its direct attachments
+likewise disappear atomically through `secret.removed`.
 
 ### `GET /v0/secrets/:secretId/attachments`
 
@@ -8363,8 +8383,8 @@ changes from another source omit it.
     - `attachment` (full attachment object).
 - `secret.detached` — one direct grant was removed.
     - `attachment` (the full attachment object as it existed before removal).
-- `secret.removed` — a daemon-owned feature retired one managed secret. There is no public API
-  mutation for this event.
+- `secret.removed` — one secret left the catalog: a user deleted it through
+  `DELETE /v0/secrets/:secretId`, or a daemon-owned feature retired a managed secret it owns.
     - `secretId` (ID string), `previousVersion` (the final safe secret version).
     - Every attachment whose `secretId` matches is removed by the same atomic change; clients
       discard those cached relations without waiting for separate detach events.
