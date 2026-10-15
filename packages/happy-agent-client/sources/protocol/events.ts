@@ -143,8 +143,9 @@ export type SecretAttachedPayload = Static<typeof secretAttachedPayloadSchema>;
 export const secretDetachedPayloadSchema = secretAttachedPayloadSchema;
 export type SecretDetachedPayload = Static<typeof secretDetachedPayloadSchema>;
 
-/** A daemon-owned feature retired one managed secret and all its grants. */
+/** A user deleted one secret, or its owning feature retired it, together with all its grants. */
 export const secretRemovedPayloadSchema = Type.Object({
+    mutationId: Type.Optional(mutationIdSchema),
     previousVersion: resourceVersionSchema,
     secretId: cuid2Schema,
 });

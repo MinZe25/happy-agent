@@ -168,6 +168,13 @@ export const updateSecretRequestSchema = Type.Union([
 ]);
 export type UpdateSecretRequest = Static<typeof updateSecretRequestSchema>;
 
+/** `DELETE /v0/secrets/:secretId`; an empty body is equivalent to `{}`. */
+export const deleteSecretRequestSchema = Type.Object(
+    { mutationId: Type.Optional(mutationIdSchema) },
+    { additionalProperties: false },
+);
+export type DeleteSecretRequest = Static<typeof deleteSecretRequestSchema>;
+
 /** Pagination for one secret's direct attachments. */
 export const secretAttachmentListQuerySchema = Type.Object(
     {

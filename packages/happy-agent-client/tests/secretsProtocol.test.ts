@@ -12,6 +12,7 @@ import {
 } from "../sources/protocol/events.js";
 import {
     createSecretRequestSchema,
+    deleteSecretRequestSchema,
     type Secret,
     type SecretAttachment,
     secretAttachmentListResponseSchema,
@@ -107,6 +108,10 @@ describe("secrets protocol", () => {
             }),
         ).toBe(false);
 
+        expect(Value.Check(deleteSecretRequestSchema, {})).toBe(true);
+        expect(Value.Check(deleteSecretRequestSchema, { mutationId: "delete-1" })).toBe(true);
+        expect(Value.Check(deleteSecretRequestSchema, { force: true })).toBe(false);
+
         expect(Value.Check(secretListQuerySchema, {})).toBe(true);
         expect(
             Value.Check(secretListQuerySchema, {
@@ -184,7 +189,11 @@ describe("secrets protocol", () => {
             {
                 cursor: "01991f3a-9d2f-7000-8000-3a0b2c4d5e72",
                 occurredAt: updatedAt + 4,
-                payload: { previousVersion: nextVersion, secretId: secret.id },
+                payload: {
+                    mutationId: "delete-1",
+                    previousVersion: nextVersion,
+                    secretId: secret.id,
+                },
                 type: "secret.removed",
             },
         ];
@@ -194,6 +203,12 @@ describe("secrets protocol", () => {
         expect(Value.Check(secretAttachedPayloadSchema, events[2]!.payload)).toBe(true);
         expect(Value.Check(secretDetachedPayloadSchema, events[3]!.payload)).toBe(true);
         expect(Value.Check(secretRemovedPayloadSchema, events[4]!.payload)).toBe(true);
+        expect(
+            Value.Check(secretRemovedPayloadSchema, {
+                previousVersion: nextVersion,
+                secretId: secret.id,
+            }),
+        ).toBe(true);
         expect(
             Value.Check(secretUpdatedPayloadSchema, {
                 ...(events[1]!.payload as object),
@@ -237,7 +252,7 @@ describe("secrets protocol", () => {
             if (request.method === "PUT") {
                 return json({ attachment, created: true }, 201);
             }
-            if (request.method === "DELETE") {
+            if (request.method === "DELETE" && request.url.includes("/attachments/")) {
                 return json({ attachment, detached: true });
             }
             return json(response, request.method === "POST" ? 201 : 200);
@@ -284,6 +299,12 @@ describe("secrets protocol", () => {
                 { mutationId: "detach-1" },
             ),
         ).resolves.toEqual({ attachment, detached: true });
+        await expect(
+            client.deleteSecret("secret/one", { mutationId: "delete-1" }, { ifMatch: version }),
+        ).resolves.toEqual(response);
+        await expect(
+            client.deleteSecret("secret/one", undefined, { ifMatch: version }),
+        ).resolves.toEqual(response);
 
         expect(
             requests.map(({ body, headers, method, url }) => ({
@@ -341,6 +362,18 @@ describe("secrets protocol", () => {
                 ifMatch: null,
                 method: "DELETE",
                 url: "http://agent.local/v0/secrets/secret%2Fone/attachments/workspace/workspace%2Fone",
+            },
+            {
+                body: JSON.stringify({ mutationId: "delete-1" }),
+                ifMatch: version,
+                method: "DELETE",
+                url: "http://agent.local/v0/secrets/secret%2Fone",
+            },
+            {
+                body: JSON.stringify({}),
+                ifMatch: version,
+                method: "DELETE",
+                url: "http://agent.local/v0/secrets/secret%2Fone",
             },
         ]);
     });

@@ -190,6 +190,7 @@ import type {
 } from "./protocol/questions.js";
 import type {
     CreateSecretRequest,
+    DeleteSecretRequest,
     SecretAttachmentListQuery,
     SecretAttachmentListResponse,
     SecretAttachmentMutationRequest,
@@ -733,6 +734,24 @@ export class HappyAgentClient {
     ): Promise<SecretResponse> {
         return await this.#json({
             method: "PATCH",
+            path: `v0/secrets/${encodeURIComponent(secretId)}`,
+            json: request,
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * `DELETE /v0/secrets/:secretId` — removes a user-created secret and every direct grant in one
+     * change. The response carries the deleted secret's final safe metadata.
+     */
+    async deleteSecret(
+        secretId: Cuid2,
+        request: DeleteSecretRequest = {},
+        options: VersionedRequestOptions,
+    ): Promise<SecretResponse> {
+        return await this.#json({
+            method: "DELETE",
             path: `v0/secrets/${encodeURIComponent(secretId)}`,
             json: request,
             ifMatch: options.ifMatch,
