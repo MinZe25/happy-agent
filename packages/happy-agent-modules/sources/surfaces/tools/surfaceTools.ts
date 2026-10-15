@@ -11,6 +11,9 @@ import {
     todoListScopeSchema,
     todoVersionListResponseSchema,
     surfaceNameSchema,
+    surfaceDocumentSchema,
+    surfaceDocumentTextSchema,
+    surfaceDocumentVersionListResponseSchema,
     resourceVersionSchema,
 } from "@slopus/happy-agent-client";
 import type { SurfacesModule } from "../SurfacesModule.js";
@@ -230,6 +233,95 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             toLLM: textResult,
         }),
     ];
+    const documents = [
+        defineAgentTool({
+            name: "read_document",
+            defer: true,
+            capabilities: ["Read a shared Surface's Markdown document or a permanent revision."],
+            searchKeywords: ["read document", "surface markdown", "previous document text"],
+            description:
+                "Read a document Surface's current Markdown and version, or the immutable snapshot at an optional historical version. Text is preserved verbatim. Keep the current version for a guarded update; reading history does not change the document.",
+            parameters: Type.Object(
+                { surfaceId: surfaceIdSchema, version: Type.Optional(resourceVersionSchema) },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceDocumentSchema,
+            durable: false,
+            shouldReviewInAutoMode: () => false,
+            execute: async (ctx, input) =>
+                input.version === undefined
+                    ? surfaces.getDocument(ctx, input.surfaceId)
+                    : (await surfaces.getDocumentVersion(ctx, input.surfaceId, input.version))
+                          .document,
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "update_document",
+            defer: true,
+            capabilities: [
+                "Replace a shared document's Markdown while preserving permanent history.",
+            ],
+            searchKeywords: [
+                "update document",
+                "edit markdown",
+                "clear shared document",
+                "restore document revision",
+            ],
+            description:
+                "Replace a document Surface's entire Markdown using its current version. Empty text clears content without deleting history. Identical text is a no-op only when the version matches. On conflict, read the latest document before editing. To restore a revision, read its text and write it with the current version.",
+            parameters: Type.Object(
+                {
+                    surfaceId: surfaceIdSchema,
+                    version: resourceVersionSchema,
+                    text: surfaceDocumentTextSchema,
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceDocumentSchema,
+            durable: true,
+            transactional: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            describeAutoPermissionAction: ({ surfaceId }) =>
+                `replacing the shared document in Surface ${JSON.stringify(surfaceId)} while preserving history. Access: shared data write; no filesystem access`,
+            execute: async (ctx, input) =>
+                surfaces.updateDocument(
+                    ctx,
+                    input.surfaceId,
+                    input.version,
+                    { text: input.text },
+                    await actor(ctx),
+                ),
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "list_document_versions",
+            defer: true,
+            capabilities: ["Read a shared document's permanent revision summaries and authors."],
+            searchKeywords: ["document history", "document versions", "markdown revision authors"],
+            description:
+                "Read permanent document revision summaries, oldest first, without loading Markdown text. Returns up to 20 entries, default 10. Continue with nextAfterVersion; use read_document with a selected version for its text.",
+            parameters: Type.Object(
+                {
+                    surfaceId: surfaceIdSchema,
+                    afterVersion: Type.Optional(resourceVersionSchema),
+                    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceDocumentVersionListResponseSchema,
+            durable: false,
+            shouldReviewInAutoMode: () => false,
+            execute: async (ctx, input) =>
+                surfaces.documentVersions(
+                    ctx,
+                    input.surfaceId,
+                    input.afterVersion,
+                    input.limit ?? 10,
+                ),
+            toLLM: textResult,
+        }),
+    ];
     const administration = [
         defineAgentTool({
             name: "create_todo_surface",
@@ -281,6 +373,63 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
                     },
                     input.creatorUserId,
                     scope.agent.id,
+                );
+            },
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "create_document_surface",
+            defer: true,
+            capabilities: ["Create a named shared Markdown document Surface as an admin bot."],
+            searchKeywords: ["create document surface", "new shared markdown", "document image"],
+            description:
+                "Admin bots only: create a document Surface with optional initial Markdown, empty by default. Explicitly supply creatorUserId as a local Happy user ID or null; only null is allowed in standalone mode. The creator is the immutable author and joins their sidebar; null joins nobody in team mode and the local person in standalone mode. Revision audit identity remains the actual caller. Optionally supply an absolute PNG, JPEG, or WebP image path (8 MiB maximum).",
+            parameters: Type.Object(
+                {
+                    name: surfaceNameSchema,
+                    creatorUserId: surfaceMemberSchema.properties.userId,
+                    text: Type.Optional(surfaceDocumentTextSchema),
+                    imagePath: Type.Optional(
+                        Type.String({
+                            minLength: 1,
+                            maxLength: 4096,
+                            pattern: "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\u0000]*$",
+                        }),
+                    ),
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: (input, ctx) =>
+                surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath),
+            describeAutoPermissionAction: (input) =>
+                `creating a shared Markdown document Surface${input.imagePath === undefined ? "" : ` from image ${JSON.stringify(input.imagePath)}`}. Access: shared data write and, when supplied, filesystem image read; outside-workspace and symlink targets require Full access`,
+            execute: async (ctx, input, call) => {
+                await surfaces.requireAdmin(ctx, scope.agent.id);
+                const id = await call.kv.getOrCreate(ctx, "surfaceId", createId);
+                const image =
+                    input.imagePath === undefined
+                        ? undefined
+                        : {
+                              data: await call.kv.getOrCreate(ctx, "image", () =>
+                                  surfaces.imageFromPath(ctx, scope.agent.id, input.imagePath!),
+                              ),
+                          };
+                return surfaces.create(
+                    ctx,
+                    {
+                        id,
+                        type: "document",
+                        name: input.name,
+                        ...(input.text === undefined ? {} : { text: input.text }),
+                        ...(image === undefined ? {} : { image }),
+                    },
+                    input.creatorUserId,
+                    scope.agent.id,
+                    await actor(ctx),
                 );
             },
             toLLM: textResult,
@@ -367,5 +516,5 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             toLLM: textResult,
         }),
     ];
-    return admin ? [...ordinary, ...administration] : ordinary;
+    return admin ? [...ordinary, ...documents, ...administration] : [...ordinary, ...documents];
 }

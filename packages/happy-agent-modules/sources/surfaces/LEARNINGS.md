@@ -61,6 +61,19 @@ Markdown syntax. Creation, editing, ordering, state changes, and permanent histo
 todo operations. Clients edit the full text so removing the prefix returns the row to an ordinary
 task; historical row styling remains a client choice.
 
+## Document content has its own version and permanent audit history
+
+A document Surface is shared Markdown, not a workspace file or an artifact. Content edits use
+their own guarded version without changing the Surface's catalog version or sidebar state.
+The full snapshot, immutable revision, bounded history summary, and notification intent commit
+together. Authors remain the explicit creator; editors and audit actors come from trusted callers.
+
+Each revision keeps the request's mutation ID verbatim, or null when absent. Text equality could
+not identify a save whose response was lost after a collaborator edited again; the revision's
+immutable correlation metadata can. This is not a deduplication key, and no-ops or conflicts do
+not append or overwrite revisions. Reading an old version and performing an ordinary guarded
+replacement restores its text while retaining every intermediate version.
+
 ## Nothing historical is destroyed
 
 The legacy list hard-deleted todos and allowed reorder to revive completed items. Every change

@@ -31,6 +31,7 @@ import {
     reorderSurfaceRequestSchema,
     createTodoRequestSchema,
     updateTodoRequestSchema,
+    updateSurfaceDocumentRequestSchema,
     reorderTodoRequestSchema,
     todoMutationRequestSchema,
     todoListScopeSchema,
@@ -92,7 +93,7 @@ import { MAX_RUNNER_FRAME_BYTES, RunnerUnavailableError } from "@slopus/happy-ag
 import { WebSocketServer } from "ws";
 
 import { AbortModule } from "../abort/index.js";
-import { SurfacesModule, SurfaceError } from "../surfaces/index.js";
+import { SurfacesModule, SurfaceError, SurfaceDocumentConflictError } from "../surfaces/index.js";
 import type { SchedulingModule } from "../scheduling/index.js";
 import {
     ArtifactConflictError,
@@ -5326,7 +5327,7 @@ export class ApiModule implements AgentModule {
                         request,
                         createSurfaceRequestSchema,
                         "Surface creation",
-                        12 * 1024 * 1024,
+                        14 * 1024 * 1024,
                     );
                     sendJson(response, 201, {
                         surface: await surfaces.create(ctx, body, await surfaces.owner(ctx)),
@@ -5389,6 +5390,73 @@ export class ApiModule implements AgentModule {
                         ),
                     });
                 }
+                return true;
+            }
+            const documentMatch =
+                /^\/v0\/surfaces\/document\/([a-z][a-z0-9]*)(?:\/(versions)(?:\/([^/]+))?)?$/.exec(
+                    url.pathname,
+                );
+            if (documentMatch !== null) {
+                const surfaceId = documentMatch[1]!;
+                if (!Value.Check(surfaceIdSchema, surfaceId)) return false;
+                const history = documentMatch[2] !== undefined;
+                const selectedVersion = documentMatch[3];
+                if (request.method === "GET") {
+                    if (!history) {
+                        const cursor = this.#journal.cursor();
+                        sendJson(response, 200, {
+                            document: await surfaces.getDocument(ctx, surfaceId),
+                            cursor,
+                        });
+                    } else if (selectedVersion !== undefined) {
+                        sendJson(response, 200, {
+                            revision: await surfaces.getDocumentVersion(
+                                ctx,
+                                surfaceId,
+                                decodePathSegment(selectedVersion, "document revision"),
+                            ),
+                        });
+                    } else {
+                        const after = url.searchParams.getAll("afterVersion");
+                        const limits = url.searchParams.getAll("limit");
+                        const limit = limits[0] === undefined ? 100 : Number(limits[0]);
+                        if (
+                            after.length > 1 ||
+                            limits.length > 1 ||
+                            (limits[0] !== undefined &&
+                                !Value.Check(
+                                    Type.String({ pattern: "^[1-9][0-9]*$" }),
+                                    limits[0],
+                                )) ||
+                            !Value.Check(Type.Integer({ minimum: 1, maximum: 200 }), limit)
+                        )
+                            throw invalidRequest("The document history page is invalid.");
+                        sendJson(
+                            response,
+                            200,
+                            await surfaces.documentVersions(ctx, surfaceId, after[0], limit),
+                        );
+                    }
+                    return true;
+                }
+                if (request.method !== "PUT" || history) return false;
+                const current = await surfaces.getDocument(ctx, surfaceId);
+                const version = requireIfMatch(request, current.version, {
+                    currentVersion: current.version,
+                    document: current,
+                });
+                const body = await bodyAs(
+                    request,
+                    updateSurfaceDocumentRequestSchema,
+                    "document update",
+                    2 * 1024 * 1024,
+                );
+                sendJson(response, 200, {
+                    document: await surfaces.updateDocument(ctx, surfaceId, version, body, {
+                        userId: await surfaces.owner(ctx),
+                        agentId: null,
+                    }),
+                });
                 return true;
             }
             const match =
@@ -5513,6 +5581,11 @@ export class ApiModule implements AgentModule {
             sendJson(response, 200, { todo });
             return true;
         } catch (error) {
+            if (error instanceof SurfaceDocumentConflictError)
+                throw new ApiError(409, "conflict", error.message, {
+                    currentVersion: error.document.version,
+                    document: error.document,
+                });
             if (!(error instanceof SurfaceError)) throw error;
             throw new ApiError(
                 error.code === "not_found"

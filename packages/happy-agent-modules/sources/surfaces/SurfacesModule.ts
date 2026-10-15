@@ -9,6 +9,12 @@ import {
 import {
     createTodoSurfaceRequestSchema,
     createSeparatorSurfaceRequestSchema,
+    createDocumentSurfaceRequestSchema,
+    surfaceDocumentSchema,
+    surfaceDocumentRevisionSchema,
+    surfaceDocumentVersionSummarySchema,
+    surfaceDocumentUpdatedPayloadSchema,
+    updateSurfaceDocumentRequestSchema,
     createTodoRequestSchema,
     surfaceSchema,
     surfaceMemberSchema,
@@ -29,6 +35,10 @@ import {
     type Todo,
     type TodoRevision,
     type TodoListScope,
+    type SurfaceDocument,
+    type SurfaceDocumentRevision,
+    type SurfaceDocumentVersionListResponse,
+    type UpdateSurfaceDocumentRequest,
 } from "@slopus/happy-agent-client";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -41,6 +51,7 @@ import { ComputeModule } from "../compute/index.js";
 import { isUserOriginMetadata } from "../impl/messageOrigin.js";
 import { SurfacesPersistence, surfacesMigrations } from "./persistence/SurfacesPersistence.js";
 import { SurfaceError } from "./SurfaceError.js";
+import { SurfaceDocumentConflictError } from "./SurfaceDocumentConflictError.js";
 import { compareStrings, surfaceOrderKey } from "./impl/surfaceOrderKey.js";
 import {
     normalizeManagedImage,
@@ -54,6 +65,10 @@ const eventSchema = Type.Union([
     Type.Object({ type: Type.Literal("surface.updated"), payload: surfaceUpdatedPayloadSchema }),
     Type.Object({ type: Type.Literal("todo.created"), payload: todoCreatedPayloadSchema }),
     Type.Object({ type: Type.Literal("todo.updated"), payload: todoUpdatedPayloadSchema }),
+    Type.Object({
+        type: Type.Literal("surface.document.updated"),
+        payload: surfaceDocumentUpdatedPayloadSchema,
+    }),
 ]);
 export type SurfaceEvent = Static<typeof eventSchema>;
 type Listener = (ctx: Context, event: SurfaceEvent) => void | Promise<void>;
@@ -61,7 +76,13 @@ export type SurfaceActor = TodoRevision["actor"];
 const supportedCreationSchema = Type.Union([
     createTodoSurfaceRequestSchema,
     createSeparatorSurfaceRequestSchema,
+    createDocumentSurfaceRequestSchema,
 ]);
+const documentHistoryCursorSchema = Type.String({
+    minLength: 36,
+    maxLength: 36,
+    pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+});
 
 /** Shared list instances. Every decision and revision commits under the database transaction lock. */
 export class SurfacesModule implements AgentModule {
@@ -178,10 +199,11 @@ export class SurfacesModule implements AgentModule {
         request: CreateSurfaceRequest,
         creatorUserId: string | null,
         adminAgentId?: string,
+        actor?: SurfaceActor,
     ): Promise<Surface> {
         const input = checked(supportedCreationSchema, request);
         let image: SurfaceImageAsset | null = null;
-        if (input.type === "todo" && input.image !== undefined) {
+        if (input.type !== "separator" && input.image !== undefined) {
             try {
                 const normalized = await normalizeManagedImage(
                     Buffer.from(input.image.data, "base64"),
@@ -226,6 +248,26 @@ export class SurfacesModule implements AgentModule {
             } satisfies Surface;
             await this.#kv.write(tx, `surface.${id}`, surface);
             if (image !== null) await this.#kv.write(tx, `image.${id}`, image);
+            if (input.type === "document") {
+                const revisionActor = actor ?? {
+                    userId: await this.owner(tx),
+                    agentId: adminAgentId ?? null,
+                };
+                await this.#saveDocument(
+                    tx,
+                    {
+                        surfaceId: id,
+                        text: input.text ?? "",
+                        authorUserId: creatorUserId,
+                        lastEditorUserId: revisionActor.userId,
+                        createdAt: now,
+                        updatedAt: now,
+                        version: createUuidV7Factory(Date.now, surface.version)(),
+                    },
+                    revisionActor,
+                    input.mutationId,
+                );
+            }
             await this.#event(tx, {
                 type: "surface.created",
                 payload: { surface, ...echo(input.mutationId) },
@@ -521,6 +563,125 @@ export class SurfacesModule implements AgentModule {
                 throw new SurfaceError("not_found", "The todo revision was not found.");
             return readRevision(row);
         });
+    }
+    async getDocument(ctx: Context, surfaceId: string): Promise<SurfaceDocument> {
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "document");
+            return checked(surfaceDocumentSchema, await this.#kv.read(tx, `document.${surfaceId}`));
+        });
+    }
+    async updateDocument(
+        ctx: Context,
+        surfaceId: string,
+        version: string,
+        input: UpdateSurfaceDocumentRequest,
+        actor: SurfaceActor,
+    ): Promise<SurfaceDocument> {
+        checked(resourceVersionSchema, version);
+        checked(updateSurfaceDocumentRequestSchema, input);
+        return ctx.inTx(async (tx) => {
+            const current = await this.getDocument(tx, surfaceId);
+            if (current.version !== version) throw new SurfaceDocumentConflictError(current);
+            if (current.text === input.text) return current;
+            const document: SurfaceDocument = {
+                ...current,
+                text: input.text,
+                lastEditorUserId: actor.userId,
+                updatedAt: Date.now(),
+                version: createUuidV7Factory(Date.now, current.version)(),
+            };
+            await this.#saveDocument(tx, document, actor, input.mutationId);
+            await this.#event(tx, {
+                type: "surface.document.updated",
+                payload: {
+                    surfaceId,
+                    previousVersion: current.version,
+                    version: document.version,
+                    changes: {
+                        text: document.text,
+                        lastEditorUserId: document.lastEditorUserId,
+                        updatedAt: document.updatedAt,
+                    },
+                    ...echo(input.mutationId),
+                },
+            });
+            return document;
+        });
+    }
+    async documentVersions(
+        ctx: Context,
+        surfaceId: string,
+        afterVersion?: string,
+        limit = 100,
+    ): Promise<SurfaceDocumentVersionListResponse> {
+        checked(Type.Integer({ minimum: 1, maximum: 200 }), limit);
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "document");
+            if (afterVersion !== undefined) {
+                checked(documentHistoryCursorSchema, afterVersion);
+                if (
+                    (await this.#kv.read(tx, `document-summary.${surfaceId}.${afterVersion}`)) ===
+                    undefined
+                )
+                    throw new SurfaceError("not_found", "The document revision was not found.");
+            }
+            const rows = (
+                await this.#store.queryPage(
+                    tx,
+                    `document-summary.${surfaceId}.`,
+                    afterVersion ?? "",
+                    limit + 1,
+                )
+            ).map((row) => checked(surfaceDocumentVersionSummarySchema, row));
+            const versions = rows.slice(0, limit);
+            return {
+                versions,
+                nextAfterVersion: rows.length > limit ? versions.at(-1)!.version : null,
+            };
+        });
+    }
+    async getDocumentVersion(
+        ctx: Context,
+        surfaceId: string,
+        version: string,
+    ): Promise<SurfaceDocumentRevision> {
+        checked(resourceVersionSchema, version);
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "document");
+            const revision = await this.#kv.read(tx, `document-revision.${surfaceId}.${version}`);
+            if (revision === undefined)
+                throw new SurfaceError("not_found", "The document revision was not found.");
+            return checked(surfaceDocumentRevisionSchema, revision);
+        });
+    }
+    async #saveDocument(
+        ctx: Context,
+        document: SurfaceDocument,
+        actor: SurfaceActor,
+        mutationId?: string,
+    ): Promise<void> {
+        const revision = checked(surfaceDocumentRevisionSchema, {
+            document,
+            actor,
+            mutationId: mutationId ?? null,
+            source: actor.agentId === null ? "api" : "tool",
+        });
+        const { document: _snapshot, ...metadata } = revision;
+        const summary = { ...metadata, version: document.version, updatedAt: document.updatedAt };
+        if (
+            !(await this.#store.writeValueIfAbsent(
+                ctx,
+                `document-revision.${document.surfaceId}.${document.version}`,
+                revision,
+            )) ||
+            !(await this.#store.writeValueIfAbsent(
+                ctx,
+                `document-summary.${document.surfaceId}.${document.version}`,
+                summary,
+            ))
+        )
+            throw new Error("A document revision cannot be overwritten.");
+        await this.#kv.write(ctx, `document.${document.surfaceId}`, document);
     }
     async #surface(ctx: Context, id: string, type?: Surface["type"]): Promise<Surface> {
         checked(surfaceIdSchema, id);

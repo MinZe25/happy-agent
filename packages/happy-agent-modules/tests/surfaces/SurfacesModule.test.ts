@@ -66,6 +66,123 @@ async function fixture(teamEnabled = true) {
 }
 
 describe("installation-owned Surface state", () => {
+    it("rolls document heads, full revisions, summaries, and notification intent back together", async () => {
+        const f = await fixture();
+        const ctx = f.db.context;
+        const actor = { userId: "alice", agentId: null };
+        const surface = await f.surfaces.create(
+            ctx,
+            { type: "document", name: "Atomic", mutationId: "initial" },
+            "bob",
+            undefined,
+            actor,
+        );
+        const initial = await f.surfaces.getDocument(ctx, surface.id);
+        expect(initial).toMatchObject({ authorUserId: "bob", lastEditorUserId: "alice" });
+        const pending = () =>
+            agentDatabaseRows<{ id: string }>(
+                f.db.database,
+                sql`SELECT id FROM durable_function_calls ORDER BY id`,
+            );
+        const before = await pending();
+        let rolledBackVersion = "";
+        await expect(
+            ctx.inTx(async (tx) => {
+                const changed = await f.surfaces.updateDocument(
+                    tx,
+                    surface.id,
+                    initial.version,
+                    { text: "Temporary", mutationId: "rollback" },
+                    { userId: "bob", agentId: "admin" },
+                );
+                rolledBackVersion = changed.version;
+                expect(await f.surfaces.getDocument(tx, surface.id)).toEqual(changed);
+                expect((await f.surfaces.documentVersions(tx, surface.id)).versions).toHaveLength(
+                    2,
+                );
+                expect(
+                    (await f.surfaces.getDocumentVersion(tx, surface.id, changed.version))
+                        .mutationId,
+                ).toBe("rollback");
+                throw new Error("rollback");
+            }),
+        ).rejects.toThrow("rollback");
+        expect(await f.surfaces.getDocument(ctx, surface.id)).toEqual(initial);
+        expect((await f.surfaces.documentVersions(ctx, surface.id)).versions).toMatchObject([
+            { version: initial.version, mutationId: "initial" },
+        ]);
+        await expect(
+            f.surfaces.getDocumentVersion(ctx, surface.id, rolledBackVersion),
+        ).rejects.toMatchObject({ code: "not_found" });
+        expect(await pending()).toEqual(before);
+        await expect(
+            ctx.inTx(async (tx) => {
+                const created = await f.surfaces.create(
+                    tx,
+                    { type: "document", name: "Rolled back" },
+                    "bob",
+                    undefined,
+                    actor,
+                );
+                expect((await f.surfaces.documentVersions(tx, created.id)).versions).toHaveLength(
+                    1,
+                );
+                throw new Error("rollback creation");
+            }),
+        ).rejects.toThrow("rollback creation");
+        expect(await f.surfaces.list(ctx)).toEqual([surface]);
+        expect(await pending()).toEqual(before);
+    });
+
+    it("gives every document tool discovery metadata and its own actual permission boundary", async () => {
+        const f = await fixture();
+        const ctx = f.db.context;
+        const kv = f.kv.scoped("document-agent");
+        await kv.write(ctx, "owner", "alice");
+        const tools = await f.hooks.tools!(ctx, { agent: { id: "admin" }, kv } as AgentModuleScope);
+        for (const name of [
+            "read_document",
+            "update_document",
+            "list_document_versions",
+            "create_document_surface",
+        ]) {
+            const tool = tools.find((entry) => entry.name === name)!;
+            expect(tool.defer, name).toBe(true);
+            expect(tool.capabilities?.length, name).toBeGreaterThan(0);
+            expect(tool.searchKeywords?.length, name).toBeGreaterThan(0);
+            const write = name === "update_document" || name === "create_document_surface";
+            expect(tool.shouldReviewInAutoMode!({}, ctx), name).toBe(write);
+            if (write)
+                expect(tool.describeAutoPermissionAction!({}, ctx)).toContain("shared data write");
+            if (name !== "create_document_surface")
+                expect(tool.shouldRunInFullAccessInAutoMode).toBeUndefined();
+        }
+        const create = tools.find((entry) => entry.name === "create_document_surface")!;
+        expect(Value.Check(create.parameters, { name: "Missing creator" })).toBe(false);
+        expect(await create.shouldRunInFullAccessInAutoMode!({}, ctx)).toBe(false);
+        f.compute.shouldReviewPath.mockResolvedValue(true);
+        expect(
+            await create.shouldRunInFullAccessInAutoMode!({ imagePath: "/outside/image.png" }, ctx),
+        ).toBe(true);
+        const call = { kv: f.kv.scoped("document-creation") } as never;
+        const input = { name: "For Bob", creatorUserId: "bob", text: "First" };
+        const surface = (await create.execute(ctx, input, call)) as Awaited<
+            ReturnType<SurfacesModule["create"]>
+        >;
+        expect(await create.execute(ctx, { ...input, text: "Retry" }, call)).toEqual(surface);
+        const document = await f.surfaces.getDocument(ctx, surface.id);
+        expect(document).toMatchObject({
+            text: "First",
+            authorUserId: "bob",
+            lastEditorUserId: "alice",
+        });
+        expect((await f.surfaces.documentVersions(ctx, surface.id)).versions).toMatchObject([
+            { actor: { userId: "alice", agentId: "admin" }, source: "tool", mutationId: null },
+        ]);
+        f.revoke();
+        await expect(create.execute(ctx, input, call)).rejects.toMatchObject({ code: "forbidden" });
+    });
+
     it("discovers separator administration without granting filesystem access or ordinary-agent authority", async () => {
         const f = await fixture();
         const ctx = f.db.context;
@@ -198,9 +315,12 @@ describe("installation-owned Surface state", () => {
             "reorder_todo",
             "delete_todo",
             "list_todo_versions",
+            "read_document",
+            "update_document",
+            "list_document_versions",
         ]);
         for (const tool of ordinary) {
-            const read = tool.name.startsWith("list_");
+            const read = tool.name.startsWith("list_") || tool.name === "read_document";
             expect(tool.shouldReviewInAutoMode!({}, ctx)).toBe(!read);
             if (!read) {
                 expect(tool.requiresAutoOrFullAccess).toBe(true);
