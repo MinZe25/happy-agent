@@ -7,7 +7,8 @@ import {
     type AgentModuleHooks,
 } from "@slopus/happy-agent-base";
 import {
-    createSurfaceRequestSchema,
+    createTodoSurfaceRequestSchema,
+    createSeparatorSurfaceRequestSchema,
     createTodoRequestSchema,
     surfaceSchema,
     surfaceMemberSchema,
@@ -57,6 +58,10 @@ const eventSchema = Type.Union([
 export type SurfaceEvent = Static<typeof eventSchema>;
 type Listener = (ctx: Context, event: SurfaceEvent) => void | Promise<void>;
 export type SurfaceActor = TodoRevision["actor"];
+const supportedCreationSchema = Type.Union([
+    createTodoSurfaceRequestSchema,
+    createSeparatorSurfaceRequestSchema,
+]);
 
 /** Shared list instances. Every decision and revision commits under the database transaction lock. */
 export class SurfacesModule implements AgentModule {
@@ -170,13 +175,13 @@ export class SurfacesModule implements AgentModule {
     }
     async create(
         ctx: Context,
-        input: CreateSurfaceRequest,
+        request: CreateSurfaceRequest,
         creatorUserId: string | null,
         adminAgentId?: string,
     ): Promise<Surface> {
-        checked(createSurfaceRequestSchema, input);
+        const input = checked(supportedCreationSchema, request);
         let image: SurfaceImageAsset | null = null;
-        if (input.image !== undefined) {
+        if (input.type === "todo" && input.image !== undefined) {
             try {
                 const normalized = await normalizeManagedImage(
                     Buffer.from(input.image.data, "base64"),
@@ -200,9 +205,9 @@ export class SurfacesModule implements AgentModule {
             const old = await this.#kv.read(tx, `surface.${id}`);
             if (old !== undefined) return readSurface(old);
             const now = Date.now();
-            const surface: Surface = {
+            const surface = {
                 id,
-                type: "todo",
+                type: input.type,
                 name: input.name,
                 creatorUserId,
                 image: image === null ? null : { thumbhash: image.thumbhash },
@@ -218,7 +223,7 @@ export class SurfacesModule implements AgentModule {
                           ],
                 updatedAt: now,
                 version: createUuidV7Factory()(),
-            };
+            } satisfies Surface;
             await this.#kv.write(tx, `surface.${id}`, surface);
             if (image !== null) await this.#kv.write(tx, `image.${id}`, image);
             await this.#event(tx, {
@@ -306,7 +311,7 @@ export class SurfacesModule implements AgentModule {
     ): Promise<Todo[]> {
         checked(todoListScopeSchema, scope);
         return ctx.inTx(async (tx) => {
-            await this.#surface(tx, surfaceId);
+            await this.#surface(tx, surfaceId, "todo");
             const todos = (await this.#kv.list(tx, `todo.${surfaceId}.`))
                 .map((row) => readTodo(row.value))
                 .filter((t) => scope === "all" || t.status === scope);
@@ -323,7 +328,7 @@ export class SurfacesModule implements AgentModule {
     }
     async getTodo(ctx: Context, surfaceId: string, id: string): Promise<Todo> {
         return ctx.inTx(async (tx) => {
-            await this.#surface(tx, surfaceId);
+            await this.#surface(tx, surfaceId, "todo");
             checked(cuid2Schema, id);
             const todo = await this.#kv.read(tx, `todo.${surfaceId}.${id}`);
             if (todo === undefined)
@@ -342,7 +347,7 @@ export class SurfacesModule implements AgentModule {
         if (input.id !== undefined) checked(cuid2Schema, input.id);
         return ctx.inTx(async (tx) => {
             await this.#validateUser(tx, authorUserId);
-            await this.#surface(tx, surfaceId);
+            await this.#surface(tx, surfaceId, "todo");
             const id = input.id ?? createId();
             const old = await this.#kv.read(tx, `todo.${surfaceId}.${id}`);
             if (old !== undefined) return readTodo(old);
@@ -517,11 +522,14 @@ export class SurfacesModule implements AgentModule {
             return readRevision(row);
         });
     }
-    async #surface(ctx: Context, id: string): Promise<Surface> {
+    async #surface(ctx: Context, id: string, type?: Surface["type"]): Promise<Surface> {
         checked(surfaceIdSchema, id);
         const value = await this.#kv.read(ctx, `surface.${id}`);
         if (value === undefined) throw new SurfaceError("not_found", "The Surface was not found.");
-        return readSurface(value);
+        const surface = readSurface(value);
+        if (type !== undefined && surface.type !== type)
+            throw new SurfaceError("not_found", "The Surface was not found.");
+        return surface;
     }
     async #validateUser(ctx: Context, userId: string | null): Promise<void> {
         checked(surfaceMemberSchema.properties.userId, userId);

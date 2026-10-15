@@ -25,6 +25,12 @@ Generic model creation hid differences between feature types. Active admin bots 
 `create_todo_surface`, with a name and optional image, and add/remove-user tools. Execution
 rechecks authority; ordinary todo use cannot grant membership administration or create lists.
 
+## Separators are independent contentless Surfaces
+
+A sidebar section does not own the Surfaces beneath it. A separator uses the same membership,
+ordering, creator attribution, and events as every Surface, but accepts neither an image nor todo
+content. Its dedicated admin tool needs shared-data review only, with no filesystem access.
+
 ## Attribution is explicit and remains separate from audit actors
 
 Todo records and Surfaces did not retain their author or creator. Todos now carry immutable

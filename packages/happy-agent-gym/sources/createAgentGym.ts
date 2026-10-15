@@ -44,6 +44,8 @@ export interface AgentGymOptions extends GymHomeOptions {
     readonly routeConfiguredProviders?: boolean;
     /** Test-owned environment values supplied to the daemon's configuration module. */
     readonly environment?: Readonly<NodeJS.ProcessEnv>;
+    /** A test-issued JWT and profile for a real team-mode HTTP fixture. */
+    readonly teamUser?: { readonly token: string; readonly name: string };
     /** The default budget for every `waitFor` in this gym. */
     readonly timeoutMs?: number;
     /** The version the daemon reports. */
@@ -274,17 +276,31 @@ class AgentGymInstance implements AgentGym {
             version: this.#options.version ?? "gym",
         });
         this.#daemon = daemon;
-        this.#token = (await readFile(daemon.tokenPath, "utf8")).trim();
-        this.#http = new GymHttpClient({
-            socketPath: daemon.socketPath,
-            timeoutMs: Math.max(this.#timeoutMs, 20_000),
-            token: this.#token,
-        });
+        if (daemon.httpUrl === undefined) {
+            this.#token = (await readFile(daemon.tokenPath, "utf8")).trim();
+            this.#http = new GymHttpClient({
+                socketPath: daemon.socketPath,
+                timeoutMs: Math.max(this.#timeoutMs, 20_000),
+                token: this.#token,
+            });
+        } else {
+            if (this.#options.teamUser === undefined)
+                throw new Error("A team gym requires a test-issued teamUser token and profile.");
+            this.#token = this.#options.teamUser.token;
+        }
         this.#client = new HappyAgentClient({
-            endpoint: "http://happy-agent.gym",
-            fetch: createUnixSocketFetch(daemon.socketPath),
+            endpoint: daemon.httpUrl ?? "http://happy-agent.gym",
+            fetch: daemon.httpUrl === undefined ? createUnixSocketFetch(daemon.socketPath) : fetch,
             token: this.#token,
         });
+        if (daemon.httpUrl !== undefined && this.#options.teamUser !== undefined) {
+            const { profile } = await this.#client.getProfile();
+            if (profile.name === null)
+                await this.#client.updateProfile(
+                    { name: this.#options.teamUser.name },
+                    { ifMatch: profile.version },
+                );
+        }
         // A project is its root workspace. Register the gym directory once, then put the default
         // agent in that root workspace. A restart keeps both durable resources.
         this.#rootWorkspaceId ??= await this.#registerProject(this.workspacePath);
@@ -319,7 +335,8 @@ class AgentGymInstance implements AgentGym {
     }
 
     get raw(): GymHttpClient {
-        if (this.#http === undefined) throw new Error("This gym is not running.");
+        if (this.#http === undefined)
+            throw new Error("Raw Unix-socket probes require a running standalone gym.");
         return this.#http;
     }
 

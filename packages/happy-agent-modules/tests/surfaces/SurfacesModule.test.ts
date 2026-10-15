@@ -66,6 +66,52 @@ async function fixture(teamEnabled = true) {
 }
 
 describe("installation-owned Surface state", () => {
+    it("discovers separator administration without granting filesystem access or ordinary-agent authority", async () => {
+        const f = await fixture();
+        const ctx = f.db.context;
+        const ordinary = await f.hooks.tools!(ctx, {
+            agent: { id: "ordinary" },
+        } as AgentModuleScope);
+        expect(ordinary.some((tool) => tool.name === "create_separator_surface")).toBe(false);
+        const tools = await f.hooks.tools!(ctx, { agent: { id: "admin" } } as AgentModuleScope);
+        const tool = tools.find((item) => item.name === "create_separator_surface")!;
+        expect(tool).toMatchObject({
+            defer: true,
+            durable: true,
+            transactional: true,
+            requiresAutoOrFullAccess: true,
+            capabilities: [expect.stringContaining("separator")],
+            searchKeywords: expect.arrayContaining(["create separator surface", "sidebar section"]),
+        });
+        expect(tool.shouldReviewInAutoMode!({}, ctx)).toBe(true);
+        expect(tool.shouldRunInFullAccessInAutoMode).toBeUndefined();
+        expect(tool.describeAutoPermissionAction!({ name: "Work" }, ctx)).toContain(
+            "no filesystem access",
+        );
+        expect(Value.Check(tool.parameters, { name: "Work" })).toBe(false);
+        expect(
+            Value.Check(tool.parameters, {
+                name: "Work",
+                creatorUserId: "bob",
+                imagePath: "/tmp/image.png",
+            }),
+        ).toBe(false);
+        const call = { kv: f.kv.scoped("separator-call") } as never;
+        const input = { name: "Work", creatorUserId: "bob" };
+        const created = await tool.execute(ctx, input, call);
+        expect(created).toMatchObject({
+            type: "separator",
+            image: null,
+            creatorUserId: "bob",
+            members: [{ userId: "bob" }],
+        });
+        expect(await tool.execute(ctx, input, call)).toEqual(created);
+        expect(await f.surfaces.list(ctx)).toEqual([created]);
+        f.revoke();
+        await expect(tool.execute(ctx, input, call)).rejects.toMatchObject({ code: "forbidden" });
+        expect(f.compute.resolve).not.toHaveBeenCalled();
+    });
+
     it("keeps each person's ordering independent and validates administrative targets", async () => {
         const { surfaces: s, db } = await fixture();
         const ctx = db.context;

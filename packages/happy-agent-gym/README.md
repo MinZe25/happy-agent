@@ -110,6 +110,13 @@ interface AgentGymOptions {
 A fixture is a string, a `Uint8Array`, or `{ content, mode }`. Paths are relative to the workspace
 and may not leave it.
 
+Team-mode scenarios configure the real JWT verifier in `config` and supply `teamUser: { token,
+name }` with a test-issued token. The gym uses the daemon's actual TCP endpoint and ordinary
+profile onboarding before registering its workspace; it never creates users directly or bypasses
+authentication. Bind test deployments to `host = "127.0.0.1"`, `port = 0`. Typed API and SSE
+helpers work normally. Raw Unix-socket probes remain standalone-only. Team fixtures never need
+external credentials or an identity-provider network request when using a test-owned public key.
+
 ## Scripting the model
 
 A turn describes what the model produced, and nothing about what the agent should do with it.

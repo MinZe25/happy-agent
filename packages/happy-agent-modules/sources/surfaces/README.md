@@ -1,6 +1,6 @@
 # Surfaces
 
-Shared typed feature instances, initially todo lists, with each person's sidebar order on the
+Shared typed feature instances, including todo lists and contentless sidebar separators, with each person's sidebar order on the
 nested member record. All heads and immutable revisions live in module-owned AgentKV storage.
 
 ```text
@@ -14,3 +14,6 @@ changes across lists. History pagination selects only a bounded prefix range. Du
 Agent Base's transactional settlement; image creation retains a call-stable ID and image bytes.
 The admin tools check active admin authority at selection and execution. Images pass through
 Compute's filesystem boundary and bounded managed normalization, never an arbitrary served path.
+
+Separators reuse catalog creation, members, ordering, and durable events. They never accept an
+image or todo content, and the admin-only `create_separator_surface` tool has no filesystem access.
