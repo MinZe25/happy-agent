@@ -1,6 +1,10 @@
 import { Type } from "@sinclair/typebox";
 import { agentRequestProfileSchema, cuid2Schema } from "@slopus/happy-agent-base";
-import { clientMetadataSchema, toolCallRequestBlockSchema } from "@slopus/happy-agent-client";
+import {
+    clientMetadataSchema,
+    messageModeSchema,
+    toolCallRequestBlockSchema,
+} from "@slopus/happy-agent-client";
 
 export {
     cloudMutationRequestSchema,
@@ -163,6 +167,16 @@ export const agentModeSchema = Type.Object(
     { additionalProperties: false },
 );
 
+/** Validate echoed output-only fields before the request boundary discards them. */
+const requestedAgentModeSchema = Type.Object(
+    {
+        ...agentModeSchema.properties,
+        account: messageModeSchema.properties.account,
+        providerType: messageModeSchema.properties.providerType,
+    },
+    { additionalProperties: false },
+);
+
 export const agentCreateBodySchema = Type.Object(
     {
         id: Type.Optional(apiIdSchema),
@@ -217,7 +231,7 @@ export const messageSendBodySchema = Type.Object(
         content: Type.Optional(messageSendContentSchema),
         delivery: Type.Optional(Type.Union([Type.Literal("queue"), Type.Literal("steer")])),
         id: Type.Optional(apiIdSchema),
-        mode: agentModeSchema,
+        mode: requestedAgentModeSchema,
         profile: Type.Optional(agentRequestProfileSchema),
         text: Type.String({ minLength: 1, maxLength: 1_000_000 }),
     },
@@ -291,7 +305,7 @@ export const draftBodySchema = Type.Object(
         draft: Type.Union([
             Type.Null(),
             Type.Composite([
-                agentModeSchema,
+                requestedAgentModeSchema,
                 Type.Object({ text: Type.String({ maxLength: 1_000_000 }) }),
             ]),
         ]),
