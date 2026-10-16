@@ -53,13 +53,33 @@ export const liveBotTargetSchema = Type.Object(
     { kind: Type.Literal("bot"), connectionId, groupId, sessionId, botId: liveDesktopIdSchema },
     closed,
 );
+/** A task's workspace is its group and its one agent is its session. Requires `appState`. */
+export const liveTaskTargetSchema = Type.Object(
+    { kind: Type.Literal("task"), connectionId, groupId, sessionId, taskId: liveDesktopIdSchema },
+    closed,
+);
+export type LiveTaskTarget = Static<typeof liveTaskTargetSchema>;
 export const liveDesktopTargetSchema = Type.Union([
     liveProjectTargetSchema,
     liveWorkspaceTargetSchema,
     liveSessionTargetSchema,
     liveBotTargetSchema,
+    liveTaskTargetSchema,
 ]);
 export type LiveDesktopTarget = Static<typeof liveDesktopTargetSchema>;
+
+/** Additive desktop capabilities, negotiated when a call is created. Unknown names are ignored. */
+export const LIVE_DESKTOP_CAPABILITIES = [
+    "appState",
+    "voiceFocus",
+    "taskCreate",
+    "sessionModelChange",
+] as const;
+export type LiveDesktopCapability = (typeof LIVE_DESKTOP_CAPABILITIES)[number];
+export const liveDesktopCapabilitiesSchema = Type.Array(
+    Type.String({ minLength: 1, maxLength: 64 }),
+    { maxItems: 16, uniqueItems: true },
+);
 
 export const liveDesktopSessionStatusSchema = Type.Union([
     Type.Literal("idle"),
@@ -70,6 +90,13 @@ export const liveDesktopSessionStatusSchema = Type.Union([
     Type.Literal("unknown"),
 ]);
 export type LiveDesktopSessionStatus = Static<typeof liveDesktopSessionStatusSchema>;
+export const liveWorkspaceStatusSchema = Type.Union([
+    Type.Literal("ready"),
+    Type.Literal("preparing"),
+    Type.Literal("error"),
+    Type.Literal("unknown"),
+]);
+export type LiveWorkspaceStatus = Static<typeof liveWorkspaceStatusSchema>;
 export const livePublicTextSchema = Type.Object(
     {
         id: liveDesktopIdSchema,
@@ -101,16 +128,7 @@ export const liveDesktopContextSchema = Type.Object(
         }),
         workspaces: Type.Array(
             Type.Object(
-                {
-                    target: liveWorkspaceTargetSchema,
-                    name,
-                    status: Type.Union([
-                        Type.Literal("ready"),
-                        Type.Literal("preparing"),
-                        Type.Literal("error"),
-                        Type.Literal("unknown"),
-                    ]),
-                },
+                { target: liveWorkspaceTargetSchema, name, status: liveWorkspaceStatusSchema },
                 closed,
             ),
             { maxItems: 100 },
@@ -152,6 +170,139 @@ export const liveDesktopContextSchema = Type.Object(
 );
 export type LiveDesktopContext = Static<typeof liveDesktopContextSchema>;
 
+/** Epoch milliseconds floored to the minute; the daemon formats it in the AppState time zone. */
+const lastActivityAt = Type.Union([
+    Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    Type.Null(),
+]);
+const providerId = Type.String({ minLength: 1, maxLength: 128, pattern: "\\S" });
+const modelId = Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" });
+const effort = Type.String({ minLength: 1, maxLength: 128 });
+export const liveAppStateSessionSchema = Type.Object(
+    {
+        target: liveSessionRefSchema,
+        title: Type.Union([name, Type.Null()]),
+        status: liveDesktopSessionStatusSchema,
+        lastActivityAt,
+    },
+    closed,
+);
+export type LiveAppStateSession = Static<typeof liveAppStateSessionSchema>;
+const appStateSessions = Type.Array(liveAppStateSessionSchema, { maxItems: 100 });
+export const liveAppStateModelSchema = Type.Object(
+    {
+        providerId,
+        providerName: name,
+        modelId,
+        name,
+        efforts: Type.Array(effort, { maxItems: 16 }),
+        defaultEffort: Type.Union([effort, Type.Null()]),
+    },
+    closed,
+);
+export type LiveAppStateModel = Static<typeof liveAppStateModelSchema>;
+export const liveAppStateServerSchema = Type.Object(
+    {
+        connectionId,
+        name,
+        kind: Type.Union([Type.Literal("local"), Type.Literal("remote")]),
+        online: Type.Boolean(),
+        catalog: Type.Union([
+            Type.Literal("ready"),
+            Type.Literal("loading"),
+            Type.Literal("error"),
+        ]),
+        bots: Type.Array(
+            Type.Object(
+                {
+                    target: liveBotTargetSchema,
+                    name,
+                    status: liveDesktopSessionStatusSchema,
+                    lastActivityAt,
+                },
+                closed,
+            ),
+            { maxItems: 100 },
+        ),
+        tasks: Type.Array(
+            Type.Object(
+                {
+                    target: liveTaskTargetSchema,
+                    name,
+                    status: liveDesktopSessionStatusSchema,
+                    lastActivityAt,
+                },
+                closed,
+            ),
+            { maxItems: 100 },
+        ),
+        projects: Type.Array(
+            Type.Object(
+                {
+                    target: liveProjectTargetSchema,
+                    name,
+                    sessions: appStateSessions,
+                    workspaces: Type.Array(
+                        Type.Object(
+                            {
+                                target: liveWorkspaceTargetSchema,
+                                name,
+                                status: liveWorkspaceStatusSchema,
+                                sessions: appStateSessions,
+                            },
+                            closed,
+                        ),
+                        { maxItems: 100 },
+                    ),
+                },
+                closed,
+            ),
+            { maxItems: 100 },
+        ),
+        models: Type.Array(liveAppStateModelSchema, { maxItems: 200 }),
+    },
+    closed,
+);
+export type LiveAppStateServer = Static<typeof liveAppStateServerSchema>;
+
+/** The whole visible sidebar in canonical order, plus the focused conversation. */
+export const liveAppStateSchema = Type.Object(
+    {
+        timeZone: Type.String({
+            minLength: 1,
+            maxLength: 64,
+            pattern: "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+        }),
+        servers: Type.Array(liveAppStateServerSchema, { maxItems: 32 }),
+        focused: Type.Union([
+            Type.Object(
+                {
+                    target: liveDesktopTargetSchema,
+                    title: Type.Union([name, Type.Null()]),
+                    latestMessage: Type.Union([
+                        Type.Object(
+                            {
+                                state: Type.Literal("loaded"),
+                                role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
+                                text,
+                                truncated: Type.Boolean(),
+                            },
+                            closed,
+                        ),
+                        Type.Object({ state: Type.Literal("empty") }, closed),
+                        Type.Object({ state: Type.Literal("notLoaded") }, closed),
+                    ]),
+                },
+                closed,
+            ),
+            Type.Null(),
+        ]),
+        truncated: Type.Boolean(),
+    },
+    closed,
+);
+export type LiveAppState = Static<typeof liveAppStateSchema>;
+
 export const liveDesktopActionSchema = Type.Union([
     Type.Object({ type: Type.Literal("desktopState") }, closed),
     Type.Object({ type: Type.Literal("desktopOpen"), target: liveDesktopTargetSchema }, closed),
@@ -191,6 +342,25 @@ export const liveDesktopActionSchema = Type.Union([
             type: Type.Literal("composerDraftAppend"),
             target: liveSessionRefSchema,
             text: actionText,
+        },
+        closed,
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("taskCreate"),
+            connectionId,
+            name: Type.Optional(Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" })),
+            text: actionText,
+            model: Type.Optional(Type.Object({ providerId, modelId }, closed)),
+        },
+        closed,
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("sessionModelChange"),
+            target: liveSessionRefSchema,
+            providerId,
+            modelId,
         },
         closed,
     ),
@@ -251,6 +421,7 @@ export const liveControlClientMessageSchema = Type.Union([
         closed,
     ),
     Type.Object({ type: Type.Literal("sessionUpdate"), ...sessionSnapshotProperties }, closed),
+    Type.Object({ type: Type.Literal("appState"), appState: liveAppStateSchema }, closed),
 ]);
 export type LiveControlClientMessage = Static<typeof liveControlClientMessageSchema>;
 
@@ -261,6 +432,18 @@ export const liveControlServerMessageSchema = Type.Union([
             sessionId: liveResourceIdSchema,
             windowId: liveDesktopIdSchema,
             contextRevision: liveContextRevisionSchema,
+            /** The accepted capabilities, present only when the desktop requested some. */
+            capabilities: Type.Optional(liveDesktopCapabilitiesSchema),
+        },
+        closed,
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("voiceFocus"),
+            focusId: liveDesktopIdSchema,
+            contextRevision: liveContextRevisionSchema,
+            target: Type.Union([liveDesktopTargetSchema, Type.Null()]),
+            reason: Type.Union([Type.Literal("mention"), Type.Literal("navigation")]),
         },
         closed,
     ),

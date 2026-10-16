@@ -970,7 +970,8 @@ Fields:
 - `capabilities` — optional feature support. `desktopLiveControl: true` advertises the
   window-scoped GPT-Live control contract; missing or false means unavailable, independently
   of protocol version or provider entitlement. `workspaceBridges: true` advertises the local
-  bridges described under Workspaces.
+  bridges described under Workspaces. Optional `desktopLiveCapabilities` lists the additive
+  voice desktop capability names the daemon accepts; see Live voice sessions.
 - `ready` — `false` while starting, `true` once the agent system is loaded.
 - `status` — `"starting"` or `"ready"`; the human-readable form of `ready`.
 - `version` — one identity object. `protocol` is the wire protocol number, the client's
@@ -1322,6 +1323,42 @@ Field groups:
 
 - `settings` — daemon behavior toggles and tunables.
 - `theme` — terminal color assignments.
+- `voice` — optional machine-level voice settings, present when the daemon supports voice:
+
+    ```json
+    {
+        "controller": { "providerId": null, "modelId": null, "effort": null, "fastMode": false },
+        "effectiveController": {
+            "providerId": "codex",
+            "modelId": "openai/gpt-6.1-sol",
+            "effort": "low",
+            "serviceTier": null,
+            "notice": null
+        },
+        "defaultSystemPrompt": "You are Happy, a calm, friendly voice companion…",
+        "systemPromptOverride": null,
+        "effectiveSystemPrompt": "You are Happy, a calm, friendly voice companion…"
+    }
+    ```
+
+    `controller` holds the stored controller selection; `null` means the default. The default
+    provider is the configured default provider or account pool, the default model is
+    `openai/gpt-6.1-sol`, the default effort is `low` when the model accepts it and the model's
+    default effort otherwise, and fast mode is off. `effectiveController` is what a call starting
+    now would use: `providerId` is `null` when no default provider is configured, and
+    `serviceTier` is `"priority"` only when fast mode is on and that route offers the priority
+    tier. `notice` is a human-readable explanation, or `null`, for a setting that is currently
+    ignored or unusable, such as fast mode on a model without the priority tier or a selected
+    model that is no longer enabled. `defaultSystemPrompt` is the built-in voice model prompt, which
+    is never persisted; `systemPromptOverride` is the stored replacement or `null`; and
+    `effectiveSystemPrompt` is the prompt a new call uses. The controller's own instructions are
+    fixed and not configurable.
+
+    The settings live in the machine configuration's `[voice]` table: `controller_provider`,
+    `controller_model`, `controller_effort`, `controller_fast_mode`, and `system_prompt`. Values
+    written through `PATCH /v0/config` or the admin-bot voice settings tools are stored in the
+    daemon-owned runtime configuration and take precedence over the user-authored file.
+
 - `workspace` — workspace lifecycle configuration: archive behavior, setup commands, and
   files synced into new workspaces.
 
@@ -1351,6 +1388,42 @@ compaction using that provider, including internal inference, while leaving the 
 available for a later message on an enabled provider. The response is the same sanitized effective
 configuration shape as `GET /v0/config`, after the change has taken effect, and the change emits a
 `config.updated` event.
+
+The optional `voice` object changes the voice settings:
+
+```json
+{
+    "voice": {
+        "controller": {
+            "providerId": "claude",
+            "modelId": "anthropic/sonnet-5",
+            "effort": null,
+            "fastMode": false
+        },
+        "systemPrompt": null
+    }
+}
+```
+
+`controller` and each of its properties, and `systemPrompt`, are optional. An omitted property
+is unchanged. `null` removes the stored value, so the setting falls back to the user-authored
+configuration file when it sets one, and otherwise to the default. A `systemPrompt` identical to
+`defaultSystemPrompt` also removes the stored value; the default itself is never stored. A
+supplied `systemPrompt` is 1–32,768 characters and not blank. The daemon validates the resulting
+selection before storing anything: the provider must be configured, it must offer the model, and
+the effort must be one the model accepts; otherwise the request is `400 invalid_request` with an
+explanation. Fast mode is always accepted and reported through `effectiveController`. Disabling a
+provider later does not delete the setting; new calls then fail with an explanation. Changes
+apply to calls that start afterwards, never to an active call. In team mode only the team owner
+may change voice settings; anyone else receives `403 forbidden`, and the entire patch is
+rejected without applying other fields.
+
+Active admin bots additionally have `get_voice_settings` and `set_voice_settings` tools. The
+former takes no arguments; the latter takes the same `controller` and `systemPrompt` properties
+as `voice` above, with the same semantics and validation. Both return the current `voice` object
+exactly as it appears at `config.voice`, and a change emits `config.updated`. Admin-bot authority
+is checked again at execution; ordinary agents, non-admin bots, and archived bots do not receive
+or cannot use these tools.
 
 A daemon that does not support runtime reconfiguration answers `409` with
 `{ "error": "This daemon cannot change its settings at runtime." }`. Settings outside the
@@ -7925,12 +7998,62 @@ bounded visible context, verifies each action's target and permissions, and exec
 its existing UI/state actions. Only public conversation text and task status are shared: no
 coding tools, screen capture, other sessions' audio, private reasoning, or tool logs.
 
-The text controller uses the daemon's existing configured-default provider, model, and effort
-(the first enabled route in its ordered model catalog), selected when the call starts. This is
-separate from the explicitly selected voice credential. Each delegation runs bounded side
-inference with only the nine desktop actions below, never the coding-agent runtime. The caller
-cannot override that selection. An unavailable controller route fails with `503 live_unavailable`
-and a setup explanation; the call never silently switches models or accounts.
+The text controller runs the machine's voice settings (`config.voice`, see `GET /v0/config`).
+By default it uses `openai/gpt-6.1-sol` at low effort through the daemon's configured-default
+provider or account pool. The settings may instead name any configured provider, account, or
+account pool, any model that provider offers from any vendor, an effort that model accepts, and
+fast mode. Fast mode requests the `priority` service tier only when the selected route's catalog
+offers it; otherwise it is ignored, and the effective settings say so. The daemon captures the
+selection when the call starts, verifies that the provider is enabled and offers the model and
+effort, resolves one compatible enabled account, and freezes provider, account, model, effort,
+and service tier for the call. Later settings changes affect only new calls. The explicitly
+selected voice credential remains separate. A creation request cannot override this selection. An
+unavailable or incompatible controller route fails with `503 live_unavailable` and a setup
+explanation; the call never silently switches models or accounts. The controller runs through the
+ordinary provider session-with-tools path, with the fixed controller instructions and tool array
+below; its instructions are not configurable.
+
+The voice model's system prompt is the settings' override when one is stored, otherwise the
+built-in default. It is also captured when the call starts.
+
+Each voice call owns one bounded logical text-controller conversation with only the desktop
+actions below, never the coding-agent runtime. Provider delegations enter a bounded first-in,
+first-out queue; an ordinary follow-up is queued rather than refused as busy. Each request retains
+its original delegation identity and source transcript identities. Its controller turn receives a
+compact projection of the latest accepted desktop context, new attributed transcript fragments,
+and changed selected session snapshots. Every dispatched desktop action uses the current accepted
+context revision. Spoken outcomes use human-readable names rather than internal IDs; ambiguous
+names require clarification.
+
+Retained controller history contains only attributed user and assistant text. Existing coding
+tool calls, tool results, private reasoning, and provider metadata are never imported. The
+controller's own function-call protocol is transient within the active request: tool calls and
+matching results permit subsequent inference rounds, but are not copied into GPT-Live, AppState,
+or completed controller history. Completed actions remain recorded in the application's bounded
+deduplication ledger. Failed requests report truthful plain-text outcomes and uncertainty, never
+replay a desktop action, and never leave unmatched tool calls in an active inference exchange.
+Provider reconnection or replacement may continue the same logical conversation for a subsequent
+new request, using the same model, account, and retained text history; it never retries a failed delegation.
+
+Each active request is bounded to 120 seconds, excluding queue time, and eight inference rounds.
+Queued requests expire after 120 seconds without starting an action. Retained serialized controller
+history is bounded to 512 KiB. A request that cannot fit receives a fixed, sanitized explanation
+while voice remains open; history is never silently trimmed or reset. Closing voice cancels queued
+requests, aborts active controller work, and releases its provider session. Already-started desktop
+mutations retain the existing uncertainty and deduplication rules.
+
+A request whose actions all succeed and end in a terminal action — `desktopOpen`, `sessionSend`
+staging, `composerDraftAppend`, `sessionModelChange`, or `taskCreate` — receives a fixed,
+truthful outcome composed by the daemon from the verified results, without a further controller
+inference. Requests that read state or receive a refusal or failure continue through the
+controller. No outcome is delivered to the voice model before the action it describes has a
+verified result.
+
+The voice model receives the Desktop AppState as Markdown under a `# Desktop AppState` heading,
+described below, at startup and through bounded quiet updates. AppState is attributed data, not
+instructions, authorization, or an order to speak. The voice model may answer directly when the
+latest supplied AppState is sufficient; missing, ambiguous, stale, or deeper conversation context
+requires the controller. No historical coding tool traffic enters AppState.
 
 Every route uses ordinary API authentication. A session belongs to its creating principal;
 another principal receives `404` for its ID and never receives its journal events. The session
@@ -8025,8 +8148,23 @@ Creation, credential-selection, context/control, and close request objects rejec
 The Live resource ID uses ordinary CUID2 syntax (2–32 lowercase alphanumeric characters, starting
 with a letter). Desktop window and target IDs are opaque, nonblank strings of at most 128
 characters without control characters; never derive one ID from another. The context window ID
-must equal the outer window ID. The entire creation body is limited to 384 KiB.
+must equal the outer window ID. The entire creation body is limited to 640 KiB.
 The daemon chooses the supported Live model and transport for the selected credential kind.
+
+Two optional fields negotiate additive desktop capabilities:
+
+- `desktopCapabilities` — the capability names this desktop implements: unique strings of 1–64
+  characters, at most 16. Send it only to a daemon whose `GET /v0/health` lists
+  `capabilities.desktopLiveCapabilities`. The daemon accepts the intersection of this list and its
+  own; unknown names are ignored, never rejected. Current names are `appState`, `voiceFocus`,
+  `taskCreate`, and `sessionModelChange`. `taskCreate` and `sessionModelChange` are accepted only
+  together with `appState`. Omitted, the call uses only the original contract.
+- `appState` — the initial Desktop AppState object described below. It is valid only when
+  `desktopCapabilities` includes `appState`, and its serialized form is at most 256 KiB.
+
+The accepted capability list is echoed in control `hello`. A desktop must not send fields,
+frames, task targets, or action results that belong to a capability the daemon did not accept,
+and the daemon never sends an action or frame for a capability the desktop did not request.
 
 Response — `201`:
 
@@ -8131,10 +8269,90 @@ References are namespaced; IDs from different connections never identify the sam
 - `WorkspaceTarget`: `{ kind: "workspace", connectionId, projectId, workspaceId, groupId }`.
 - `SessionTarget`: `{ kind: "session", connectionId, groupId, sessionId }`.
 - `BotTarget`: `{ kind: "bot", connectionId, groupId, sessionId, botId }`.
+- `TaskTarget`: `{ kind: "task", connectionId, groupId, sessionId, taskId }` — `groupId` is the
+  task's workspace and `sessionId` its one agent.
 
-A `DesktopTarget` is exactly one of those four target variants. Group IDs are supplied
+A `DesktopTarget` is exactly one of those target variants. `TaskTarget` may appear only in a call
+whose accepted capabilities include `appState`; older daemons reject it. Group IDs are supplied
 explicitly even where they currently coincide with project or workspace IDs. The desktop maps
 its internal worktree identity to wire `workspaceId` explicitly, never by parsing names or paths.
+A task's or bot's conversation is an ordinary `SessionRef` for the session actions, and the
+desktop lists task conversations in `sessions`.
+
+### Desktop AppState
+
+With the `appState` capability, the desktop also supplies an AppState object: the whole
+sidebar the person sees, already filtered and in canonical sidebar order, plus the focused
+conversation. It is a closed object:
+
+- `timeZone` — the desktop's IANA time zone, such as `America/Los_Angeles`, at most 64 characters.
+- `servers` — up to 32 `{ connectionId, name, kind, online, catalog, bots, tasks, projects,
+models }` entries in sidebar order: the local server first, then remote connections.
+  `kind` is `local` or `remote`; `catalog` is `ready`, `loading`, or `error`. - `bots` — up to 100 `{ target: BotTarget, name, status, lastActivityAt }` top-level bots. - `tasks` — up to 100 `{ target: TaskTarget, name, status, lastActivityAt }` top-level tasks
+  in the person's own order. - `projects` — up to 100 `{ target: ProjectTarget, name, sessions, workspaces }`, where
+  `workspaces` holds up to 100 `{ target: WorkspaceTarget, name, status, sessions }` and each
+  `sessions` holds up to 100 `{ target: SessionRef, title, status, lastActivityAt }` direct
+  conversations of that project root or workspace, in tab order. - `models` — up to 200 `{ providerId, providerName, modelId, name, efforts, defaultEffort }`
+  entries: the model choices this server's composer picker offers. `providerName` is the
+  picker's human-readable service label.
+- `focused` — `null` or `{ target: DesktopTarget, title, latestMessage }`. `latestMessage` is
+  `{ state: "loaded", role, text, truncated }` for the latest loaded, settled public user or
+  assistant message; `{ state: "empty" }` when the loaded conversation has none; or
+  `{ state: "notLoaded" }` when its transcript is not loaded.
+- `truncated` — whether the desktop omitted entities or text to stay within bounds.
+
+Bots and tasks are top-level only. Bot and task descendants, subtasks, and workspaces owned by
+them never appear. `status` is the conversation status above; workspace `status` is the workspace
+status above. `lastActivityAt` is epoch milliseconds floored to the minute, or `null`. Names and
+titles are at most 256 characters; message text is at most 16,384 characters; efforts and IDs are
+at most 128 characters. The serialized object is at most 256 KiB.
+
+The desktop sends a complete replacement as the creation request's `appState` and later as the
+`appState` control frame. It is not revisioned, persisted, or journaled; the latest frame wins and
+identical repeats are harmless. AppState changes never advance `desktopContext` revisions, and
+background AppState never stales an action. The desktop coalesces changes before sending them and
+sends only settled message text, never streaming partial text.
+
+The daemon serializes AppState for the voice model as Markdown, in the supplied order, without
+re-sorting. Without the `appState` capability it derives the same format from the accepted
+desktop context. Times are local clock times in `timeZone`, with a short date only when the time
+is not today. The header time is the snapshot time and is excluded when detecting changes:
+
+```markdown
+# Desktop AppState — 3:42 PM
+
+Focused: This Mac / Observatory / Garden / Garden notes
+
+## This Mac (local)
+
+### Bots
+
+- Happy — Running — last activity 3:40 PM
+
+### Projects
+
+- Observatory
+    - Garden
+        - Garden notes — Idle — last activity 3:00 PM
+        - Release notes — Idle — last activity Oct 9, 3:00 PM
+
+## Focused conversation: Garden notes
+
+Latest loaded message (assistant):
+
+> The requested changes are complete.
+```
+
+Only the focused conversation's latest message is included: public user or assistant text,
+never tool calls, capped at 800 UTF-8 bytes on a character boundary with an explicit clipped
+marker. The startup snapshot is bounded to 8 KiB and marks omitted entries explicitly. Later
+changes are pushed as `# Desktop AppState update` Markdown containing the changed and removed
+entries, focus, and the focused conversation's latest message. A focus change always pushes the
+newly focused conversation and its latest loaded message. Updates are coalesced for 250
+milliseconds with one push in flight; an update larger than one provider append is split into
+several appends rather than truncated. Background updates wait while a voice request is being
+handled and are delivered after its outcome. A complete snapshot is pushed again when ten minutes
+pass without one, because GPT-Live compacts older context.
 
 ### `GET /v0/live/sessions/:id/control?windowId=...`
 
@@ -8148,8 +8366,10 @@ The whole serialized context must fit the frame budget, even when each individua
 its own limit. Omit older/less relevant text and entities and set `truncated` rather than
 assuming every per-field maximum can fit simultaneously.
 
-The server first sends `{ type: "hello", sessionId, windowId, contextRevision }`. The desktop
-verifies all three identities before acting. Client-to-server frames are:
+The server first sends `{ type: "hello", sessionId, windowId, contextRevision, capabilities? }`.
+The desktop verifies all three identities before acting. `capabilities` is present only when the
+creation request carried `desktopCapabilities`, and lists the accepted capability names.
+Client-to-server frames are:
 
 - `{ type: "desktopContext", revision, context }` — a complete replacement, with strictly
   increasing positive safe-integer `revision`. Exact same-revision duplicates are harmless;
@@ -8162,6 +8382,8 @@ verifies all three identities before acting. Client-to-server frames are:
   sessions. Unselected or inaccessible targets are rejected. An empty selection never means all.
   After enabling a watch, send its successful action result before the initial snapshot; the
   server records the selection from that result before accepting the update.
+- `{ type: "appState", appState }` — a complete replacement Desktop AppState, only with the
+  `appState` capability.
 
 Server-to-client frames after hello are:
 
@@ -8179,24 +8401,63 @@ Server-to-client frames after hello are:
   exposes no turn or final identity, even when a dialect reports one. Native transcript-added
   fragments are forwarded once; its turn-done text is not appended again. Native delegation
   input text remains attributed provider context, never human confirmation or authorization.
+- `{ type: "voiceFocus", focusId, contextRevision, target, reason }` — only with the `voiceFocus`
+  capability. `focusId` is an opaque ID, `contextRevision` the current accepted revision, `target`
+  a `DesktopTarget` or `null` to clear the highlight, and `reason` is `mention` or `navigation`.
+  The desktop highlights the target as the entity voice is talking about. It is decorative: it
+  authorizes nothing, opens nothing, and is never an action. The daemon sends one as soon as a
+  request's target is uniquely resolved — including from an exact, unique name match against
+  AppState before the controller runs — and immediately before each targeted action, using
+  `navigation` before `desktopOpen` and `mention` otherwise. It never sends one for a different
+  target while an action is outstanding. It clears the highlight with `target: null` when the
+  request ends. The desktop ignores `reason` on a clear, ignores stale or unknown targets, and
+  clears the highlight when voice ends. For `desktopOpen`, the desktop highlights the target, holds
+  it for 500 milliseconds, revalidates the target, and then navigates; the hold is skipped when
+  that same target has already been highlighted for at least 500 milliseconds.
 
-The fixed action union is:
+The action union is:
 
-| `type`                | Other fields                                       | UI-equivalent behavior                                                                     |
-| --------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `desktopState`        | none                                               | Read the current bounded context.                                                          |
-| `desktopOpen`         | `target: DesktopTarget`                            | Focus/open that existing entity.                                                           |
-| `workspaceCreate`     | `project: ProjectRef`                              | Use the UI's new-workspace action and defaults; it already creates the first conversation. |
-| `sessionCreate`       | `group: GroupRef`, optional `prompt`               | Create an ordinary visible conversation, optionally populate its draft.                    |
-| `botCreate`           | `connectionId`, optional `name`, optional `prompt` | Use the ordinary new-bot UI, optionally populate its draft; never grant admin.             |
-| `sessionRead`         | `target: SessionRef`                               | Return bounded public conversation text and status.                                        |
-| `sessionSend`         | `target: SessionRef`, `text`                       | Stage exact text for an independent explicit human Send; never answer a pending question.  |
-| `sessionWatch`        | `target: SessionRef`, `enabled`                    | Enable/disable text/status backfeed for that exact session.                                |
-| `composerDraftAppend` | `target: SessionRef`, `text`                       | Append text without replacing the existing draft or attachments.                           |
+| `type`                | Other fields                                              | UI-equivalent behavior                                                                    |
+| --------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `desktopState`        | none                                                      | Read the current bounded context.                                                         |
+| `desktopOpen`         | `target: DesktopTarget`                                   | Focus/open that existing entity.                                                          |
+| `sessionRead`         | `target: SessionRef`                                      | Return bounded public conversation text and status.                                       |
+| `sessionSend`         | `target: SessionRef`, `text`                              | Stage exact text for an independent explicit human Send; never answer a pending question. |
+| `sessionWatch`        | `target: SessionRef`, `enabled`                           | Enable/disable text/status backfeed for that exact session.                               |
+| `composerDraftAppend` | `target: SessionRef`, `text`                              | Append text to that session's draft without replacing it or its attachments.              |
+| `taskCreate`          | `connectionId`, optional `name`, `text`, optional `model` | Create a task, open it, and stage `text` as its unsent draft.                             |
+| `sessionModelChange`  | `target: SessionRef`, `providerId`, `modelId`             | Choose the model for that session's next message through its composer.                    |
+| `workspaceCreate`     | `project: ProjectRef`                                     | Retained for compatibility; current daemons never request it.                             |
+| `sessionCreate`       | `group: GroupRef`, optional `prompt`                      | Retained for compatibility; current daemons never request it.                             |
+| `botCreate`           | `connectionId`, optional `name`, optional `prompt`        | Retained for compatibility; current daemons never request it.                             |
 
-Action text/prompts are nonblank and at most 16,384 characters; optional bot names are nonblank
-and at most 256. No action accepts paths, arbitrary URLs/API calls, shell commands, JavaScript,
-model or permission overrides, security settings, or permission/question answers. An optional
+`taskCreate` requires the `taskCreate` capability and `sessionModelChange` requires the
+`sessionModelChange` capability. A desktop may refuse a retained compatibility action with
+`unavailable`.
+
+`taskCreate` creates an ordinary task on that connection through the desktop's usual task
+creation, with `name` when supplied and the daemon's automatic naming otherwise. Optional
+`model` is `{ providerId, modelId }` from that server's AppState `models`; the desktop validates
+it before creating anything, refuses an unknown choice with `notFound`, and creates the task with
+that selection and the model's usual effort. The desktop then opens the task and stages `text` as
+its composer draft, never sending it; a person must review the draft and press Send. Success is
+`{ type: "created", target: TaskTarget }`.
+
+`sessionModelChange` changes the model that the identified session's next message will use,
+through the same composer mode path as the model picker, with effort and speed following the
+model as the picker does. It validates the choice against that session's offered models and
+refuses an unknown choice with `notFound`, or `unavailable` when the session cannot change models.
+It preserves draft text, attachments, and permission mode, and never interrupts, aborts, or
+restarts a running turn. Success is `{ type: "ack" }`.
+
+Every session action names its target explicitly. `composerDraftAppend`, like the others, never
+falls back to the focused session; a missing or stale target is refused.
+
+Action text/prompts are nonblank and at most 16,384 characters; optional bot and task names are
+nonblank and at most 256; provider and model IDs are nonblank and at most 128 and 256 characters.
+No action accepts paths, arbitrary URLs/API calls, shell commands, JavaScript, permission
+overrides, security settings, or permission/question answers. A model choice is limited to the
+choices the desktop's own picker offers. An optional
 creation prompt is a draft, not an automatic user-authored message. In v1, `sessionSend` refuses
 or stages the exact text visibly and returns terminal `succeeded` with `{ type: "staged" }`.
 Staged means awaiting an independent explicit human Send, never sent or authorized, and never
@@ -8253,6 +8514,8 @@ These routes and events are additive without a protocol bump. `GET /v0/health` a
 optional `capabilities.desktopLiveControl` boolean. Only `true` promises this window-scoped
 contract; omission or `false` means unavailable, not an older agent-bound voice API. This
 capability does not promise provider entitlement, enabled microphone access, or API billing consent.
+The optional `capabilities.desktopLiveCapabilities` lists the additive desktop capability names
+this daemon accepts in `desktopCapabilities`; omission means none.
 A `404` or `501` from session
 creation may mean the daemon lacks Live support; clients must not mistake that for an empty
 session or silently choose a different authentication method.

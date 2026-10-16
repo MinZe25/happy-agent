@@ -72,6 +72,8 @@ export const healthResponseSchema = Type.Object({
             desktopLiveControl: Type.Optional(Type.Boolean()),
             /** True when the daemon serves local workspace bridges. */
             workspaceBridges: Type.Optional(Type.Boolean()),
+            /** Additive voice desktop capability names accepted in `desktopCapabilities`. */
+            desktopLiveCapabilities: Type.Optional(Type.Array(Type.String())),
         }),
     ),
     /** Always `true`; a daemon that cannot answer does not answer. */
@@ -151,6 +153,58 @@ export const nodeConfigPatchSchema = Type.Object(
     { additionalProperties: false },
 );
 export type NodeConfigPatch = Static<typeof nodeConfigPatchSchema>;
+
+/** Machine-level voice settings; `null` controller fields mean the default. */
+export const voiceConfigSchema = Type.Object({
+    controller: Type.Object({
+        providerId: Nullable(Type.String()),
+        modelId: Nullable(Type.String()),
+        effort: Nullable(Type.String()),
+        fastMode: Type.Boolean(),
+    }),
+    /** What a call starting now would use. */
+    effectiveController: Type.Object({
+        providerId: Nullable(Type.String()),
+        modelId: Type.String(),
+        effort: Type.String(),
+        serviceTier: Nullable(Type.String()),
+        /** Why a setting is currently ignored or unusable, in plain English. */
+        notice: Nullable(Type.String()),
+    }),
+    /** The built-in voice model prompt; never persisted. */
+    defaultSystemPrompt: Type.String(),
+    systemPromptOverride: Nullable(Type.String()),
+    effectiveSystemPrompt: Type.String(),
+});
+export type VoiceConfig = Static<typeof voiceConfigSchema>;
+
+/** Omitted properties are unchanged; `null` removes the stored value. */
+export const voiceConfigPatchSchema = Type.Object(
+    {
+        controller: Type.Optional(
+            Type.Object(
+                {
+                    providerId: Type.Optional(
+                        Nullable(Type.String({ minLength: 1, maxLength: 128, pattern: "\\S" })),
+                    ),
+                    modelId: Type.Optional(
+                        Nullable(Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" })),
+                    ),
+                    effort: Type.Optional(
+                        Nullable(Type.String({ minLength: 1, maxLength: 32, pattern: "\\S" })),
+                    ),
+                    fastMode: Type.Optional(Nullable(Type.Boolean())),
+                },
+                { additionalProperties: false },
+            ),
+        ),
+        systemPrompt: Type.Optional(
+            Nullable(Type.String({ minLength: 1, maxLength: 32_768, pattern: "\\S" })),
+        ),
+    },
+    { additionalProperties: false },
+);
+export type VoiceConfigPatch = Static<typeof voiceConfigPatchSchema>;
 
 /** Peer-to-peer identity and transports. */
 export const p2pConfigSchema = Type.Object({
@@ -299,6 +353,8 @@ export const daemonConfigSchema = Type.Object({
     providers: Type.Record(Type.String(), providerConfigSchema),
     settings: daemonSettingsSchema,
     theme: themeConfigSchema,
+    /** Machine-level voice settings. Absent when the daemon does not support voice. */
+    voice: Type.Optional(voiceConfigSchema),
     workspace: workspaceConfigSchema,
 });
 export type DaemonConfig = Static<typeof daemonConfigSchema>;
@@ -331,6 +387,7 @@ export const configPatchSchema = Type.Partial(
         ),
         settings: Type.Partial(daemonSettingsSchema),
         theme: Type.Partial(themeConfigSchema),
+        voice: voiceConfigPatchSchema,
         workspace: Type.Partial(workspaceConfigSchema),
     }),
 );

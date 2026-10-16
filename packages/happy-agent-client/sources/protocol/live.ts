@@ -3,7 +3,9 @@ import { type Static, Type } from "@sinclair/typebox";
 
 import { mutationIdSchema, Nullable, resourceVersionSchema, timestampSchema } from "./common.js";
 import {
+    liveAppStateSchema,
     liveContextRevisionSchema,
+    liveDesktopCapabilitiesSchema,
     liveDesktopContextSchema,
     liveDesktopIdSchema,
     liveResourceIdSchema,
@@ -60,6 +62,10 @@ export const createLiveSessionRequestSchema = Type.Object(
         credential: liveCredentialRequestSchema,
         contextRevision: liveContextRevisionSchema,
         context: liveDesktopContextSchema,
+        /** Capability names the desktop implements; send only when health advertises them. */
+        desktopCapabilities: Type.Optional(liveDesktopCapabilitiesSchema),
+        /** The initial Desktop AppState; valid only with the `appState` capability. */
+        appState: Type.Optional(liveAppStateSchema),
     },
     { additionalProperties: false },
 );

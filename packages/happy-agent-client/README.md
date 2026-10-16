@@ -222,8 +222,19 @@ trusted desktop host supplies bearer headers, never URL credentials. The exporte
 `LiveControlClientMessage` and `LiveControlServerMessage` schemas define both directions.
 After verifying `hello` identifies the expected call/window, wait for `status: active`.
 
-The fixed `LiveDesktopAction` union contains state/open, workspace/session/bot creation,
-public session read/watch, exact-text message staging, and non-overwriting draft append.
+The `LiveDesktopAction` union contains state/open, public session read/watch, exact-text message
+staging, non-overwriting draft append to an explicitly named session, task creation with an
+unsent opening draft, and next-message model selection. Workspace, conversation, and bot creation
+remain in the union for older daemons, but current daemons never request them.
+
+Additive capabilities are negotiated per call. When `getHealth().capabilities?.desktopLiveCapabilities`
+lists names from `LIVE_DESKTOP_CAPABILITIES`, send the ones the desktop implements as
+`desktopCapabilities` and read the accepted set from `hello.capabilities`. `appState` adds the
+`LiveAppState` sidebar snapshot (creation `appState` and the `appState` control frame) and task
+targets; `voiceFocus` adds the decorative `voiceFocus` highlight frame; `taskCreate` and
+`sessionModelChange` add those actions. Never send a frame, field, or target for a capability the
+daemon did not accept. Machine voice settings are `config.voice`, changed through
+`patchConfig({ voice })`.
 The desktop validates target namespaces, context revisions, permissions, and action identities.
 It never exposes generic shell/API/JavaScript execution or permission answers. Transcripts are
 provider-derived fragments, not authoritative user confirmations. Both interval fields are present
