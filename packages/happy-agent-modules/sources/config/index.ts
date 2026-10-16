@@ -45,3 +45,10 @@ export {
     type PeerMessagingConfig,
     type PeerConnection,
 } from "./PeerMessagingConfig.js";
+export { VoiceControllerRouteError } from "./VoiceControllerRouteError.js";
+export {
+    VOICE_CONTROLLER_DEFAULT_MODEL,
+    VoiceSettingsError,
+    type VoiceSettingsToml,
+    type VoiceSettingsUpdate,
+} from "./VoiceSettings.js";

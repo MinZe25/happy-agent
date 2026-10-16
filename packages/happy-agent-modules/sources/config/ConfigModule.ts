@@ -26,6 +26,7 @@ import {
     GrokSessionCredential,
     type AnthropicBedrockTransport,
     type BaseProvider,
+    type SessionReasoningEffort,
     type ProviderUsage,
 } from "@slopus/happy-providers";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
@@ -59,6 +60,15 @@ import { ProviderEnablement, providerRegistryUntil } from "./impl/providerRegist
 import { ProviderServiceTiers } from "./impl/ProviderServiceTiers.js";
 import { RoundRobinRouterProvider } from "./impl/RoundRobinRouterProvider.js";
 import { VoiceCredentialPoolError } from "./VoiceCredentialPoolError.js";
+import { VoiceControllerRouteError } from "./VoiceControllerRouteError.js";
+import {
+    VOICE_CONTROLLER_DEFAULT_MODEL,
+    VoiceSettingsError,
+    voiceSettingsTomlSchema,
+    voiceSettingsUpdateSchema,
+    type VoiceSettingsToml,
+    type VoiceSettingsUpdate,
+} from "./VoiceSettings.js";
 import { modelServiceTierOptions } from "./impl/modelServiceTierOptions.js";
 import { readGlobalInstructions } from "./impl/readGlobalInstructions.js";
 import { HAPPY_TOML_TEMPLATE, MCP_TOML_TEMPLATE } from "./impl/userConfigurationTemplate.js";
@@ -451,6 +461,7 @@ const partialValuesSchema = Type.Object(
         node: Type.Optional(
             Type.Object({ name: Type.Optional(nodeNameSchema) }, { additionalProperties: false }),
         ),
+        voice: Type.Optional(voiceSettingsTomlSchema),
         profile: Type.Optional(profileBootstrapSchema),
         api: Type.Optional(apiConfigSchema),
         telegram: Type.Optional(
@@ -1870,40 +1881,173 @@ export class ConfigModule implements AgentModule {
         return this.#providerSource().ids;
     }
 
+    /** Stored voice settings: generated runtime values override the machine file; projects never set them. */
+    get voiceSettings(): VoiceSettingsToml {
+        return this.#voiceSettingsWithRuntime(this.#runtimeValues.voice ?? {});
+    }
+
+    #voiceSettingsWithRuntime(runtime: VoiceSettingsToml): VoiceSettingsToml {
+        const machine = this.configuration.sources.global.values["voice"];
+        return {
+            ...(Value.Check(voiceSettingsTomlSchema, machine) ? machine : {}),
+            ...runtime,
+        };
+    }
+
+    /**
+     * What a voice call starting now would run its controller on, with a readable explanation of
+     * any setting that is currently ignored or unusable. Without a stored account, use the ordinary
+     * default route independently of the voice model, retaining an explicit disabled default.
+     */
+    voiceController(settings: VoiceSettingsToml = this.voiceSettings): {
+        readonly providerId: string | null;
+        readonly modelId: string;
+        readonly model: AgentModel | undefined;
+        readonly effort: string;
+        readonly serviceTier: "priority" | null;
+        readonly notice: string | null;
+    } {
+        const models = this.models;
+        const modelId = settings.controller_model ?? VOICE_CONTROLLER_DEFAULT_MODEL;
+        const providerId =
+            settings.controller_provider ??
+            this.configuration.values.defaults.providerId ??
+            models[0]?.providerId ??
+            null;
+        const model = models.find(
+            (candidate) => candidate.providerId === providerId && candidate.id === modelId,
+        );
+        const name =
+            model?.name ?? this.catalog.find((entry) => entry.id === modelId)?.name ?? modelId;
+        const effort =
+            settings.controller_effort ??
+            (model === undefined || model.effortLevels.includes("low")
+                ? "low"
+                : model.defaultEffort);
+        const fast = model?.serviceTiers?.includes("priority") === true;
+        let notice: string | null = null;
+        if (providerId === null)
+            notice =
+                "No account is enabled for voice. Enable an account, then choose a controller model in voice settings.";
+        else if (model === undefined)
+            notice = `${name} is not enabled on ${settings.controller_provider === undefined ? "the default account" : "the selected account"}, so voice cannot start. Choose another controller account or model in voice settings.`;
+        else if (!model.effortLevels.some((level) => level === effort))
+            notice = `${name} does not accept ${effort} effort, so voice cannot start. Choose another effort in voice settings.`;
+        else if (settings.controller_fast_mode === true && !fast)
+            notice = `Fast mode is not available for ${name}, so it is ignored.`;
+        return {
+            providerId,
+            modelId,
+            model,
+            effort,
+            serviceTier: settings.controller_fast_mode === true && fast ? "priority" : null,
+            notice,
+        };
+    }
+
+    /** Persist a voice settings change in generated runtime configuration; true when it changed. */
+    async updateRuntimeVoiceSettings(ctx: Context, update: VoiceSettingsUpdate): Promise<boolean> {
+        if (!Value.Check(voiceSettingsUpdateSchema, update))
+            throw new VoiceSettingsError("The voice settings are invalid.");
+        return await this.#runtimeLock.runInLock(ctx, async () => {
+            const current = this.#runtimeValues.voice ?? {};
+            const voice: Record<string, unknown> = { ...current };
+            for (const [key, value] of Object.entries(update)) {
+                if (value === undefined) continue;
+                if (value === null) delete voice[key];
+                else voice[key] = value;
+            }
+            if (!Value.Check(voiceSettingsTomlSchema, voice))
+                throw new VoiceSettingsError("The voice settings are invalid.");
+            if (
+                update.controller_provider !== undefined ||
+                update.controller_model !== undefined ||
+                update.controller_effort !== undefined
+            ) {
+                this.#validateVoiceController(this.#voiceSettingsWithRuntime(voice));
+            }
+            if (Value.Equal(voice, current)) return false;
+            const next = structuredClone(this.#runtimeValues);
+            if (Object.keys(voice).length === 0) delete next.voice;
+            else next.voice = voice;
+            if (!Value.Check(partialValuesSchema, next))
+                throw new Error("The generated runtime configuration is invalid.");
+            await writeRuntimeConfigurationFile(this.configuration.paths.runtimeConfigPath, next);
+            this.#runtimeValues = next;
+            return true;
+        });
+    }
+
+    /** A stored controller must name a configured account that offers the model and effort. */
+    #validateVoiceController(settings: VoiceSettingsToml): void {
+        const providerId = this.voiceController(settings).providerId;
+        const modelId = settings.controller_model ?? VOICE_CONTROLLER_DEFAULT_MODEL;
+        const name = this.catalog.find((entry) => entry.id === modelId)?.name ?? modelId;
+        if (
+            providerId !== null &&
+            this.configuration.values.providers[providerId] === undefined &&
+            !this.providerIds.includes(providerId)
+        )
+            throw new VoiceSettingsError("The selected controller account is not configured.");
+        const candidates = this.offeredModels.filter(
+            (model) => model.id === modelId && model.providerId === providerId,
+        );
+        if (candidates.length === 0)
+            throw new VoiceSettingsError(
+                settings.controller_provider === undefined
+                    ? `No configured account offers ${name}.`
+                    : `The selected controller account does not offer ${name}.`,
+            );
+        const effort = settings.controller_effort;
+        if (
+            effort !== undefined &&
+            !candidates.some((model) => model.effortLevels.some((level) => level === effort))
+        )
+            throw new VoiceSettingsError(`${name} does not accept ${effort} effort.`);
+    }
+
     /** Live alone requires a frozen route: smart routing must not rotate its controller account. */
     async liveControllerRoute(): Promise<{
         provider: BaseProvider;
         model: AgentModel;
+        effort: SessionReasoningEffort;
+        serviceTier?: "priority";
         signal: AbortSignal;
     }> {
-        const selected = this.models[0];
-        if (selected === undefined)
-            throw new Error("Configure an enabled default model before starting voice.");
-        let model = { ...selected };
+        const selection = this.voiceController();
+        const effort = selection.model?.effortLevels.find((level) => level === selection.effort);
+        if (selection.providerId === null || selection.model === undefined || effort === undefined)
+            throw new VoiceControllerRouteError(
+                selection.notice ?? "Voice cannot use the selected controller model.",
+            );
+        let model: AgentModel = { ...selection.model, defaultEffort: effort };
         let provider = await this.providers.resolve(model.providerId, model.id);
         if (provider instanceof RoundRobinRouterProvider) {
             const account = provider.selectAccount();
             if (account === undefined)
-                throw new Error(
-                    "The default model's account pool has no enabled account for voice.",
-                );
+                throw new Error("The controller account pool has no enabled account for voice.");
             model = { ...model, providerId: account };
             // Resolve through the ordinary registry so shutdown and account disablement still apply.
             provider = await this.providers.resolve(account, model.id);
         }
-        if (provider === null)
-            throw new Error("The default model account is unavailable for voice.");
+        if (provider === null) throw new Error("The controller account is unavailable for voice.");
         // The registry initialized enablement above. Freeze both the logical and concrete lifetimes
         // for this call without changing the concrete provider shared by unrelated sessions.
         const enablement = this.#providerEnablement!;
         const signal = AbortSignal.any([
             this.#providerLifetime.signal,
-            enablement.signal(selected.providerId),
+            enablement.signal(selection.providerId),
             enablement.signal(model.providerId),
         ]);
         if (signal.aborted)
-            throw new Error("The default model account was disabled before voice could start.");
-        return { provider, model, signal };
+            throw new Error("The controller account was disabled before voice could start.");
+        return {
+            provider,
+            model,
+            effort,
+            ...(selection.serviceTier === null ? {} : { serviceTier: selection.serviceTier }),
+            signal,
+        };
     }
 
     /** Reload only the selected account from its provider-owned store, without network refresh or fallback. */
@@ -3164,6 +3308,7 @@ export function parseHappyAgentConfigToml(source: string): {
         "skills",
         "telegram",
         "theme",
+        "voice",
         "workspace",
     ]);
     for (const key of Object.keys(table)) {
@@ -3197,6 +3342,7 @@ export function parseHappyAgentConfigToml(source: string): {
             ? {}
             : { skill_enablement: table.skill_enablement }),
         ...(table.node === undefined ? {} : { node: table.node }),
+        ...(table.voice === undefined ? {} : { voice: table.voice }),
         ...(table.profile === undefined ? {} : { profile: table.profile }),
         ...(table.api === undefined ? {} : { api: table.api }),
         ...(table.connections === undefined ? {} : { connections: table.connections }),
@@ -3271,6 +3417,7 @@ function sourceSnapshot(source: ReadSource): HappyAgentConfigSource {
 function normalizeSourceValues(values: PartialValues): Record<string, unknown> {
     return {
         ...(values.node === undefined ? {} : { node: values.node }),
+        ...(values.voice === undefined ? {} : { voice: values.voice }),
         ...(values.profile === undefined ? {} : { profile: values.profile }),
         ...(values.docker === undefined ? {} : { docker: normalizeDocker(values.docker) }),
         ...(values.defaults === undefined ? {} : { defaults: normalizeDefaults(values.defaults) }),
@@ -4065,6 +4212,8 @@ function withoutProjectMachineSettings(values: PartialValues): PartialValues {
         observation: _observation,
         p2p: _p2p,
         node: _node,
+        // Voice settings choose an account and a prompt for this machine, never for a repository.
+        voice: _voice,
         profile: _profile,
         provider_default_enable: _providerDefaultEnable,
         providers: _providers,

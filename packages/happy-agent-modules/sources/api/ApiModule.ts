@@ -62,6 +62,7 @@ import {
     configPatchSchema,
     deleteArtifactRequestSchema,
     nodeConfigPatchSchema,
+    voiceConfigPatchSchema,
     updateArtifactRequestSchema,
     providerVerificationRequestSchema,
     userIdsSchema,
@@ -149,7 +150,7 @@ import {
     type Compaction,
 } from "../compactions/index.js";
 import { ComputeModule, type ComputeProcessEvent } from "../compute/index.js";
-import { ConfigModule } from "../config/index.js";
+import { ConfigModule, VoiceSettingsError } from "../config/index.js";
 import { NodeModule } from "../node/index.js";
 import { CloudModule, CloudOperationError } from "../cloud/index.js";
 import {
@@ -866,7 +867,7 @@ export class ApiModule implements AgentModule {
                         request,
                         createLiveSessionRequestSchema,
                         "voice request",
-                        384 * 1024,
+                        640 * 1024,
                     );
                     const reserved = await this.#live.reserve(ctx, ownerId, body);
                     const sdp = await reserved.allocated;
@@ -1115,11 +1116,25 @@ export class ApiModule implements AgentModule {
             }
             if (request.method === "PATCH" && url.pathname === "/v0/config") {
                 const body = await bodyAs(request, configPatchSchema, "configuration patch");
-                if (!Value.Check(runtimeConfigPatchSchema, body)) {
+                if (
+                    !Value.Check(runtimeConfigPatchSchema, body) ||
+                    (body.voice !== undefined && this.#live === undefined)
+                ) {
                     throw new ApiError(
                         409,
                         "conflict",
-                        "This daemon can only change provider enablement and its display name at runtime.",
+                        "This daemon can only change provider enablement, its display name, and voice settings at runtime.",
+                    );
+                }
+                if (
+                    body.voice !== undefined &&
+                    this.#team.enabled &&
+                    teamUser(ctx)?.isOwner !== true
+                ) {
+                    throw new ApiError(
+                        403,
+                        "forbidden",
+                        "Only the team owner can change voice settings.",
                     );
                 }
                 if (
@@ -1132,6 +1147,16 @@ export class ApiModule implements AgentModule {
                         "forbidden",
                         "Only the team owner can change this installation's name.",
                     );
+                }
+                if (body.voice !== undefined) {
+                    try {
+                        // Voice applies first so a refused selection leaves every other field unchanged.
+                        await this.#live!.updateVoiceSettings(ctx, body.voice);
+                    } catch (error: unknown) {
+                        if (error instanceof VoiceSettingsError)
+                            throw invalidRequest(error.message);
+                        throw error;
+                    }
                 }
                 try {
                     if (body.providers !== undefined)
@@ -2327,6 +2352,13 @@ export class ApiModule implements AgentModule {
             this.#node.onUpdated(() => {
                 this.#journal.append("config.updated", {});
             }),
+            ...(this.#live === undefined
+                ? []
+                : [
+                      this.#live.onSettingsUpdated(() => {
+                          this.#journal.append("config.updated", {});
+                      }),
+                  ]),
             ...(this.#runners === undefined
                 ? []
                 : [
@@ -7825,6 +7857,9 @@ export class ApiModule implements AgentModule {
             capabilities: {
                 desktopLiveControl: this.#live !== undefined,
                 ...(this.#bridges === undefined ? {} : { workspaceBridges: true }),
+                ...(this.#live === undefined
+                    ? {}
+                    : { desktopLiveCapabilities: [...this.#live.desktopCapabilities] }),
             },
             version: {
                 protocol: API_PROTOCOL_VERSION,
@@ -7881,6 +7916,7 @@ export class ApiModule implements AgentModule {
                 toolResultRetentionDays: values.settings.toolResultRetentionDays,
             },
             theme: values.theme,
+            ...(this.#live === undefined ? {} : { voice: this.#live.voiceSettings() }),
             workspace: values.workspace,
         };
     }
@@ -8344,6 +8380,7 @@ const agentWaitStateSchema = Type.Union([agentWaitSchema, Type.Null()]);
 const runtimeConfigPatchSchema = Type.Object(
     {
         node: Type.Optional(nodeConfigPatchSchema),
+        voice: Type.Optional(voiceConfigPatchSchema),
         providers: Type.Optional(
             Type.Record(
                 Type.String(),

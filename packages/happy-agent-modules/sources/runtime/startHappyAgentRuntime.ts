@@ -654,7 +654,7 @@ export async function startHappyAgentRuntime(
             await system?.close(shutdownCtx);
             await codeMode.close();
         });
-        const live = new LiveModule(config, durableFunctions);
+        const live = new LiveModule(config, durableFunctions, bots);
         const apiModule = new ApiModule(
             abort,
             config,

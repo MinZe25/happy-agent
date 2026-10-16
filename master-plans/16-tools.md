@@ -89,6 +89,13 @@ Bounded side inference must not use AgentBase, the normal durable agent loop, a
 session manager, or the normal tool-execution loop. It is a small direct
 provider call, not a hidden conversation.
 
+The voice controller is the one exception, by the user's decision in master
+plan 26. Each voice call keeps one Luna provider session for the life of the
+call and runs its queued requests through it. In every other way it follows the
+rules above: it makes direct provider calls outside AgentBase, uses an explicit
+fixed tool list, handles the stream itself, and keeps only user and assistant
+text between requests.
+
 ## Vendor truth and golden traces
 
 Tool descriptors and captured golden traces in `happy-providers` are evidence of
@@ -129,4 +136,5 @@ This plan is complete when:
 - provider descriptors remain faithful to the vendor, golden traces remain
   present, and provider tests continue to match them without weakened coverage;
 - bounded side inference uses one direct, correctly configured provider call
-  whose response is handled locally outside AgentBase.
+  whose response is handled locally outside AgentBase, except for the voice
+  controller's per-call session described in master plan 26.

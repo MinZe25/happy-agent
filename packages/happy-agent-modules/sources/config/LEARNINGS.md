@@ -267,18 +267,29 @@ Scripted inference must replace concrete accounts, not smart routing itself. Fac
 enabled hidden accounts as well as their visible smart routes; configuration rebuilds the real
 router over the substituted concrete registry so gym tests exercise selection and cancellation.
 
-## Voice freezes the configured default pool onto one account
+## Voice freezes its configured controller onto one account
 
 Voice previously rejected smart default providers, so enabling a pool could make an otherwise
 configured installation unable to start voice. Configuration now asks the router to choose one
-enabled compatible account at call startup, resolves it through the regular provider registry,
-and preserves the default model and effort. Live holds that concrete route and its pool/account
+enabled compatible account at call startup and resolves it through the regular provider registry.
+The model comes from the `[voice]` settings, defaulting to GPT-6.1 Sol at low effort (or the
+model's default when it lacks low) on the configured default account or pool. An incompatible or
+disabled default stays selected and fails with a setup explanation; voice never searches for another
+account offering its model. Runtime voice changes are validated against the machine file plus the
+proposed runtime values, excluding removed overrides, before they are written to
+generated `runtime.toml`, which overrides the machine file; projects never set voice. The provider
+must offer the model and effort; an unusable selection gives a readable setup explanation, also
+reported as `effectiveController.notice`, instead of changing accounts or substituting another
+model. Fast mode becomes the priority tier only when that model's route offers it. Live holds that concrete route and its pool/account
 lifetimes, so pool or account disablement and daemon shutdown still cancel it while credential
 failures never trigger account failover.
 The voice transport's explicit credential selection remains independent of the text controller.
 Selecting a pool as that credential is invalid, even when it has Codex compatibility. Configuration
 throws a dedicated fixed-message error for that proven selection, allowing Live to explain it
 without forwarding arbitrary credential-loading diagnostics or trying a different account.
+Every controller field accepts a null reset through the public patch, including fast mode. Resetting
+a field reveals its machine-file value or default and validates that resulting selection, so a
+model change can remove an incompatible runtime effort without resurrecting it during validation.
 
 ## Extra skill folders are a plain list in `[skills]`
 

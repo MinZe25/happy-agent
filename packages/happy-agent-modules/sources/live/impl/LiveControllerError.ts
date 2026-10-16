@@ -1,13 +1,10 @@
+import type { LiveControllerDetail, LiveFailureCategory } from "./liveDiagnostics.js";
+
 /** Fixed diagnostics: provider errors and desktop contents must never enter voice or logs. */
 export class LiveControllerError extends Error {
     constructor(
-        readonly category:
-            | "inference"
-            | "deadline"
-            | "invalidAction"
-            | "limit"
-            | "uncertainAction"
-            | "capacity",
+        readonly category: LiveFailureCategory,
+        readonly detail?: LiveControllerDetail,
     ) {
         const explanation = {
             inference: "The desktop controller could not complete this request.",
@@ -25,6 +22,15 @@ export class LiveControllerError extends Error {
 
     /** A failed delegation may follow earlier successful or still-running mutations. */
     get voiceContext(): string {
+        if (
+            this.detail?.phase === "providerOpen" ||
+            (this.detail?.phase === "context" && this.detail.round === undefined) ||
+            (this.detail?.round === 0 &&
+                (this.detail.phase === "providerStream" ||
+                    this.detail.phase === "providerDone" ||
+                    this.detail.phase === "toolValidation"))
+        )
+            return `${this.message} No action was started for this request.${this.detail?.reason === "contextLimit" ? " Start a new voice call to begin a fresh controller conversation." : " Continue the conversation without replaying this request."}`;
         return `${this.message} Some actions may already have completed or may still complete. Do not retry any action automatically or claim it succeeded. Explain the failure, let the person inspect the app, and continue the conversation.`;
     }
 }

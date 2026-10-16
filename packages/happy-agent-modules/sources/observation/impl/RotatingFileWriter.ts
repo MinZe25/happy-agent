@@ -49,7 +49,7 @@ export class RotatingFileWriter {
             throw new Error("A rotating file must be allowed at least one pending byte.");
         }
         await mkdir(dirname(options.path), { recursive: true });
-        const handle = await open(options.path, "a");
+        const handle = await openPrivate(options.path);
         const bytes = (await handle.stat()).size;
         return new RotatingFileWriter(handle, bytes, options);
     }
@@ -122,11 +122,27 @@ export class RotatingFileWriter {
         await this.#handle.close();
         // One previous generation is kept. Anything older was already too old to be worth the disk.
         await rename(this.#path, `${this.#path}.1`);
-        this.#handle = await open(this.#path, "a");
+        this.#handle = await openPrivate(this.#path);
         this.#bytes = await currentSize(this.#handle);
     }
 }
 
 async function currentSize(handle: FileHandle): Promise<number> {
     return (await handle.stat()).size;
+}
+
+async function openPrivate(path: string): Promise<FileHandle> {
+    const handle = await open(path, "a", 0o600);
+    try {
+        // Opening with a mode only affects a new file; an existing local log needs tightening too.
+        if (process.platform !== "win32" && ((await handle.stat()).mode & 0o077) !== 0) {
+            await handle.chmod(0o600);
+            if (((await handle.stat()).mode & 0o077) !== 0)
+                throw new Error("The local log file could not be made private.");
+        }
+        return handle;
+    } catch (error) {
+        await handle.close();
+        throw error;
+    }
 }

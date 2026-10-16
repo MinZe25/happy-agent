@@ -86,7 +86,11 @@ function fixture(native = false, extra: Partial<LiveProviderDependencies> = {}) 
         events,
         requests,
         controller,
-        start: () => createLiveProviderTransport(options, deps),
+        start: (initialContext?: string) =>
+            createLiveProviderTransport(
+                { ...options, ...(initialContext === undefined ? {} : { initialContext }) },
+                deps,
+            ),
         ready: () =>
             socket.event({
                 type: native ? "session.updated" : "session.started",
@@ -98,6 +102,69 @@ function fixture(native = false, extra: Partial<LiveProviderDependencies> = {}) 
 
 describe("Live provider dialect and lifecycle", () => {
     afterEach(() => vi.useRealTimers());
+    test.each([false, true])(
+        "seeds attributed compact AppState using the exact dialect startup field (native: %s)",
+        async (native) => {
+            const f = fixture(native);
+            const transport = await f.start('{"active":{"conversation":"Garden notes"}}');
+            const body = JSON.parse(String(f.requests[0]!.options?.body));
+            expect(body.session[native ? "initial_items" : "input"]).toEqual([
+                {
+                    type: "message",
+                    role: "user",
+                    content: [
+                        { type: "input_text", text: '{"active":{"conversation":"Garden notes"}}' },
+                    ],
+                },
+            ]);
+            expect(body.session[native ? "input" : "initial_items"]).toBeUndefined();
+            transport.dispose();
+        },
+    );
+    test("bounds a stalled socket write, rejects queued appends, and ignores the late callback without replay", async () => {
+        vi.useFakeTimers();
+        const f = fixture(true);
+        const transport = await f.start();
+        f.ready();
+        let late!: (error?: Error) => void;
+        vi.spyOn(f.socket, "send").mockImplementationOnce((_value, callback) => {
+            late = callback;
+        });
+        let first: string | undefined, second: string | undefined;
+        const one = transport
+            .append({ delegationId: "first", text: "first", speakable: true })
+            .then(
+                () => {
+                    first = "sent";
+                },
+                () => {
+                    first = "failed";
+                },
+            );
+        const two = transport
+            .append({ delegationId: "second", text: "second", speakable: true })
+            .then(
+                () => {
+                    second = "sent";
+                },
+                () => {
+                    second = "failed";
+                },
+            );
+        await vi.advanceTimersByTimeAsync(30_001);
+        try {
+            expect(first).toBe("failed");
+            expect(second).toBe("failed");
+            expect(f.events.at(-1)).toMatchObject({ type: "ended", orderly: false });
+            expect(f.socket.send).toHaveBeenCalledOnce();
+        } finally {
+            late();
+            await Promise.all([one, two]);
+            transport.dispose();
+        }
+        expect(f.socket.send).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+    });
     test("native deliberate close completes a real WebSocket closing handshake", async () => {
         const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
         await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -317,9 +384,10 @@ describe("Live provider dialect and lifecycle", () => {
             await transport.append({ delegationId: null, text: "quiet", speakable: false });
             expect(f.socket.sent.at(-1)).toMatchObject(
                 native
-                    ? { type: "session.context.append", channel: "commentary" }
+                    ? { type: "session.context.append" }
                     : { type: "session.thinking.append", delegation_id: null },
             );
+            if (native) expect(f.socket.sent.at(-1)).not.toHaveProperty("channel");
             transport.dispose();
         }
     });

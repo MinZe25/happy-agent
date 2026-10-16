@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentProviders } from "@slopus/happy-agent-base";
@@ -9,6 +9,7 @@ import {
 } from "@slopus/happy-providers";
 import { createRootContext, withLifetime } from "@steve.kite/stdlib";
 import { afterEach, expect, it, vi } from "vitest";
+import { VoiceSettingsError } from "../../sources/config/index.js";
 import { testConfigRootedAt } from "../support/configModule.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
 
@@ -45,6 +46,13 @@ async function fixture(
                         defaultEffort: "high",
                         effortLevels: ["high"],
                     },
+                    {
+                        id: "openai/gpt-6.1-sol",
+                        name: "GPT-6.1 Sol",
+                        providerId: smart ? "pool" : "voice",
+                        defaultEffort: "medium",
+                        effortLevels: ["low", "medium"],
+                    },
                 ],
             }),
         },
@@ -61,7 +69,7 @@ it("uses exactly the explicitly selected official account and configured-default
     });
     expect(await f.config.liveControllerRoute()).toMatchObject({
         provider: f.provider,
-        model: { providerId: "voice", id: "openai/gpt-6-astra", defaultEffort: "high" },
+        model: { providerId: "voice", id: "openai/gpt-6.1-sol", defaultEffort: "low" },
     });
     expect(session).not.toHaveBeenCalled();
 });
@@ -75,7 +83,7 @@ it("freezes a smart default onto its hidden enabled account without changing the
     expect(f.config.models[0]?.providerId).toBe("pool");
     expect(await f.config.liveControllerRoute()).toMatchObject({
         provider: f.provider,
-        model: { providerId: "voice", id: "openai/gpt-6-astra", defaultEffort: "high" },
+        model: { providerId: "voice", id: "openai/gpt-6.1-sol", defaultEffort: "low" },
     });
     expect(await f.config.liveCredential({ type: "openai_api_key", providerId: "voice" })).toEqual({
         type: "openai_api_key",
@@ -108,7 +116,7 @@ it.each(["controller", "pool"])(
         const route = await f.config.liveControllerRoute();
         expect(route.signal?.aborted).toBe(false);
         expect(route.provider).toBe(controller);
-        expect(route.model).toMatchObject({ providerId: "controller", defaultEffort: "high" });
+        expect(route.model).toMatchObject({ providerId: "controller", defaultEffort: "low" });
         const session = await route.provider.session("frozen-controller", {
             instructions: "",
             tools: [],
@@ -191,5 +199,131 @@ it("refuses credential-kind mismatches and disabled accounts without fallback", 
     await expect(
         f.config.liveCredential({ type: "openai_api_key", providerId: "voice" }),
     ).rejects.toThrow();
-    await expect(f.config.liveControllerRoute()).rejects.toThrow("enabled default model");
+    await expect(f.config.liveControllerRoute()).rejects.toThrow(
+        "No account is enabled for voice. Enable an account, then choose a controller model in voice settings.",
+    );
+});
+it("runs the controller on the configured voice model, effort and fast mode", async () => {
+    const f = await fixture(
+        undefined,
+        '[voice]\ncontroller_model="openai/gpt-6-astra"\ncontroller_fast_mode=true\n',
+    );
+    expect(f.config.voiceController()).toEqual(
+        expect.objectContaining({
+            providerId: "voice",
+            modelId: "openai/gpt-6-astra",
+            effort: "high",
+            serviceTier: null,
+            notice: "Fast mode is not available for Fixture, so it is ignored.",
+        }),
+    );
+    const route = await f.config.liveControllerRoute();
+    expect(route).toMatchObject({
+        provider: f.provider,
+        model: { providerId: "voice", id: "openai/gpt-6-astra", defaultEffort: "high" },
+        effort: "high",
+    });
+    expect(route).not.toHaveProperty("serviceTier");
+});
+it("stores voice settings in generated runtime configuration over the machine file", async () => {
+    const f = await fixture(undefined, '[voice]\nsystem_prompt="File prompt."\n');
+    expect(f.config.voiceSettings).toEqual({ system_prompt: "File prompt." });
+    const runtimePath = f.config.configuration.paths.runtimeConfigPath;
+    expect(
+        await f.config.updateRuntimeVoiceSettings(createRootContext(), {
+            controller_effort: "medium",
+            system_prompt: "Runtime prompt.",
+        }),
+    ).toBe(true);
+    expect(f.config.voiceSettings).toEqual({
+        controller_effort: "medium",
+        system_prompt: "Runtime prompt.",
+    });
+    expect(await readFile(runtimePath, "utf8")).toContain("Runtime prompt.");
+    expect((await f.config.liveControllerRoute()).effort).toBe("medium");
+    expect(
+        await f.config.updateRuntimeVoiceSettings(createRootContext(), {
+            controller_effort: "medium",
+        }),
+    ).toBe(false);
+    await f.config.updateRuntimeVoiceSettings(createRootContext(), {
+        controller_effort: null,
+        system_prompt: null,
+    });
+    expect(f.config.voiceSettings).toEqual({ system_prompt: "File prompt." });
+    expect(await readFile(runtimePath, "utf8")).not.toContain("Runtime prompt.");
+});
+it.each(["", 'controller_effort="medium"\n'])(
+    "validates a model change and effort reset against the resulting file/default settings (%s)",
+    async (fileSettings) => {
+        const f = await fixture(undefined, `[voice]\n${fileSettings}`);
+        await f.config.updateRuntimeVoiceSettings(createRootContext(), {
+            controller_model: "openai/gpt-6-astra",
+            controller_effort: "high",
+        });
+        await f.config.updateRuntimeVoiceSettings(createRootContext(), {
+            controller_model: "openai/gpt-6.1-sol",
+            controller_effort: null,
+        });
+        expect(f.config.voiceSettings).toEqual({
+            controller_model: "openai/gpt-6.1-sol",
+            ...(fileSettings ? { controller_effort: "medium" } : {}),
+        });
+        expect((await f.config.liveControllerRoute()).effort).toBe(fileSettings ? "medium" : "low");
+    },
+);
+it("rejects resetting to an incompatible file effort without changing runtime settings", async () => {
+    const f = await fixture(undefined, '[voice]\ncontroller_effort="high"\n');
+    await f.config.updateRuntimeVoiceSettings(createRootContext(), {
+        controller_effort: "medium",
+    });
+    const before = await readFile(f.config.configuration.paths.runtimeConfigPath, "utf8");
+    await expect(
+        f.config.updateRuntimeVoiceSettings(createRootContext(), { controller_effort: null }),
+    ).rejects.toThrow("GPT-6.1 Sol does not accept high effort.");
+    expect(f.config.voiceSettings.controller_effort).toBe("medium");
+    expect(await readFile(f.config.configuration.paths.runtimeConfigPath, "utf8")).toBe(before);
+});
+it("removes obsolete runtime controller overrides without validating the removed model", async () => {
+    const f = await fixture();
+    await f.config.updateRuntimeVoiceSettings(createRootContext(), {
+        controller_model: "openai/gpt-6-astra",
+        controller_effort: "high",
+    });
+    const remaining = f.config.offeredModels.filter((model) => model.id !== "openai/gpt-6-astra");
+    vi.spyOn(f.config, "offeredModels", "get").mockReturnValue(remaining);
+    await f.config.updateRuntimeVoiceSettings(createRootContext(), {
+        controller_model: null,
+        controller_effort: null,
+    });
+    expect(f.config.voiceSettings).toEqual({});
+    expect((await f.config.liveControllerRoute()).effort).toBe("low");
+});
+it.each([true, false])(
+    "keeps an incompatible configured default account selected when enabled=%s",
+    async (enabled) => {
+        const f = await fixture(
+            undefined,
+            `[defaults]\nprovider="claude"\nmodel="anthropic/sonnet-5"\n[providers.claude]\ntype="claude"\nenabled=${enabled}\n`,
+        );
+        expect(f.config.voiceController()).toMatchObject({
+            providerId: "claude",
+            modelId: "openai/gpt-6.1-sol",
+            model: undefined,
+            notice: expect.stringContaining("voice cannot start"),
+        });
+        await expect(f.config.liveControllerRoute()).rejects.toThrow("voice cannot start");
+        expect(f.config.isProviderEnabled("voice")).toBe(true);
+    },
+);
+it.each([
+    [{ controller_provider: "missing" }, "The selected controller account is not configured."],
+    [{ controller_model: "openai/unknown" }, "No configured account offers openai/unknown."],
+    [{ controller_effort: "xhigh" }, "GPT-6.1 Sol does not accept xhigh effort."],
+])("refuses an unusable controller selection %j before storing it", async (update, message) => {
+    const f = await fixture();
+    const refused = f.config.updateRuntimeVoiceSettings(createRootContext(), update);
+    await expect(refused).rejects.toBeInstanceOf(VoiceSettingsError);
+    await expect(refused).rejects.toThrow(message);
+    expect(f.config.voiceSettings).toEqual({});
 });

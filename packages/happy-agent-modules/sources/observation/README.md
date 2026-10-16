@@ -73,6 +73,10 @@ fallen too far behind drops lines and counts them. A truthful gap beats
 unbounded memory, and a log that cannot be written must never become the
 failure it was recording.
 
+On Unix, the writer creates files with owner-only `0600` permissions and tightens existing files
+when opening them. Rotation preserves those permissions. If a non-private file cannot be made
+private, log setup fails closed, like an unopenable log file. Windows keeps its native access controls.
+
 Only scalar log-context fields are recorded, up to 64 per line. A context may
 carry anything a caller had to hand, including objects with cycles or getters
 that throw; a log line is not the place to discover that.

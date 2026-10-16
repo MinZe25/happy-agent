@@ -6,10 +6,17 @@ import {
     type AgentModuleHooks,
 } from "@slopus/happy-agent-base";
 import {
+    LIVE_DESKTOP_CAPABILITIES,
     createLiveSessionRequestSchema,
     liveControlClientMessageSchema,
     liveControlServerMessageSchema,
+    voiceConfigPatchSchema,
     type CreateLiveSessionRequest,
+    type LiveAppState,
+    type LiveDesktopCapability,
+    type LiveDesktopTarget,
+    type VoiceConfig,
+    type VoiceConfigPatch,
     type LiveSession,
     type LiveSessionUpdatedChanges,
     type LiveSessionCreatedPayload,
@@ -21,10 +28,18 @@ import {
     type LiveDesktopContext,
     type LiveSessionRef,
 } from "@slopus/happy-agent-client";
+import type { SessionTool } from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { afterCommit, detach, shutdown, type Context } from "@steve.kite/stdlib";
-import { ConfigModule, VoiceCredentialPoolError } from "../config/index.js";
+import { afterCommit, asyncQueue, detach, shutdown, type Context } from "@steve.kite/stdlib";
+import { BotsModule } from "../bots/index.js";
+import {
+    ConfigModule,
+    VoiceCredentialPoolError,
+    VoiceControllerRouteError,
+    VoiceSettingsError,
+    type VoiceSettingsUpdate,
+} from "../config/index.js";
 import { DurableFunctionsModule } from "../durableFunctions/index.js";
 import { liveVersion } from "./impl/liveVersion.js";
 import { LiveError } from "./LiveError.js";
@@ -36,9 +51,38 @@ import {
     readLiveSession,
     saveLiveSession,
 } from "./persistence/liveSessions.js";
-import { LIVE_VOICE_INSTRUCTIONS } from "./impl/livePrompts.js";
-import { runLiveController } from "./impl/runLiveController.js";
+import {
+    LIVE_LATER_REQUEST_INSTRUCTIONS,
+    LIVE_QUEUED_REQUEST_INSTRUCTIONS,
+    LIVE_VOICE_INSTRUCTIONS,
+} from "./impl/livePrompts.js";
+import {
+    runLiveController,
+    liveControllerConversation,
+    closeLiveController,
+    LIVE_CONTROLLER_TOOLS,
+    LIVE_MODEL_CHANGE_TOOLS,
+    LIVE_TASK_CREATE_TOOLS,
+} from "./impl/runLiveController.js";
+import {
+    liveAppStateAppends,
+    liveAppStateEntities,
+    liveAppStateView,
+    liveTargetKey,
+    renderLiveAppState,
+    renderLiveAppStateUpdate,
+    type LiveAppStatePushed,
+} from "./impl/liveAppState.js";
+import { liveMentionedTarget } from "./impl/liveMentionedTarget.js";
+import { getVoiceSettingsTool } from "./tools/get_voice_settings.js";
+import { setVoiceSettingsTool } from "./tools/set_voice_settings.js";
 import { LiveControllerError } from "./impl/LiveControllerError.js";
+import {
+    liveActionSummary,
+    liveContextSummary,
+    logLiveDiagnostic,
+    type LiveDiagnostic,
+} from "./impl/liveDiagnostics.js";
 import {
     createLiveProviderTransport,
     LiveProviderError,
@@ -47,6 +91,10 @@ import {
 
 const FRAME_BYTES = 256 * 1024;
 const START = "live-start-once";
+/** GPT-Live compacts older context, so a complete AppState is pushed again after this long. */
+const APP_STATE_REFRESH_MS = 10 * 60 * 1000;
+/** A failed background push is tried again after 1, 2, 4… seconds, at most this long apart. */
+const APP_STATE_RETRY_MAX_MS = 60 * 1000;
 type Transport = Awaited<ReturnType<typeof createLiveProviderTransport>>;
 export interface LiveControlSocket {
     send(text: string): void;
@@ -60,9 +108,13 @@ export type LiveEvent =
     | { ownerId: string; type: "live.session.created"; payload: LiveSessionCreatedPayload }
     | { ownerId: string; type: "live.session.updated"; payload: LiveSessionUpdatedPayload };
 interface ActionState {
+    delegationId: string;
     action: LiveDesktopAction;
     result?: LiveDesktopActionResult;
     expired?: true;
+    pendingLogged?: true;
+    lateLogged?: true;
+    startedAt: number;
     resolve: (result: LiveDesktopActionResult) => void;
     timer: ReturnType<typeof setTimeout>;
 }
@@ -82,6 +134,29 @@ interface Call {
     controllerLost?: true;
     attachTimer?: ReturnType<typeof setTimeout>;
     queue: Promise<void>;
+    controllerQueue: ReturnType<typeof asyncQueue>;
+    controller: ReturnType<typeof liveControllerConversation>;
+    /** Accepted desktop capabilities; empty for a desktop that negotiated none. */
+    capabilities: LiveDesktopCapability[];
+    /** The fixed controller arrays those capabilities select, merged once at creation. */
+    tools: readonly SessionTool[];
+    /** The voice model prompt captured when the call started. */
+    voiceInstructions: string;
+    appState?: LiveAppState;
+    /** What the voice model was last told, for quiet diffs; the header time is never part of it. */
+    pushed?: LiveAppStatePushed;
+    fullPushedAt: number;
+    refreshDue?: true;
+    refreshTimer?: ReturnType<typeof setTimeout>;
+    appStateTimer?: ReturnType<typeof setTimeout>;
+    appStateSending?: true;
+    /** Consecutive failed background pushes, for the retry backoff. */
+    appStateFailures?: number;
+    /** Accepted delegations without a delivered outcome; background pushes wait until none remain. */
+    requests: number;
+    heldNotices: Map<string, { text: string; speakable: boolean }>;
+    /** The target voice is currently highlighting, and why. */
+    focus?: { key: string; reason: "mention" | "navigation" };
     queued: number;
     queuedBytes: number;
     fragments: Extract<LiveControlServerMessage, { type: "transcript" }>[];
@@ -89,7 +164,9 @@ interface Call {
     watched: Set<string>;
     updates: Map<string, Extract<LiveControlClientMessage, { type: "sessionUpdate" }>>;
     delegations: Set<string>;
-    controllerBusy: boolean;
+    frequentDiagnostics: number;
+    suppressedDiagnostics: number;
+    diagnosticTimes: Map<string, number>;
 }
 
 /** One window-scoped feature owns its persistence, provider call, control socket and side inference. */
@@ -98,14 +175,17 @@ export class LiveModule implements AgentModule {
     readonly migrations = liveMigrations;
     readonly #config: ConfigModule;
     readonly #durable: DurableFunctionsModule;
+    readonly #bots: BotsModule;
     readonly #calls = new Map<string, Call>();
     readonly #listeners = new Set<(event: LiveEvent) => void>();
+    readonly #settingsListeners = new Set<() => void>();
     #ctx: Context | undefined;
     #stopped = false;
 
-    constructor(config: ConfigModule, durable: DurableFunctionsModule) {
+    constructor(config: ConfigModule, durable: DurableFunctionsModule, bots: BotsModule) {
         this.#config = config;
         this.#durable = durable;
+        this.#bots = bots;
         durable.register({
             name: START,
             argumentsSchema: Type.Object({ id: Type.String() }, { additionalProperties: false }),
@@ -141,7 +221,15 @@ export class LiveModule implements AgentModule {
                 });
             }
         });
-        return {};
+        return {
+            tools: async (toolCtx, scope) =>
+                (await this.#isAdmin(toolCtx, scope.agent.id))
+                    ? [
+                          getVoiceSettingsTool(this, scope.agent.id),
+                          setVoiceSettingsTool(this, scope.agent.id),
+                      ]
+                    : [],
+        };
     };
 
     onEvent(listener: (event: LiveEvent) => void): () => void {
@@ -151,12 +239,91 @@ export class LiveModule implements AgentModule {
         };
     }
 
+    /** The additive desktop capabilities this daemon accepts in a creation request. */
+    get desktopCapabilities(): readonly LiveDesktopCapability[] {
+        return LIVE_DESKTOP_CAPABILITIES;
+    }
+
+    /** Called after a stored voice setting changes. */
+    onSettingsUpdated(listener: () => void): () => void {
+        this.#settingsListeners.add(listener);
+        return () => {
+            this.#settingsListeners.delete(listener);
+        };
+    }
+
+    /** The machine voice settings exactly as `config.voice` reports them. */
+    voiceSettings(): VoiceConfig {
+        const settings = this.#config.voiceSettings;
+        const effective = this.#config.voiceController(settings);
+        return {
+            controller: {
+                providerId: settings.controller_provider ?? null,
+                modelId: settings.controller_model ?? null,
+                effort: settings.controller_effort ?? null,
+                fastMode: settings.controller_fast_mode ?? false,
+            },
+            effectiveController: {
+                providerId: effective.providerId,
+                modelId: effective.modelId,
+                effort: effective.effort,
+                serviceTier: effective.serviceTier,
+                notice: effective.notice,
+            },
+            defaultSystemPrompt: LIVE_VOICE_INSTRUCTIONS,
+            systemPromptOverride: settings.system_prompt ?? null,
+            effectiveSystemPrompt: settings.system_prompt ?? LIVE_VOICE_INSTRUCTIONS,
+        };
+    }
+
+    /**
+     * HTTP authorization is owned by API. Omitted values are unchanged, `null` removes the stored
+     * value, and the built-in prompt is never stored. Throws VoiceSettingsError for a refused change.
+     */
+    async updateVoiceSettings(ctx: Context, patch: VoiceConfigPatch): Promise<VoiceConfig> {
+        if (!Value.Check(voiceConfigPatchSchema, patch))
+            throw new VoiceSettingsError("The voice settings are invalid.");
+        const controller = patch.controller;
+        const prompt = patch.systemPrompt;
+        const update: VoiceSettingsUpdate = {
+            ...(controller?.providerId === undefined
+                ? {}
+                : { controller_provider: controller.providerId }),
+            ...(controller?.modelId === undefined ? {} : { controller_model: controller.modelId }),
+            ...(controller?.effort === undefined ? {} : { controller_effort: controller.effort }),
+            ...(controller?.fastMode === undefined
+                ? {}
+                : { controller_fast_mode: controller.fastMode }),
+            ...(prompt === undefined
+                ? {}
+                : { system_prompt: prompt === LIVE_VOICE_INSTRUCTIONS ? null : prompt }),
+        };
+        if (await this.#config.updateRuntimeVoiceSettings(ctx, update))
+            for (const listener of this.#settingsListeners) listener();
+        return this.voiceSettings();
+    }
+
+    async voiceSettingsForAdmin(ctx: Context, agentId: string): Promise<VoiceConfig> {
+        await this.#requireAdmin(ctx, agentId);
+        return this.voiceSettings();
+    }
+
+    async updateVoiceSettingsForAdmin(
+        ctx: Context,
+        agentId: string,
+        patch: VoiceConfigPatch,
+    ): Promise<VoiceConfig> {
+        await this.#requireAdmin(ctx, agentId);
+        return await this.updateVoiceSettings(ctx, patch);
+    }
+
     /** Returns an allocation barrier, without waiting for external work in the caller's transaction. */
     async reserve(
         ctx: Context,
         ownerId: string,
         request: CreateLiveSessionRequest,
     ): Promise<{ session: LiveSession; allocated: Promise<string> }> {
+        const capabilities = acceptedCapabilities(request.desktopCapabilities);
         if (
             !Value.Check(createLiveSessionRequestSchema, request) ||
             request.windowId !== request.context.windowId ||
@@ -166,7 +333,11 @@ export class LiveModule implements AgentModule {
                     revision: request.contextRevision,
                     context: request.context,
                 }),
-            ) > FRAME_BYTES
+            ) > FRAME_BYTES ||
+            (request.appState !== undefined &&
+                (!capabilities.includes("appState") ||
+                    Buffer.byteLength(JSON.stringify(request.appState)) > FRAME_BYTES)) ||
+            (!capabilities.includes("appState") && namesTask(request.context))
         ) {
             throw new LiveError(
                 400,
@@ -179,11 +350,13 @@ export class LiveModule implements AgentModule {
         let credential: Call["credential"];
         try {
             route = await this.#config.liveControllerRoute();
-        } catch {
+        } catch (error) {
             throw new LiveError(
                 503,
                 "live_unavailable",
-                "Voice cannot use the default controller model. Check the enabled default model and its accounts.",
+                error instanceof VoiceControllerRouteError
+                    ? error.message
+                    : "Voice cannot use the selected controller model. Check the voice settings and the selected account.",
             );
         }
         try {
@@ -235,6 +408,8 @@ export class LiveModule implements AgentModule {
                 version: liveVersion(),
             };
             await saveLiveSession(tx, ownerId, session);
+            const voiceInstructions =
+                this.#config.voiceSettings.system_prompt ?? LIVE_VOICE_INSTRUCTIONS;
             const call: Call = {
                 ownerId,
                 session,
@@ -247,6 +422,21 @@ export class LiveModule implements AgentModule {
                 allocated: deferred<string>(),
                 claimed: false,
                 queue: Promise.resolve(),
+                controllerQueue: asyncQueue(),
+                controller: liveControllerConversation(),
+                capabilities,
+                tools: [
+                    ...LIVE_CONTROLLER_TOOLS,
+                    ...(capabilities.includes("taskCreate") ? LIVE_TASK_CREATE_TOOLS : []),
+                    ...(capabilities.includes("sessionModelChange") ? LIVE_MODEL_CHANGE_TOOLS : []),
+                ],
+                voiceInstructions,
+                ...(request.appState === undefined
+                    ? {}
+                    : { appState: structuredClone(request.appState) }),
+                fullPushedAt: 0,
+                requests: 0,
+                heldNotices: new Map(),
                 queued: 0,
                 queuedBytes: 0,
                 fragments: [],
@@ -254,12 +444,25 @@ export class LiveModule implements AgentModule {
                 watched: new Set(),
                 updates: new Map(),
                 delegations: new Set(),
-                controllerBusy: false,
+                frequentDiagnostics: 0,
+                suppressedDiagnostics: 0,
+                diagnosticTimes: new Map(),
             };
             // Observe rejection even when an outer transaction rolls back or the HTTP caller leaves.
             void call.allocated.promise.catch(() => undefined);
             afterCommit(tx, () => {
                 this.#calls.set(id, call);
+                this.#diagnostic(call, {
+                    event: "session.created",
+                    controllerProviderId: route.model.providerId,
+                    model: route.model.id,
+                    effort: route.effort,
+                    ...(route.serviceTier === undefined ? {} : { serviceTier: route.serviceTier }),
+                    capabilities,
+                    credentialKind: session.credential.type,
+                    credentialProviderId: session.credential.providerId,
+                    context: liveContextSummary(call.context),
+                });
                 this.#emit({
                     ownerId,
                     type: "live.session.created",
@@ -357,12 +560,16 @@ export class LiveModule implements AgentModule {
                     return { message() {}, closed() {} };
                 }
                 call.socket = socket;
+                this.#diagnostic(call, { event: "control.attached" });
                 clearTimeout(call.attachTimer);
                 this.#send(call, {
                     type: "hello",
                     sessionId: id,
                     windowId,
                     contextRevision: call.session.contextRevision,
+                    ...(call.request.desktopCapabilities === undefined
+                        ? {}
+                        : { capabilities: call.capabilities }),
                 });
                 this.#send(call, {
                     type: "status",
@@ -384,6 +591,10 @@ export class LiveModule implements AgentModule {
                         }),
                     closed: () => {
                         if (!terminal(call.session) && call.session.status !== "closing") {
+                            this.#diagnostic(call, {
+                                event: "control.lost",
+                                reason: "connectionLost",
+                            });
                             call.controllerLost = true;
                             delete call.socket;
                             void this.close(this.#context(), ownerId, id).catch(() =>
@@ -409,10 +620,13 @@ export class LiveModule implements AgentModule {
 
     async #start(call: Call): Promise<void> {
         try {
+            const now = Date.now();
+            const snapshot = renderLiveAppState(this.#view(call), now);
             call.transport = await createLiveProviderTransport({
                 credential: call.credential,
                 sdp: call.request.sdp,
-                instructions: LIVE_VOICE_INSTRUCTIONS,
+                instructions: call.voiceInstructions,
+                initialContext: `# ${snapshot.title}\n\n${snapshot.body}`,
                 signal: call.abort.signal,
                 onEvent: (event) =>
                     this.#enqueue(call, Buffer.byteLength(JSON.stringify(event)), () =>
@@ -420,6 +634,16 @@ export class LiveModule implements AgentModule {
                     ),
             });
             call.request.sdp = "";
+            delete call.request.appState;
+            call.pushed = snapshot.pushed;
+            call.fullPushedAt = now;
+            this.#scheduleRefresh(call);
+            this.#diagnostic(call, {
+                event: "appState.pushed",
+                snapshotKind: "full",
+                appendCount: 1,
+                bytes: Buffer.byteLength(snapshot.body),
+            });
             if (terminal(call.session) || call.session.status === "closing") {
                 call.transport.dispose();
                 throw new Error("Voice stopped during startup.");
@@ -445,7 +669,17 @@ export class LiveModule implements AgentModule {
     async #providerEvent(call: Call, event: LiveProviderEvent): Promise<void> {
         if (terminal(call.session)) return;
         if (event.type === "ready") {
-            if (call.session.status === "starting") await this.#change(call, { status: "active" });
+            this.#diagnostic(call, { event: "provider.ready" });
+            if (call.session.status === "starting") {
+                await this.#change(call, { status: "active" });
+                // AppState that changed during startup reaches voice once it can be told.
+                if (
+                    call.pushed !== undefined &&
+                    renderLiveAppStateUpdate(call.pushed, this.#view(call), Date.now()) !==
+                        undefined
+                )
+                    this.#queueAppState(call);
+            }
         } else if (event.type === "usage") {
             await this.#change(call, {
                 usage: event.final
@@ -484,6 +718,12 @@ export class LiveModule implements AgentModule {
             if (!Value.Check(liveControlServerMessageSchema, fragment))
                 throw new Error("The voice transcript exceeded its protocol limits.");
             call.fragments.push(fragment);
+            this.#diagnostic(call, {
+                event: "transcript.received",
+                transcriptId: fragment.transcriptId,
+                role: fragment.role,
+                characters: fragment.text.length,
+            });
             while (
                 call.fragments.length > 32 ||
                 Buffer.byteLength(JSON.stringify(call.fragments)) > 65536
@@ -497,96 +737,176 @@ export class LiveModule implements AgentModule {
             if (call.delegations.size >= 256)
                 throw new Error("Voice exceeded its bounded delegation capacity.");
             call.delegations.add(event.delegationId);
-            if (call.controllerBusy) {
-                await call.transport
-                    ?.append({
-                        delegationId: event.delegationId,
-                        text: "The desktop controller is busy with the previous request. Ask again when it finishes.",
-                        speakable: call.credential.type === "codex_subscription",
-                    })
-                    .catch(() => undefined);
-                return;
-            }
-            call.controllerBusy = true;
+            // Background AppState waits until this request's outcome is delivered.
+            call.requests += 1;
             const fragments = [...call.fragments];
-            void runLiveController(detach(this.#context()).named("live-desktop-delegation"), {
-                provider: call.route.provider,
-                model: call.route.model.id,
-                effort: call.route.model.defaultEffort,
-                signal: AbortSignal.any([call.controllerAbort.signal, call.route.signal]),
-                context: structuredClone(call.context),
-                fragments,
-                sessionUpdates: [...call.updates.values()],
-                ...(event.text === undefined ? {} : { delegationText: event.text }),
-                execute: (action) =>
-                    this.#action(
-                        call,
-                        action,
-                        fragments.map((fragment) => fragment.transcriptId),
-                    ),
-            })
-                .catch(async (error: unknown) => {
-                    if (call.session.status !== "active") return undefined;
-                    if (call.route.signal.aborted) {
-                        await this.#fail(
+            const queuedAt = Date.now();
+            this.#diagnostic(call, {
+                event: "delegation.queued",
+                delegationId: event.delegationId,
+                characters: event.text?.length ?? 0,
+                fragmentCount: fragments.length,
+                inputTranscriptIds: fragments.map((fragment) => fragment.transcriptId),
+                inFlight: call.requests,
+            });
+            let startedAt = queuedAt;
+            const run = async (ctx: Context): Promise<string | undefined> => {
+                if (call.session.status !== "active" || call.controllerAbort.signal.aborted)
+                    return undefined;
+                if (Date.now() - queuedAt >= 120_000)
+                    return "This desktop request expired while waiting in the queue. No action was started for it.";
+                startedAt = Date.now();
+                const mentioned = liveMentionedTarget(
+                    this.#view(call),
+                    event.text ??
+                        fragments
+                            .filter((fragment) => fragment.role === "user")
+                            .slice(-4)
+                            .map((fragment) => fragment.text)
+                            .join("\n"),
+                );
+                if (mentioned !== undefined) this.#focus(call, mentioned, "mention");
+                this.#diagnostic(call, {
+                    event: "delegation.started",
+                    delegationId: event.delegationId,
+                    characters: event.text?.length ?? 0,
+                    fragmentCount: fragments.length,
+                    snapshotCount: call.updates.size,
+                    inputTranscriptIds: fragments.map((fragment) => fragment.transcriptId),
+                    context: liveContextSummary(call.context),
+                });
+                return await runLiveController(ctx, {
+                    provider: call.route.provider,
+                    conversation: call.controller,
+                    model: call.route.model.id,
+                    effort: call.route.effort,
+                    ...(call.route.serviceTier === undefined
+                        ? {}
+                        : { serviceTier: call.route.serviceTier }),
+                    tools: call.tools,
+                    signal: AbortSignal.any([call.controllerAbort.signal, call.route.signal]),
+                    context: structuredClone(call.context),
+                    ...(call.appState === undefined
+                        ? {}
+                        : { appState: structuredClone(call.appState) }),
+                    fragments,
+                    sessionUpdates: [...call.updates.values()],
+                    ...(event.text === undefined ? {} : { delegationText: event.text }),
+                    execute: (action) =>
+                        this.#execute(
                             call,
-                            "The configured desktop controller account is no longer available.",
-                        );
-                        return undefined;
-                    }
-                    const failure =
-                        error instanceof LiveControllerError
-                            ? error
-                            : new LiveControllerError("inference");
-                    for (const pending of call.actions.values()) {
-                        if (pending.result === undefined) {
-                            pending.expired = true;
-                            clearTimeout(pending.timer);
-                            pending.resolve({
-                                status: "failed",
-                                code: "failed",
-                                message:
-                                    "The controller request ended before the action's outcome was confirmed.",
-                            });
-                        }
-                    }
-                    try {
-                        this.#context().log.warn(
-                            `live:controller-request-failed session=${call.session.id} delegation=${event.delegationId} category=${failure.category} actions=${call.actions.size}`,
-                        );
-                    } catch {
-                        // Optional diagnostics cannot turn a recoverable request into a failed call.
-                    }
-                    if (failure.category === "capacity") {
-                        await this.#fail(call, failure.message);
-                        return undefined;
-                    }
-                    return failure.voiceContext;
+                            event.delegationId,
+                            action,
+                            fragments.map((fragment) => fragment.transcriptId),
+                        ),
                 })
-                .then(async (text) => {
-                    if (
-                        text !== undefined &&
-                        !terminal(call.session) &&
-                        call.session.status === "active"
-                    ) {
-                        if (call.transport === undefined)
-                            throw new Error("The voice transport is unavailable.");
-                        await call.transport.append({
+                    .then(({ text, outcome }) => {
+                        this.#diagnostic(call, {
+                            event: "controller.finished",
                             delegationId: event.delegationId,
-                            text: text || "The desktop request has completed.",
-                            speakable: true,
+                            durationMs: Date.now() - startedAt,
+                            characters: text.length,
+                            outcome,
                         });
-                    }
-                })
-                .catch(async () => {
-                    if (call.session.status === "active")
-                        await this.#fail(
-                            call,
-                            "Voice could not deliver the desktop controller's response. Its outcome was not retried.",
-                        );
-                })
+                        return text;
+                    })
+                    .catch(async (error: unknown) => {
+                        if (call.session.status !== "active") return undefined;
+                        if (call.route.signal.aborted) {
+                            await this.#fail(
+                                call,
+                                "The configured desktop controller account is no longer available.",
+                            );
+                            return undefined;
+                        }
+                        const failure =
+                            error instanceof LiveControllerError
+                                ? error
+                                : new LiveControllerError("inference");
+                        const actionCount = [...call.actions.values()].filter(
+                            (pending) => pending.delegationId === event.delegationId,
+                        ).length;
+                        this.#diagnostic(call, {
+                            event: "controller.failed",
+                            delegationId: event.delegationId,
+                            durationMs: Date.now() - startedAt,
+                            category: failure.category,
+                            ...(failure.detail === undefined ? {} : { detail: failure.detail }),
+                            actionCount,
+                        });
+                        for (const pending of call.actions.values()) {
+                            if (
+                                pending.delegationId === event.delegationId &&
+                                pending.result === undefined
+                            ) {
+                                pending.expired = true;
+                                clearTimeout(pending.timer);
+                                pending.resolve({
+                                    status: "failed",
+                                    code: "failed",
+                                    message:
+                                        "The controller request ended before the action's outcome was confirmed.",
+                                });
+                            }
+                        }
+                        if (failure.category === "capacity") {
+                            await this.#fail(call, failure.message);
+                            return undefined;
+                        }
+                        return failure.voiceContext;
+                    });
+            };
+            // Delivery and this request's focus cleanup stay inside its FIFO turn, so a queued
+            // request never highlights or acts while the previous outcome is still being appended.
+            void call.controllerQueue
+                .runInLock(detach(this.#context()).named("live-desktop-delegation"), (ctx) =>
+                    run(ctx)
+                        .then(async (text) => {
+                            if (
+                                text !== undefined &&
+                                !terminal(call.session) &&
+                                call.session.status === "active"
+                            ) {
+                                if (call.transport === undefined)
+                                    throw new Error("The voice transport is unavailable.");
+                                const inFlight = call.requests;
+                                const outcomeHint = inFlight > 1 ? "queued" : "later";
+                                const instructions =
+                                    outcomeHint === "queued"
+                                        ? LIVE_QUEUED_REQUEST_INSTRUCTIONS
+                                        : LIVE_LATER_REQUEST_INSTRUCTIONS;
+                                await call.transport.append({
+                                    delegationId: event.delegationId,
+                                    text: `${text || "The desktop request has completed."}\n\n${instructions}`,
+                                    speakable: true,
+                                });
+                                this.#diagnostic(call, {
+                                    event: "delegation.delivered",
+                                    delegationId: event.delegationId,
+                                    inFlight,
+                                    outcomeHint,
+                                    durationMs: Date.now() - startedAt,
+                                });
+                            }
+                        })
+                        .catch(async () => {
+                            this.#diagnostic(call, {
+                                event: "delivery.failed",
+                                delegationId: event.delegationId,
+                                reason: "responseDelivery",
+                                durationMs: Date.now() - startedAt,
+                            });
+                            if (call.session.status === "active")
+                                await this.#fail(
+                                    call,
+                                    "Voice could not deliver the desktop controller's response. Its outcome was not retried.",
+                                );
+                        })
+                        .finally(() => this.#clearFocus(call)),
+                )
                 .finally(() => {
-                    call.controllerBusy = false;
+                    call.requests -= 1;
+                    if (call.requests === 0) this.#releaseHeld(call);
                 });
         }
     }
@@ -602,6 +922,8 @@ export class LiveModule implements AgentModule {
                     throw new Error("Conflicting desktop contexts used the same revision.");
                 return;
             }
+            if (!call.capabilities.includes("appState") && namesTask(message.context))
+                throw new Error("The desktop named a task without negotiating AppState.");
             call.context = message.context;
             const activeKey =
                 message.context.activeSession === null
@@ -610,16 +932,43 @@ export class LiveModule implements AgentModule {
             for (const key of call.updates.keys())
                 if (key !== activeKey && !call.watched.has(key)) call.updates.delete(key);
             await this.#change(call, { contextRevision: message.revision });
+            this.#diagnostic(call, {
+                event: "context.accepted",
+                context: liveContextSummary(call.context),
+            });
+            this.#queueAppState(call);
         } else if (message.type === "actionResult") {
             const pending = call.actions.get(message.actionId);
             if (pending === undefined) throw new Error("The desktop answered an unknown action.");
-            if (pending.expired) return;
+            if (pending.expired) {
+                if (!pending.lateLogged) {
+                    pending.lateLogged = true;
+                    this.#diagnostic(call, {
+                        event: "action.lateIgnored",
+                        delegationId: pending.delegationId,
+                        actionId: message.actionId,
+                        actionType: pending.action.type,
+                    });
+                }
+                return;
+            }
             if (pending.result !== undefined) {
                 if (!Value.Equal(pending.result, message.result))
                     throw new Error("The desktop changed a completed action result.");
                 return;
             }
             if (message.result.status === "pending") {
+                if (!pending.pendingLogged) {
+                    pending.pendingLogged = true;
+                    this.#diagnostic(call, {
+                        event: "action.result",
+                        delegationId: pending.delegationId,
+                        actionId: message.actionId,
+                        actionType: pending.action.type,
+                        resultStatus: "pending",
+                        durationMs: Date.now() - pending.startedAt,
+                    });
+                }
                 if (pending.action.type === "sessionSend")
                     throw new Error(
                         "Message staging cannot wait for human confirmation as a pending action.",
@@ -647,7 +996,33 @@ export class LiveModule implements AgentModule {
             }
             clearTimeout(pending.timer);
             pending.result = message.result;
+            this.#diagnostic(call, {
+                event: "action.result",
+                delegationId: pending.delegationId,
+                actionId: message.actionId,
+                actionType: pending.action.type,
+                resultStatus: message.result.status,
+                durationMs: Date.now() - pending.startedAt,
+                ...(message.result.status === "succeeded"
+                    ? {
+                          outputType: message.result.output.type,
+                          ...(message.result.output.type === "context"
+                              ? { context: liveContextSummary(message.result.output.context) }
+                              : {}),
+                      }
+                    : { resultCode: message.result.code }),
+            });
             pending.resolve(message.result);
+        } else if (message.type === "appState") {
+            if (!call.capabilities.includes("appState"))
+                throw new Error("The desktop sent AppState without negotiating it.");
+            if (call.appState !== undefined && Value.Equal(call.appState, message.appState)) return;
+            call.appState = message.appState;
+            this.#diagnostic(call, {
+                event: "appState.accepted",
+                bytes: Buffer.byteLength(JSON.stringify(message.appState)),
+            });
+            this.#queueAppState(call);
         } else {
             const key = sessionKey(message.target);
             if (
@@ -667,6 +1042,8 @@ export class LiveModule implements AgentModule {
                 throw new Error("The desktop updated an inaccessible conversation.");
             const previous = call.updates.get(key);
             if (previous !== undefined && Value.Equal(previous, message)) return;
+            // Without AppState, the focused conversation's latest message comes from its snapshot.
+            if (!call.capabilities.includes("appState")) this.#queueAppState(call);
             const priorStatus =
                 previous?.status ??
                 (call.context.activeSession !== null &&
@@ -674,6 +1051,12 @@ export class LiveModule implements AgentModule {
                     ? call.context.activeSession.status
                     : undefined);
             call.updates.set(key, message);
+            this.#diagnostic(call, {
+                event: "session.snapshot",
+                target: message.target,
+                characters: message.messages.reduce((sum, item) => sum + item.text.length, 0),
+                snapshotCount: call.updates.size,
+            });
             if (
                 call.updates.size > 6 ||
                 Buffer.byteLength(JSON.stringify([...call.updates.values()])) > 128 * 1024
@@ -690,22 +1073,54 @@ export class LiveModule implements AgentModule {
                 call.context.sessions.find((item) => sessionKey(item.target) === key)?.title ??
                 call.context.bots.find((item) => sessionKey(item.target) === key)?.name;
             const lastAssistant = message.messages.findLast((item) => item.role === "assistant");
-            await call.transport
-                ?.append({
-                    delegationId: null,
-                    text: JSON.stringify({
-                        title: title?.slice(0, 256) ?? "Selected conversation",
-                        status: message.status,
-                        lastAssistantMessage: lastAssistant?.text.slice(0, 1600) ?? null,
-                    }),
-                    speakable,
-                })
-                .catch(() => undefined);
+            const notice = {
+                text: JSON.stringify({
+                    title: title?.slice(0, 256) ?? "Selected conversation",
+                    status: message.status,
+                    lastAssistantMessage: lastAssistant?.text.slice(0, 1600) ?? null,
+                }),
+                speakable,
+            };
+            // Like AppState, a status notice never reaches voice while a request awaits its outcome.
+            if (call.requests > 0) {
+                call.heldNotices.delete(key);
+                call.heldNotices.set(key, notice);
+                return;
+            }
+            await call.transport?.append({ delegationId: null, ...notice }).catch(() => undefined);
         }
+    }
+
+    /**
+     * The desktop stages and appends only in the focused conversation, and models opened it
+     * without then staging. A send or draft names its conversation, so one that is not focused is
+     * opened first; a refused open is that action's result and nothing is staged.
+     */
+    async #execute(
+        call: Call,
+        delegationId: string,
+        action: LiveDesktopAction,
+        inputTranscriptIds: string[],
+    ): Promise<LiveDesktopActionResult> {
+        if (
+            (action.type === "sessionSend" || action.type === "composerDraftAppend") &&
+            (call.context.activeSession === null ||
+                liveTargetKey(call.context.activeSession.target) !== liveTargetKey(action.target))
+        ) {
+            const opened = await this.#action(
+                call,
+                delegationId,
+                { type: "desktopOpen", target: this.#conversationTarget(call, action.target) },
+                inputTranscriptIds,
+            );
+            if (opened.status !== "succeeded") return opened;
+        }
+        return await this.#action(call, delegationId, action, inputTranscriptIds);
     }
 
     async #action(
         call: Call,
+        delegationId: string,
         action: LiveDesktopAction,
         inputTranscriptIds: string[],
     ): Promise<LiveDesktopActionResult> {
@@ -713,25 +1128,76 @@ export class LiveModule implements AgentModule {
             throw new Error("Voice cannot start another desktop action.");
         if (call.actions.size >= 256) throw new LiveControllerError("capacity");
         if (
-            action.type === "sessionWatch" &&
-            action.enabled &&
-            !call.watched.has(sessionKey(action.target)) &&
-            call.watched.size >= 5
+            [...call.actions.values()].some(
+                (pending) => pending.result === undefined && !pending.expired,
+            )
         )
-            return {
-                status: "refused",
-                code: "unavailable",
-                message: "At most five conversations can be watched.",
-            };
+            throw new LiveControllerError("invalidAction");
+        if (
+            (action.type === "taskCreate" && !call.capabilities.includes("taskCreate")) ||
+            (action.type === "sessionModelChange" &&
+                !call.capabilities.includes("sessionModelChange")) ||
+            (action.type === "desktopOpen" &&
+                action.target.kind === "task" &&
+                !call.capabilities.includes("appState"))
+        )
+            throw new LiveControllerError("invalidAction");
+        if (action.type === "sessionWatch" && action.enabled) {
+            const targets = new Set(call.watched);
+            for (const pending of call.actions.values())
+                if (
+                    !pending.expired &&
+                    pending.result === undefined &&
+                    pending.action.type === "sessionWatch" &&
+                    pending.action.enabled
+                )
+                    targets.add(sessionKey(pending.action.target));
+            if (!targets.has(sessionKey(action.target)) && targets.size >= 5)
+                return {
+                    status: "refused",
+                    code: "unavailable",
+                    message: "At most five conversations can be watched.",
+                };
+        }
         const actionId = createId();
+        const startedAt = Date.now();
         const result = deferred<LiveDesktopActionResult>();
         const timer = setTimeout(() => {
             const pending = call.actions.get(actionId);
             if (pending !== undefined) pending.expired = true;
-            result.reject(new LiveControllerError("uncertainAction"));
+            this.#diagnostic(call, {
+                event: "action.expired",
+                delegationId,
+                actionId,
+                actionType: action.type,
+                durationMs: Date.now() - startedAt,
+                reason: "actionTimeout",
+            });
+            result.reject(
+                new LiveControllerError("uncertainAction", {
+                    phase: "desktopAction",
+                    reason: "actionUncertain",
+                }),
+            );
         }, 60_000);
         timer.unref();
-        call.actions.set(actionId, { action, resolve: result.resolve, timer });
+        call.actions.set(actionId, {
+            delegationId,
+            action,
+            resolve: result.resolve,
+            timer,
+            startedAt,
+        });
+        this.#diagnostic(call, {
+            event: "action.requested",
+            delegationId,
+            actionId,
+            ...liveActionSummary(action),
+            context: liveContextSummary(call.context),
+        });
+        const target = this.#actionTarget(call, action);
+        if (target !== undefined)
+            this.#focus(call, target, action.type === "desktopOpen" ? "navigation" : "mention");
         this.#send(call, {
             type: "actionRequested",
             actionId,
@@ -750,12 +1216,13 @@ export class LiveModule implements AgentModule {
         }
         call.queue = call.queue
             .then(work)
-            .catch(() =>
-                this.#fail(
+            .catch(() => {
+                this.#diagnostic(call, { event: "control.invalid", reason: "invalidControlData" });
+                return this.#fail(
                     call,
                     "Voice received invalid or conflicting control data and ended safely.",
-                ),
-            )
+                );
+            })
             .finally(() => {
                 call.queued -= 1;
                 call.queuedBytes -= bytes;
@@ -802,6 +1269,8 @@ export class LiveModule implements AgentModule {
             const call = this.#calls.get(session.id);
             if (call !== undefined) {
                 call.session = session;
+                if (changes.status !== undefined)
+                    this.#diagnostic(call, { event: "session.status", status: session.status });
                 this.#send(call, { type: "status", status: session.status, error: session.error });
             }
             this.#emit({
@@ -845,20 +1314,237 @@ export class LiveModule implements AgentModule {
     }
     #dispose(call: Call): void {
         clearTimeout(call.attachTimer);
+        clearTimeout(call.appStateTimer);
+        clearTimeout(call.refreshTimer);
         this.#cancelActions(call);
         call.abort.abort();
         call.controllerAbort.abort();
+        closeLiveController(call.controller);
         call.transport?.dispose();
         call.socket?.close(1000, "Voice has ended.");
         this.#calls.delete(call.session.id);
     }
+    /** The AppState voice is told about: the desktop's own, or one derived from its context. */
+    #view(call: Call) {
+        return liveAppStateView(call.context, call.appState, [...call.updates.values()]);
+    }
+
+    /** Coalesce for 250 ms with one push in flight; a running request holds pushes until it ends. */
+    #queueAppState(call: Call, delayMs = 250): void {
+        if (
+            call.appStateTimer !== undefined ||
+            call.appStateSending ||
+            call.requests > 0 ||
+            call.session.status !== "active"
+        )
+            return;
+        call.appStateTimer = setTimeout(() => {
+            delete call.appStateTimer;
+            void this.#pushAppState(call);
+        }, delayMs);
+        call.appStateTimer.unref();
+    }
+
+    /**
+     * Voice counts as told only after every part is appended. A request that starts between parts
+     * holds the rest, and a failed append is pushed again after a bounded backoff; either way the
+     * next push is computed afresh against what voice was last fully told.
+     */
+    async #pushAppState(call: Call): Promise<void> {
+        const transport = call.transport;
+        if (call.session.status !== "active" || transport === undefined || call.requests > 0)
+            return;
+        const now = Date.now();
+        const view = this.#view(call);
+        const full =
+            call.pushed === undefined ||
+            call.refreshDue === true ||
+            now - call.fullPushedAt >= APP_STATE_REFRESH_MS;
+        // Only the startup snapshot is bounded; a later complete snapshot is split, never truncated.
+        const rendered = full
+            ? renderLiveAppState(view, now, Number.POSITIVE_INFINITY)
+            : renderLiveAppStateUpdate(call.pushed!, view, now);
+        if (rendered === undefined) return;
+        const appends = liveAppStateAppends(rendered.title, rendered.body);
+        call.appStateSending = true;
+        let retryMs: number | undefined;
+        let delivered = 0;
+        try {
+            for (const text of appends) {
+                if (call.requests > 0 || call.session.status !== "active") {
+                    if (delivered > 0) call.refreshDue = true;
+                    return;
+                }
+                await transport.append({ delegationId: null, text, speakable: false });
+                delivered += 1;
+            }
+            call.pushed = rendered.pushed;
+            delete call.appStateFailures;
+            if (full) {
+                delete call.refreshDue;
+                call.fullPushedAt = now;
+                this.#scheduleRefresh(call);
+            }
+            this.#diagnostic(call, {
+                event: "appState.pushed",
+                snapshotKind: full ? "full" : "update",
+                appendCount: appends.length,
+                bytes: appends.reduce((sum, text) => sum + Buffer.byteLength(text), 0),
+            });
+        } catch {
+            // AppState is background context; a failed append never fails the call.
+            // A partial delivery may have changed facts that later reverted to the old baseline.
+            if (delivered > 0) call.refreshDue = true;
+            call.appStateFailures = (call.appStateFailures ?? 0) + 1;
+            retryMs = Math.min(APP_STATE_RETRY_MAX_MS, 1000 * 2 ** (call.appStateFailures - 1));
+        } finally {
+            delete call.appStateSending;
+            this.#queueAppState(call, retryMs);
+        }
+    }
+
+    #scheduleRefresh(call: Call): void {
+        clearTimeout(call.refreshTimer);
+        call.refreshTimer = setTimeout(() => {
+            call.refreshDue = true;
+            this.#queueAppState(call);
+        }, APP_STATE_REFRESH_MS);
+        call.refreshTimer.unref();
+    }
+
+    /** Deliver what waited for a request's outcome: status notices first, then AppState. */
+    #releaseHeld(call: Call): void {
+        const notices = [...call.heldNotices.values()];
+        call.heldNotices.clear();
+        if (call.session.status === "active")
+            for (const notice of notices)
+                void call.transport
+                    ?.append({ delegationId: null, ...notice })
+                    .catch(() => undefined);
+        this.#queueAppState(call);
+    }
+
+    /**
+     * Highlight what voice is talking about. Decorative, and never sent without the capability.
+     * The same target is repeated only to announce that it is about to be opened.
+     */
+    #focus(call: Call, target: LiveDesktopTarget, reason: "mention" | "navigation"): void {
+        const key = liveTargetKey(target);
+        if (
+            !call.capabilities.includes("voiceFocus") ||
+            (call.focus?.key === key && (reason === "mention" || call.focus.reason === reason))
+        )
+            return;
+        call.focus = { key, reason };
+        this.#send(call, {
+            type: "voiceFocus",
+            focusId: createId(),
+            contextRevision: call.session.contextRevision,
+            target,
+            reason,
+        });
+        this.#diagnostic(call, { event: "focus.sent", focusReason: reason });
+    }
+
+    #clearFocus(call: Call): void {
+        if (call.focus === undefined) return;
+        delete call.focus;
+        if (terminal(call.session)) return;
+        this.#send(call, {
+            type: "voiceFocus",
+            focusId: createId(),
+            contextRevision: call.session.contextRevision,
+            target: null,
+            reason: "mention",
+        });
+        this.#diagnostic(call, { event: "focus.sent", focusReason: "clear" });
+    }
+
+    /** The desktop target an action is about, named as the sidebar names it. */
+    #actionTarget(call: Call, action: LiveDesktopAction): LiveDesktopTarget | undefined {
+        if (action.type === "desktopOpen") return action.target;
+        return "target" in action ? this.#conversationTarget(call, action.target) : undefined;
+    }
+
+    /** A conversation as the sidebar shows it: a bot, a task, or an ordinary session. */
+    #conversationTarget(call: Call, ref: LiveSessionRef): LiveDesktopTarget {
+        const key = liveTargetKey(ref);
+        return (
+            liveAppStateEntities(this.#view(call)).find((entity) => entity.key === key)?.target ??
+            call.context.bots.find((bot) => liveTargetKey(bot.target) === key)?.target ?? {
+                kind: "session",
+                ...ref,
+            }
+        );
+    }
+
+    async #requireAdmin(ctx: Context, agentId: string): Promise<void> {
+        if (!(await this.#isAdmin(ctx, agentId)))
+            throw new Error("Only an active admin bot can read or change voice settings.");
+    }
+
+    async #isAdmin(ctx: Context, agentId: string): Promise<boolean> {
+        const bot = await this.#bots.forAgent(ctx, agentId);
+        return bot?.isAdmin === true && bot.status === "active";
+    }
+
     #emit(event: LiveEvent): void {
         for (const listener of this.#listeners) listener(event);
+    }
+    #diagnostic(call: Call, diagnostic: LiveDiagnostic): void {
+        try {
+            const now = Date.now();
+            // Only these three streaming event kinds may grow independently of the call's action bounds.
+            if (
+                diagnostic.event === "context.accepted" ||
+                diagnostic.event === "transcript.received" ||
+                diagnostic.event === "session.snapshot"
+            ) {
+                if (
+                    call.frequentDiagnostics >= 1024 ||
+                    now - (call.diagnosticTimes.get(diagnostic.event) ?? 0) < 100
+                ) {
+                    call.suppressedDiagnostics++;
+                    return;
+                }
+                call.frequentDiagnostics++;
+                call.diagnosticTimes.set(diagnostic.event, now);
+            }
+            logLiveDiagnostic(
+                this.#context(),
+                {
+                    sessionId: call.session.id,
+                    windowId: call.session.windowId,
+                    contextRevision: call.session.contextRevision,
+                    elapsedMs: now - call.session.createdAt,
+                    suppressed: call.suppressedDiagnostics,
+                },
+                diagnostic,
+            );
+        } catch {
+            // Diagnostics are optional and may not interfere with the media or controller.
+        }
     }
     #context(): Context {
         if (this.#ctx === undefined) throw new Error("Voice has not started.");
         return this.#ctx;
     }
+}
+
+/** The daemon's capabilities the desktop asked for; task and model actions need AppState. */
+function acceptedCapabilities(requested: unknown): LiveDesktopCapability[] {
+    if (!Array.isArray(requested)) return [];
+    const accepted = LIVE_DESKTOP_CAPABILITIES.filter((name) => requested.includes(name));
+    return accepted.filter(
+        (name) =>
+            (name !== "taskCreate" && name !== "sessionModelChange") ||
+            accepted.includes("appState"),
+    );
+}
+
+/** Task targets exist only for desktops that negotiated AppState. */
+function namesTask(context: LiveDesktopContext): boolean {
+    return context.activeTarget?.kind === "task";
 }
 
 function terminal(session: LiveSession): boolean {

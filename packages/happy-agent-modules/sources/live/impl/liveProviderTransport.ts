@@ -28,6 +28,7 @@ const Input = Type.Object(
         credential: Credential,
         sdp: Type.String({ minLength: 1, maxLength: 65536 }),
         instructions: Type.String({ minLength: 1, maxLength: 65536 }),
+        initialContext: Type.Optional(Type.String({ maxLength: 8192 })),
     },
     { additionalProperties: false },
 );
@@ -259,9 +260,15 @@ export async function createLiveProviderTransport(
     dependencies: LiveProviderDependencies = defaults,
 ): Promise<LiveProviderTransport> {
     const setupDeadline = Date.now() + dependencies.setupTimeoutMs;
-    const { credential, sdp, instructions, signal, onEvent } = options;
+    const { credential, sdp, instructions, initialContext, signal, onEvent } = options;
     if (
-        !Value.Check(Input, { credential, sdp, instructions }) ||
+        !Value.Check(Input, {
+            credential,
+            sdp,
+            instructions,
+            ...(initialContext === undefined ? {} : { initialContext }),
+        }) ||
+        (initialContext !== undefined && Buffer.byteLength(initialContext) > 8192) ||
         !(signal instanceof AbortSignal) ||
         typeof onEvent !== "function" ||
         signal.aborted
@@ -288,6 +295,27 @@ export async function createLiveProviderTransport(
         // "Voice session access denied." (code forbidden) after the call connects.
         audio: { output: { voice: "cove" } },
         delegation: { type: "client" },
+        ...(initialContext === undefined
+            ? {}
+            : native
+              ? {
+                    initial_items: [
+                        {
+                            type: "message",
+                            role: "user",
+                            content: [{ type: "input_text", text: initialContext }],
+                        },
+                    ],
+                }
+              : {
+                    input: [
+                        {
+                            type: "message",
+                            role: "user",
+                            content: [{ type: "input_text", text: initialContext }],
+                        },
+                    ],
+                }),
     };
     let answer: string, sessionId: string;
     try {
@@ -378,6 +406,7 @@ export async function createLiveProviderTransport(
         queuedOperations = 0;
     let queue: Promise<void> = Promise.resolve();
     const transcriptItems = new Set<string>();
+    const pendingSends = new Set<(error?: Error) => void>();
 
     const emit = (event: LiveProviderEvent) => {
         if (!Value.Check(LiveProviderEventSchema, event)) throw new LiveProviderError();
@@ -395,6 +424,7 @@ export async function createLiveProviderTransport(
         clearTimeout(closeTimer);
         signal.removeEventListener("abort", abort);
         rejectAttached(error ?? new LiveProviderError());
+        for (const complete of pendingSends) complete(error ?? new LiveProviderError());
         socket.terminate();
         resolveEnd();
         emit({
@@ -414,12 +444,22 @@ export async function createLiveProviderTransport(
                 reject(new LiveProviderError());
                 return;
             }
+            let settled = false;
+            const complete = (error?: Error) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                pendingSends.delete(complete);
+                if (error) reject(new LiveProviderError());
+                else resolve();
+            };
+            const timer = setTimeout(() => finish(false, new LiveProviderError()), 30_000);
+            timer.unref();
+            pendingSends.add(complete);
             try {
-                socket.send(JSON.stringify(value), (error) =>
-                    error ? reject(new LiveProviderError()) : resolve(),
-                );
+                socket.send(JSON.stringify(value), complete);
             } catch {
-                reject(new LiveProviderError());
+                complete(new LiveProviderError());
             }
         });
     const close = (): Promise<void> => {
@@ -644,7 +684,7 @@ export async function createLiveProviderTransport(
                                   ...(delegationId === null
                                       ? {}
                                       : { delegation_item_id: delegationId }),
-                                  channel: speakable ? "speakable" : "commentary",
+                                  ...(speakable ? { channel: "speakable" } : {}),
                                   content: [{ type: "input_text", text: content }],
                               }
                             : {
