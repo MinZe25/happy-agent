@@ -6864,7 +6864,8 @@ fields and malformed values return `400 invalid_request`.
   `POST /unsubscribe` accepts the same body and returns `200 {}`; unsubscribing a stream that is
   not subscribed is a no-op. Both are described under live editing below.
 - `POST /presence` accepts `{ "streamId": "...", "awarenessClientId": 123, "update": "..." }`
-  and returns `200 {}`. Presence is relayed, never stored.
+  and returns `200 {}`. Presence is relayed, never stored. Presence sent through a stream that is
+  not subscribed to this document returns `200 {}` and is relayed to nobody.
 
 Every accepted change commits its log entry and stored state in one transaction, composable with
 its caller's transaction, and is sent to subscribers only after commit. Writes to one document
