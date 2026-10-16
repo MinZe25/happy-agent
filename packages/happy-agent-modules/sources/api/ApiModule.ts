@@ -314,6 +314,7 @@ import {
     workspaceCreateBodySchema,
 } from "./ApiSchemas.js";
 import { WorkspaceProxy } from "./WorkspaceProxy.js";
+import { requestedAgentMode } from "./requestedAgentMode.js";
 import { SubtaskInputError, SubtasksModule } from "../subtasks/index.js";
 
 const API_PROTOCOL_VERSION = 26;
@@ -4071,6 +4072,10 @@ export class ApiModule implements AgentModule {
             if (operation === "draft" && request.method === "PUT") {
                 await this.#assertUserControlledAgent(ctx, agentId);
                 const body = await bodyAs(request, draftBodySchema, "agent draft");
+                body.draft =
+                    body.draft === null
+                        ? null
+                        : { ...requestedAgentMode(body.draft), text: body.draft.text };
                 if (this.#team.enabled) {
                     const userId = teamUser(ctx)?.id;
                     if (userId === undefined)
@@ -4199,6 +4204,7 @@ export class ApiModule implements AgentModule {
                 invokeSlashCommandRequestSchema,
                 "slash command invocation",
             );
+            body.mode = requestedAgentMode(body.mode);
             this.#assertAvailableAgentMode(body.mode);
             const cursor = this.#journal.cursor();
             let invoked;
@@ -4312,6 +4318,7 @@ export class ApiModule implements AgentModule {
     ): Promise<void> {
         await this.#assertUserControlledAgent(ctx, agentId);
         const body = await bodyAs(request, messageSendBodySchema, "agent message");
+        body.mode = requestedAgentMode(body.mode);
         const id = body.id ?? createId();
         await this.#serializeMessageSend(id, async () => {
             const cursor = this.#journal.cursor();

@@ -216,6 +216,15 @@ shutdown and does not claim that terminals or background processes have exited.
 
 ## Composer mode
 
+- Execution provenance is output-only. Send, slash-command, and draft inputs validate known
+  `account` and `providerType` fields using the published bounds, then immediately project them
+  away before routing, pending messages, history, last mode, or either draft store. SDK stripping
+  alone left other clients able to persist forged provenance and made skill-message modes
+  disappear. Send retains its existing unknown-field rejection; slash and draft modes retain
+  their existing acceptance of extra keys but discard them rather than persisting them. Their
+  API shapes are not closed, so tightening that acceptance would change the contract. Opaque
+  user settings are unrelated and remain untouched.
+
 - A null `mode.serviceTier` must reach Agent Base as an explicit `null`, never as an omission and
   never as a sentinel tier string. Agent Base persists the last tier and reads an omitted message
   option as "keep the previous tier", so omission leaves a stale tier in force — including the
