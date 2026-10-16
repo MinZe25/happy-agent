@@ -2,6 +2,9 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
     test: {
-        setupFiles: ["../../scripts/windowsSandboxTestSetup.ts"],
+        setupFiles: [
+            "../../scripts/windowsSandboxTestSetup.ts",
+            "../../scripts/exitOrphanedTestWorker.ts",
+        ],
     },
 });
