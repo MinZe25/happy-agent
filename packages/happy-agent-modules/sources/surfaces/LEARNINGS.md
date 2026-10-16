@@ -25,11 +25,13 @@ Generic model creation hid differences between feature types. Active admin bots 
 `create_todo_surface`, with a name and optional image, and add/remove-user tools. Execution
 rechecks authority; ordinary todo use cannot grant membership administration or create lists.
 
-## Separators are independent contentless Surfaces
+## Sections live inside a todo list, not in the sidebar
 
-A sidebar section does not own the Surfaces beneath it. A separator uses the same membership,
-ordering, creator attribution, and events as every Surface, but accepts neither an image nor todo
-content. Its dedicated admin tool needs shared-data review only, with no filesystem access.
+A `separator` Surface type was built as a contentless sidebar section. That misread the request:
+the happy-list `#` separator is a heading row inside a todo list, which todos already support with
+the `# ` prefix. The type and its admin tool are withdrawn. Rows an earlier daemon stored are kept
+unchanged rather than rewritten, but the catalog read filters them out, so every list, route, and
+chat treats their IDs as not found and creation with one of their IDs is refused.
 
 ## References resolve their target on every read
 
@@ -51,7 +53,7 @@ The daemon, not the HTTP request, makes the folder; the agent, its indexes, and 
 `chatAgentId` commit together only afterwards. The caller waits a bounded time and otherwise
 gets `503 not_initialized`, never a partial association. The chat's agent is announced after its
 initial slash-command discovery and before the `surface.updated` that names it, like bot and task
-agents. Separators have no content and get no chat. The Surface owns the chat's lifetime, so agent
+agents. The Surface owns the chat's lifetime, so agent
 and workspace archive, reorder, rename, child creation, and attaching another agent all conflict.
 The agent works for each message's sender, holds no admin role, and never joins anyone.
 

@@ -7,7 +7,7 @@ administration only for actual active admin bots. Every mutation owns its permis
 Document tools read current or historical Markdown, replace the full text with a current-version
 guard, and list bounded revision summaries. Reads skip review; updates require shared-data Auto
 review without filesystem elevation. Document creation has the same optional managed-image
-boundary as todo creation. Separators have no content or image tool.
+boundary as todo creation.
 
 Admin bots receive `create_artifact_surface`, `create_bot_surface`, and `create_task_surface`.
 Each names its own target field, requires an explicit creator, and accepts an optional image.

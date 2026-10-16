@@ -197,50 +197,57 @@ describe("installation-owned Surface state", () => {
         await expect(create.execute(ctx, input, call)).rejects.toMatchObject({ code: "forbidden" });
     });
 
-    it("discovers separator administration without granting filesystem access or ordinary-agent authority", async () => {
+    it("withdraws separators an earlier daemon stored without rewriting them", async () => {
         const f = await fixture();
         const ctx = f.db.context;
-        const ordinary = await f.hooks.tools!(ctx, {
-            agent: { id: "ordinary" },
-        } as AgentModuleScope);
-        expect(ordinary.some((tool) => tool.name === "create_separator_surface")).toBe(false);
-        const tools = await f.hooks.tools!(ctx, { agent: { id: "admin" } } as AgentModuleScope);
-        const tool = tools.find((item) => item.name === "create_separator_surface")!;
-        expect(tool).toMatchObject({
-            defer: true,
-            durable: true,
-            transactional: true,
-            requiresAutoOrFullAccess: true,
-            capabilities: [expect.stringContaining("separator")],
-            searchKeywords: expect.arrayContaining(["create separator surface", "sidebar section"]),
-        });
-        expect(tool.shouldReviewInAutoMode!({}, ctx)).toBe(true);
-        expect(tool.shouldRunInFullAccessInAutoMode).toBeUndefined();
-        expect(tool.describeAutoPermissionAction!({ name: "Work" }, ctx)).toContain(
-            "no filesystem access",
-        );
-        expect(Value.Check(tool.parameters, { name: "Work" })).toBe(false);
-        expect(
-            Value.Check(tool.parameters, {
-                name: "Work",
-                creatorUserId: "bob",
-                imagePath: "/tmp/image.png",
-            }),
-        ).toBe(false);
-        const call = { kv: f.kv.scoped("separator-call") } as never;
-        const input = { name: "Work", creatorUserId: "bob" };
-        const created = await tool.execute(ctx, input, call);
-        expect(created).toMatchObject({
+        const list = await f.surfaces.create(ctx, { type: "todo", name: "Inbox" }, "alice");
+        const separatorId = "separatorsurface00000001";
+        const separator = {
+            id: separatorId,
             type: "separator",
+            name: "Work",
+            creatorUserId: "alice",
+            chatAgentId: null,
             image: null,
-            creatorUserId: "bob",
-            members: [{ userId: "bob" }],
+            members: [
+                {
+                    userId: "alice",
+                    joinedAt: 1,
+                    orderKey: `${list.members[0]!.orderKey}5`,
+                },
+            ],
+            updatedAt: 1,
+            version: "01890a5d-ac96-774b-bcce-b302099a8057",
+        };
+        await f.kv.write(ctx, `surface.${separatorId}`, separator);
+        expect(await f.surfaces.list(ctx)).toEqual([list]);
+        await expect(
+            f.surfaces.create(ctx, { type: "separator", name: "Again" } as never, "alice"),
+        ).rejects.toMatchObject({ code: "invalid_request" });
+        await expect(
+            f.surfaces.create(ctx, { type: "todo", id: separatorId, name: "Taken" }, "alice"),
+        ).rejects.toMatchObject({ code: "not_found" });
+        for (const action of ["join", "leave", "reorder"] as const)
+            await expect(
+                f.surfaces.changeMember(ctx, separatorId, "alice", action),
+            ).rejects.toMatchObject({ code: "not_found" });
+        await expect(
+            f.surfaces.changeMember(ctx, list.id, "alice", "reorder", separatorId),
+        ).rejects.toMatchObject({ code: "conflict" });
+        await expect(f.surfaces.listTodos(ctx, separatorId)).rejects.toMatchObject({
+            code: "not_found",
         });
-        expect(await tool.execute(ctx, input, call)).toEqual(created);
-        expect(await f.surfaces.list(ctx)).toEqual([created]);
-        f.revoke();
-        await expect(tool.execute(ctx, input, call)).rejects.toMatchObject({ code: "forbidden" });
-        expect(f.compute.resolve).not.toHaveBeenCalled();
+        await expect(f.surfaces.image(ctx, separatorId)).rejects.toMatchObject({
+            code: "not_found",
+        });
+        await expect(f.surfaces.getDocument(ctx, separatorId)).rejects.toMatchObject({
+            code: "not_found",
+        });
+        const next = await f.surfaces.create(ctx, { type: "todo", name: "Next" }, "alice");
+        expect(next.members[0]!.orderKey > list.members[0]!.orderKey).toBe(true);
+        expect(await f.kv.read(ctx, `surface.${separatorId}`)).toEqual(separator);
+        const tools = await f.hooks.tools!(ctx, { agent: { id: "admin" } } as AgentModuleScope);
+        expect(tools.some((tool) => tool.name.includes("separator"))).toBe(false);
     });
 
     it("keeps each person's ordering independent and validates administrative targets", async () => {

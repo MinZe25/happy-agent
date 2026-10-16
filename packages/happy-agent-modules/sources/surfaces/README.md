@@ -1,8 +1,7 @@
 # Surfaces
 
-Shared typed feature instances, including todo lists, Markdown documents, contentless sidebar
-separators, and references to artifacts, bots, and tasks, with each person's sidebar order on the
-nested member record. All heads and immutable revisions live in module-owned AgentKV storage.
+Shared typed feature instances, including todo lists, Markdown documents, and references to
+artifacts, bots, and tasks, with each person's sidebar order on the nested member record. All heads and immutable revisions live in module-owned AgentKV storage.
 
 ```text
 HTTP / model tools -> SurfacesModule -> one composing database transaction
@@ -16,8 +15,9 @@ Agent Base's transactional settlement; image creation retains a call-stable ID a
 The admin tools check active admin authority at selection and execution. Images pass through
 Compute's filesystem boundary and bounded managed normalization, never an arbitrary served path.
 
-Separators reuse catalog creation, members, ordering, and durable events. They never accept an
-image or todo content, and the admin-only `create_separator_surface` tool has no filesystem access.
+Separators are withdrawn. Rows an earlier daemon stored stay untouched, but the catalog read
+filters them out, so listing, membership, ordering, content routes, and chats all treat their IDs
+as not found, and a creation request reusing one is refused rather than echoing it back.
 
 Document Surfaces keep a separately versioned current snapshot and permanent full revisions.
 Guarded replacements, including clearing or applying historical text, never change the catalog
@@ -32,7 +32,7 @@ target reads as unavailable without its ID. Shared events carry the stored recor
 the resolved projection. The three admin creation tools share the image and replay handling of
 the other typed creation tools.
 
-Every Surface type except separators can own one shared chat, created only when a person opens
+Every Surface type can own one shared chat, created only when a person opens
 it. The request reserves the agent ID, workspace ID, and folder path in `chat.*` and invokes the
 durable `surfaces.prepareChat` function in the same transaction. Preparation belongs to the
 daemon's lifetime: it makes the folder under Configuration's `Surfaces` root on the task-layout

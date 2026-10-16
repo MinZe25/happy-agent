@@ -538,39 +538,6 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             toLLM: textResult,
         }),
         defineAgentTool({
-            name: "create_separator_surface",
-            defer: true,
-            capabilities: ["Create a named sidebar separator Surface as an admin bot."],
-            searchKeywords: ["create separator surface", "sidebar section", "named divider"],
-            description:
-                "Admin bots only: create a named, contentless sidebar separator. It does not contain or own other Surfaces and has no image. Explicitly supply creatorUserId as a local Happy user ID or null; only null is allowed in standalone mode. The creator joins at the end of their sidebar; null joins nobody in team mode and the local person in standalone mode.",
-            parameters: Type.Object(
-                { name: surfaceNameSchema, creatorUserId: surfaceMemberSchema.properties.userId },
-                { additionalProperties: false },
-            ),
-            returnType: surfaceSchema,
-            durable: true,
-            transactional: true,
-            requiresAutoOrFullAccess: true,
-            shouldReviewInAutoMode: () => true,
-            describeAutoPermissionAction: ({ name }) =>
-                `creating sidebar separator Surface ${JSON.stringify(name)}. Access: shared data write; no filesystem access`,
-            execute: async (ctx, input, call) => {
-                await surfaces.requireAdmin(ctx, scope.agent.id);
-                return surfaces.create(
-                    ctx,
-                    {
-                        type: "separator",
-                        name: input.name,
-                        id: await call.kv.getOrCreate(ctx, "surfaceId", createId),
-                    },
-                    input.creatorUserId,
-                    scope.agent.id,
-                );
-            },
-            toLLM: textResult,
-        }),
-        defineAgentTool({
             name: "add_surface_user",
             defer: true,
             capabilities: ["Add a person to a Surface as an admin bot."],

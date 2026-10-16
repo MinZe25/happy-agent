@@ -11,7 +11,6 @@ import {
 import { computePermissions } from "@slopus/happy-agent-compute";
 import {
     createTodoSurfaceRequestSchema,
-    createSeparatorSurfaceRequestSchema,
     createDocumentSurfaceRequestSchema,
     createArtifactSurfaceRequestSchema,
     createBotSurfaceRequestSchema,
@@ -90,13 +89,17 @@ type Listener = (ctx: Context, event: SurfaceEvent) => void | Promise<void>;
 export type SurfaceActor = TodoRevision["actor"];
 const supportedCreationSchema = Type.Union([
     createTodoSurfaceRequestSchema,
-    createSeparatorSurfaceRequestSchema,
     createDocumentSurfaceRequestSchema,
     createArtifactSurfaceRequestSchema,
     createBotSurfaceRequestSchema,
     createTaskSurfaceRequestSchema,
 ]);
-/** Types whose content a shared conversation can work on; separators have none. */
+/**
+ * Types an earlier daemon stored that are no longer part of the catalog. Their rows stay in
+ * storage unchanged, but no list, route, or event ever reaches them again.
+ */
+const WITHDRAWN_TYPES: ReadonlySet<string> = new Set(["separator"]);
+/** Types whose content a shared conversation can work on. */
 const CHAT_TYPES: ReadonlySet<string> = new Set(["todo", "document", "artifact", "bot", "task"]);
 const PREPARE_CHAT = "surfaces.prepareChat";
 /** How long a person's request waits for a chat's folder and agent before reporting 503. */
@@ -254,7 +257,7 @@ export class SurfacesModule implements AgentModule {
         const reference = referenceFor(input);
         if (reference !== undefined) checked(surfaceReferenceSchema, reference);
         let image: SurfaceImageAsset | null = null;
-        if (input.type !== "separator" && input.image !== undefined) {
+        if (input.image !== undefined) {
             try {
                 const normalized = await normalizeManagedImage(
                     Buffer.from(input.image.data, "base64"),
@@ -276,7 +279,7 @@ export class SurfacesModule implements AgentModule {
             await this.#validateUser(tx, creatorUserId);
             const id = input.id ?? createId();
             const old = await this.#kv.read(tx, `surface.${id}`);
-            if (old !== undefined) return this.#present(tx, readSurface(old));
+            if (old !== undefined) return this.#present(tx, await this.#surface(tx, id));
             if (
                 reference !== undefined &&
                 (await this.#resolve(tx, reference)).state === "unavailable"
@@ -914,7 +917,9 @@ export class SurfacesModule implements AgentModule {
         return this.#agents;
     }
     async #stored(ctx: Context): Promise<Surface[]> {
-        return (await this.#kv.list(ctx, "surface.")).map((row) => readSurface(row.value));
+        return (await this.#kv.list(ctx, "surface."))
+            .map((row) => readSurface(row.value))
+            .filter((surface) => !WITHDRAWN_TYPES.has(surface.type));
     }
     /** Shared records never hold a target projection; it is resolved for each read. */
     async #present(ctx: Context, surface: Surface): Promise<Surface> {
@@ -975,7 +980,7 @@ export class SurfacesModule implements AgentModule {
         const value = await this.#kv.read(ctx, `surface.${id}`);
         if (value === undefined) throw new SurfaceError("not_found", "The Surface was not found.");
         const surface = readSurface(value);
-        if (type !== undefined && surface.type !== type)
+        if (WITHDRAWN_TYPES.has(surface.type) || (type !== undefined && surface.type !== type))
             throw new SurfaceError("not_found", "The Surface was not found.");
         return surface;
     }
