@@ -197,6 +197,50 @@ describe("HappyAgentClient updates", () => {
         await expect(updates.next()).resolves.toEqual({ done: true, value: undefined });
     });
 
+    it("names the stream and passes live document frames through without moving the cursor", async () => {
+        const streamId = "k8m2q9w1e5r7y3u6i0o2p4s1";
+        const surfaceId = "s12345678901234567890123";
+        const change = {
+            surfaceId,
+            seq: 5,
+            update: "AQ==",
+            mutationId: null,
+            actor: { userId: null, agentId: null },
+            source: "api",
+        };
+        const presence = { surfaceId, clientKey: "c1", revision: 1, active: false };
+        const fetch: typeof globalThis.fetch = async () =>
+            sseResponse(
+                `event: hello\ndata: ${JSON.stringify({ connectedAt: 1, cursor: CURSOR_1, gap: false, resumed: false, streamId })}\n\n`,
+                `event: document.update\ndata: ${JSON.stringify(change)}\n\n`,
+                `event: document.presence\ndata: ${JSON.stringify(presence)}\n\n`,
+                update(CURSOR_2),
+            );
+        const controller = new AbortController();
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+        const updates = client.updates({ signal: controller.signal });
+
+        await expect(updates.next()).resolves.toEqual({
+            done: false,
+            value: { kind: "connected", cursor: CURSOR_1, streamId },
+        });
+        await expect(updates.next()).resolves.toEqual({
+            done: false,
+            value: { kind: "document", frame: { type: "document.update", data: change } },
+        });
+        await expect(updates.next()).resolves.toEqual({
+            done: false,
+            value: { kind: "document", frame: { type: "document.presence", data: presence } },
+        });
+        await expect(updates.next()).resolves.toMatchObject({
+            done: false,
+            value: { kind: "event", cursor: CURSOR_2 },
+        });
+
+        controller.abort();
+        await expect(updates.next()).resolves.toEqual({ done: true, value: undefined });
+    });
+
     it("announces each daemon instance once and identifies a replacement after reconnect", async () => {
         vi.useFakeTimers();
         const responses = [

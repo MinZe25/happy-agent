@@ -1,4 +1,8 @@
 import type { EventStreamFrame, EventStreamHello, HappyAgentEvent } from "./protocol/events.js";
+import type {
+    SurfaceDocumentPresenceFrame,
+    SurfaceDocumentUpdateFrame,
+} from "./protocol/surfaces.js";
 import { readSseFrames } from "./readSseFrames.js";
 
 /** The stream said something this client cannot read as the documented contract. */
@@ -28,6 +32,21 @@ export async function* readEventStream(
         const data = parseJson(frame.data);
         if (frame.name === "hello") {
             yield { kind: "hello", hello: data as EventStreamHello };
+            continue;
+        }
+        // Live document frames reach only subscribed streams and carry no cursor by design.
+        if (frame.name === "document.update") {
+            yield {
+                kind: "document",
+                frame: { type: "document.update", data: data as SurfaceDocumentUpdateFrame },
+            };
+            continue;
+        }
+        if (frame.name === "document.presence") {
+            yield {
+                kind: "document",
+                frame: { type: "document.presence", data: data as SurfaceDocumentPresenceFrame },
+            };
             continue;
         }
         const event = data as HappyAgentEvent;

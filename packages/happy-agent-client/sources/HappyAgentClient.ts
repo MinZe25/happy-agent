@@ -87,8 +87,13 @@ import type {
     SurfaceMemberRequest,
     SurfaceResponse,
     SurfaceChatResponse,
-    SurfaceDocumentResponse,
+    SendSurfaceDocumentPresenceRequest,
+    SendSurfaceDocumentUpdateRequest,
+    SurfaceDocumentChangeListResponse,
+    SurfaceDocumentSeqResponse,
     SurfaceDocumentSnapshotResponse,
+    SurfaceDocumentStateResponse,
+    SurfaceDocumentSubscriptionRequest,
     SurfaceDocumentVersionListResponse,
     SurfaceDocumentVersionResponse,
     TodoListResponse,
@@ -98,7 +103,6 @@ import type {
     TodoVersionListResponse,
     TodoVersionResponse,
     UpdateTodoRequest,
-    UpdateSurfaceDocumentRequest,
 } from "./protocol/surfaces.js";
 import type {
     CloudAccessTokenResponse,
@@ -1705,34 +1709,111 @@ export class HappyAgentClient {
         });
     }
 
-    /** A Markdown snapshot and the shared cursor captured before it was read. */
+    /**
+     * The read-only Markdown projection and the shared cursor captured before it was read;
+     * `seq` reads the document as of that change.
+     */
     async getSurfaceDocument(
         surfaceId: SurfaceId,
-        options: RequestOptions = {},
+        options: RequestOptions & { readonly seq?: number } = {},
     ): Promise<SurfaceDocumentSnapshotResponse> {
         return await this.#json({
             method: "GET",
             path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}`,
+            query: { seq: options.seq },
             signal: options.signal,
         });
     }
 
-    /** Replaces the whole text; identical text is a no-op after checking the current version. */
-    async updateSurfaceDocument(
+    /**
+     * The collaborative document as one Yjs update: only what `stateVector` lacks, the whole
+     * document, or the whole document as of `seq`.
+     */
+    async getSurfaceDocumentState(
         surfaceId: SurfaceId,
-        request: UpdateSurfaceDocumentRequest,
-        options: VersionedRequestOptions,
-    ): Promise<SurfaceDocumentResponse> {
+        options: RequestOptions & {
+            readonly stateVector?: string;
+            readonly seq?: number;
+        } = {},
+    ): Promise<SurfaceDocumentStateResponse> {
         return await this.#json({
-            method: "PUT",
-            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}`,
-            json: request,
-            ifMatch: options.ifMatch,
+            method: "GET",
+            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}/state`,
+            query: { stateVector: options.stateVector, seq: options.seq },
             signal: options.signal,
         });
     }
 
-    /** Permanent revision summaries, oldest first, without repeated Markdown text. */
+    /** Stores one change before answering; repeating its mutation ID returns the original seq. */
+    async sendSurfaceDocumentUpdate(
+        surfaceId: SurfaceId,
+        request: SendSurfaceDocumentUpdateRequest,
+        options: RequestOptions = {},
+    ): Promise<SurfaceDocumentSeqResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}/updates`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** The permanent change log, oldest first, without change bytes. */
+    async listSurfaceDocumentUpdates(
+        surfaceId: SurfaceId,
+        options: RequestOptions & { readonly afterSeq?: number; readonly limit?: number } = {},
+    ): Promise<SurfaceDocumentChangeListResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}/updates`,
+            query: { afterSeq: options.afterSeq, limit: options.limit },
+            signal: options.signal,
+        });
+    }
+
+    /** Sends this document's live frames to the event stream named by its hello `streamId`. */
+    async subscribeSurfaceDocument(
+        surfaceId: SurfaceId,
+        request: SurfaceDocumentSubscriptionRequest,
+        options: RequestOptions = {},
+    ): Promise<SurfaceDocumentSeqResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}/subscribe`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** Stops this document's live frames on that stream and ends its presence there. */
+    async unsubscribeSurfaceDocument(
+        surfaceId: SurfaceId,
+        request: SurfaceDocumentSubscriptionRequest,
+        options: RequestOptions = {},
+    ): Promise<Record<string, never>> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}/unsubscribe`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** Relays an awareness update to the document's other subscribed streams; never stored. */
+    async sendSurfaceDocumentPresence(
+        surfaceId: SurfaceId,
+        request: SendSurfaceDocumentPresenceRequest,
+        options: RequestOptions = {},
+    ): Promise<Record<string, never>> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/document/${encodeURIComponent(surfaceId)}/presence`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** Markdown revisions frozen before a document became collaborative, oldest first. */
     async listSurfaceDocumentVersions(
         surfaceId: SurfaceId,
         options: RequestOptions & { readonly afterVersion?: string; readonly limit?: number } = {},

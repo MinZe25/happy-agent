@@ -49,6 +49,7 @@ import {
     surfaceDocumentSchema,
     todoSchema,
     todoTextSchema,
+    type SurfaceDocumentLiveFrame,
 } from "./surfaces.js";
 import { Nullable } from "./common.js";
 import type { Terminal } from "./terminals.js";
@@ -243,6 +244,10 @@ export const todoUpdatedPayloadSchema = Type.Object({
 });
 export type TodoUpdatedPayload = Static<typeof todoUpdatedPayloadSchema>;
 
+/**
+ * Emitted only by daemons without collaborative documents; current daemons deliver document
+ * changes as live frames to subscribed streams instead.
+ */
 export const surfaceDocumentUpdatedPayloadSchema = Type.Object({
     surfaceId: surfaceIdSchema,
     previousVersion: resourceVersionSchema,
@@ -574,12 +579,19 @@ export interface EventStreamHello {
     daemonStartedAt?: Timestamp;
     /** Whether this daemon process is draining. Absent on older compatible daemons. */
     draining?: boolean;
+    /**
+     * Names this one stream connection for subscribing it to collaborative documents. A
+     * reconnect gets a new one. Absent on daemons without collaborative documents.
+     */
+    streamId?: Cuid2;
 }
 
 /** One frame read off `GET /v0/events/stream`. */
 export type EventStreamFrame =
     | { kind: "hello"; hello: EventStreamHello }
-    | { kind: "event"; event: HappyAgentEvent; cursor: EventCursor };
+    | { kind: "event"; event: HappyAgentEvent; cursor: EventCursor }
+    /** A live frame for a document this stream was subscribed to: no cursor, never replayed. */
+    | { kind: "document"; frame: SurfaceDocumentLiveFrame };
 
 /** `GET /v0/events/stream` options. */
 export interface EventStreamOptions {

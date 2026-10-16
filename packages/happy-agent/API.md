@@ -293,6 +293,15 @@ additive fields. A missing `chatAgentId` is treated as null. Surface chat worksp
 listings. An older daemon may reject new Surface types or return `404`/`501` for document or
 chat routes; clients leave those features unavailable without disabling existing todo lists.
 
+Collaborative documents and the removal of the `separator` Surface type are a one-off exception
+to additive compatibility, approved for client and daemon together; the protocol number does not
+change. A daemon that serves collaborative documents reports `capabilities.collaborativeDocuments:
+true` from health. Without it, clients show a document's Markdown read-only and offer no editing.
+Against a current daemon, an older client that saves through the withdrawn document `PUT`
+receives `405` and stops; it can still open and read every document through `GET`, but no longer
+sees content changes live because `surface.document.updated` is no longer emitted. Creating a
+separator returns `400`, and separators created earlier are no longer listed.
+
 Reference tags in agent text, described under "Message content", are additive and do not
 increment the protocol version. Request and response schemas are unchanged; a client that does not
 render them shows the tag text as written. File links, described in the same section, are additive
@@ -389,6 +398,7 @@ Failed requests return an appropriate 4xx/5xx status with a JSON body:
   admits mutations), `runner_unavailable` (503, the folder's runner is not connected or no longer
   configured), `local_execution_disabled` (409, runners are configured, so nothing runs on the
   daemon's own machine),
+  `method_not_allowed` (405, a withdrawn write method on a resource that remains readable),
   `too_large` (413), `range_not_satisfiable` (416, an artifact file `Range` outside the file),
   `settings_full` (409, a person's user settings are at their limit), `unsupported` (501),
   `internal` (500).
@@ -972,6 +982,8 @@ Fields:
   of protocol version or provider entitlement. `workspaceBridges: true` advertises the local
   bridges described under Workspaces. Optional `desktopLiveCapabilities` lists the additive
   voice desktop capability names the daemon accepts; see Live voice sessions.
+  `collaborativeDocuments: true` advertises collaborative document Surfaces, described under
+  Document Surfaces.
 - `ready` — `false` while starting, `true` once the agent system is loaded.
 - `status` — `"starting"` or `"ready"`; the human-readable form of `ready`.
 - `version` — one identity object. `protocol` is the wire protocol number, the client's
@@ -6461,8 +6473,8 @@ Response — `200`: `{ "bot": { ... } }` with `avatar` `null`.
 
 A Surface is an instance of a predefined feature with its own typed API. Every instance has a
 CUID2 ID and a human name. Multiple independent Surfaces of each type may exist, with separate
-content, history, and members. Supported types are `todo`, `separator`, `document`, `artifact`,
-`bot`, and `task`; calendars
+content, history, and members. Supported types are `todo`, `document`, `artifact`, `bot`, and
+`task`; calendars
 are a future type, not a current endpoint. The catalog initially has no instances.
 All onboarded authenticated people may read and modify Surface data, whether
 or not they joined. Joining and leaving control only the person's sidebar. Creating a Surface
@@ -6482,7 +6494,7 @@ This deliberately corrects the earlier loose ID validation; existing generated I
 unchanged, and stored IDs are never rewritten.
 Optional additive `chatAgentId` is the Surface's one shared chat agent ID, or null before a chat
 exists. Current daemons include it; older compatible daemons may omit it. It is never supplied
-in a creation request. Unsupported chat types, including separators, keep it null.
+in a creation request. Unsupported chat types keep it null.
 It also has optional additive `creatorUserId`: the installation-local Happy user ID of its
 creator, resolvable through `GET /v0/users`, or `null` when no creator is attributed or in
 standalone mode. Current daemons always include it. It is set at creation and never changes,
@@ -6531,15 +6543,11 @@ serves those bytes with `Content-Type: image/webp`, a content-derived `ETag`, an
 private image cache policy; matching `If-None-Match` returns `304`. Missing images or Surfaces
 return `404 not_found`. There is no caller-provided path or URL in a Surface response.
 
-A separator is a named, contentless section in a person's Surface sidebar. To create one,
-`POST /v0/surfaces` accepts `{ "type": "separator", "name": "Work", "id": "...",
-"mutationId": "..." }`, with the same optional ID/retry and mutation-echo rules. It uses the same
-creator attribution, join behavior, member ordering, version, and catalog events as other
-Surfaces. Its `image` is always `null`; supplying `image` in separator creation, even as `null`,
-returns `400 invalid_request`. Separators have no content endpoint, do not contain or own the
-Surfaces following them, and do not change their access or membership. They can be independently
-joined, left, and moved with the ordinary Surface routes. Their image endpoint returns
-`404 not_found`.
+There is no `separator` type. Sections belong inside a todo list as `# ` heading rows, not in the
+sidebar. Creating `{ "type": "separator", ... }` returns `400 invalid_request` and creates
+nothing. Separators that an earlier daemon created are kept in storage unchanged but are no
+longer part of the catalog: listing, desktop bootstrap, and events omit them, and every Surface
+route given one of their IDs returns `404 not_found`.
 
 Surface IDs are always 24-character CUID2s, so catalog, typed-content, and chat routes cannot
 collide through short route words used as IDs. Paths such as `/v0/surfaces/todo/join` and
@@ -6698,10 +6706,6 @@ and nested members. Active admin bots additionally receive the type-specific `cr
 tool, accepting `name`, required explicit `creatorUserId` (an installation-local Happy user ID
 or `null`), and optional absolute `imagePath`, plus `add_surface_user` and
 `remove_surface_user`, accepting `surfaceId` and `userId` (null only for standalone).
-They also receive `create_separator_surface`, accepting only `name` and required explicit
-`creatorUserId`. It creates a separator with the same creator validation and join rules;
-it has no image parameter or filesystem access. Separator creation is durable and requires
-ordinary shared-data Auto review, without Full-access elevation.
 These tools require an actual active admin bot, checked both at tool selection and execution;
 ordinary agents and non-admin or archived bots cannot invoke them. Images are read through the
 ordinary Compute filesystem permission boundary, with reviewed elevation for outside-workspace
@@ -6738,104 +6742,199 @@ opening Todo fetches its list with its snapshot cursor.
 
 ### Document Surfaces
 
-A `document` Surface owns one shared Markdown document, not a workspace file or an artifact.
+A `document` Surface owns one shared rich-text document that people and agents edit at the same
+time. It is not a workspace file or an artifact. Its content is a Yjs CRDT document edited with
+BlockNote, so concurrent edits merge without conflicts and without losing anyone's text. Markdown
+is a read-only projection of it for reading, agents, and older clients. A daemon that serves this
+model reports `capabilities.collaborativeDocuments: true` from health.
+
 `POST /v0/surfaces` accepts `{ "type": "document", "name": "Notes", "text": "# Notes\n",
 "id": "...", "image": { "data": "..." }, "mutationId": "..." }`. Only `type` and `name` are
-required. Omitted `text` means the empty string. Images, creator attribution, automatic creator
-membership, supplied-ID retries, and `surface.created` follow the catalog rules. The Surface,
-initial document snapshot, first immutable revision, and notification intent commit atomically.
-Repeating an existing Surface ID does not replace its document or add a revision. Creation emits
-`surface.created`, not a separate document-created event.
+required. Optional `text` is Markdown of at most 262,144 UTF-16 code units with no NUL; it is
+converted to blocks and stored as the document's first change, `seq` 1. Omitted or empty `text`
+creates an empty document with no change yet (`seq` 0). Images, creator attribution, automatic
+creator membership, supplied-ID retries, and `surface.created` follow the catalog rules. The
+Surface, its first change, and the notification intent commit atomically. Repeating an existing
+Surface ID does not replace its document or add a change.
 
-The current document is:
+#### Content model
+
+Each document is one Yjs `Y.Doc`. Its root `Y.XmlFragment` named `document` holds BlockNote
+blocks, and its root `Y.Map` named `threads` holds BlockNote comment threads. The content model
+is BlockNote 0.51's default block schema plus its comment mark. The daemon and every editing
+client use the same BlockNote version and change it together; clients never write blocks, inline
+content, or marks outside that model. The daemon stores and relays every change unchanged,
+including content outside the model, but leaves such content out of Markdown and refuses agent
+Markdown writes to a document that contains it.
+
+Binary values on the wire are standard base64: a change is a Yjs update (version 1 encoding), a
+state vector is a Yjs state vector, and presence is a y-protocols awareness update.
+
+#### Permanent history
+
+Every accepted change is one entry in the document's permanent, append-only log. `seq` is a
+positive integer that increases by exactly one per entry, starting at 1. An entry is:
 
 ```json
 {
-    "surfaceId": "s4k8m2q9w1e5r7y3u6i0o2p4",
-    "text": "# Notes\n",
-    "authorUserId": "u1x2y3z4a5b6c7d8e9f0g1h2",
-    "lastEditorUserId": "u1x2y3z4a5b6c7d8e9f0g1h2",
-    "createdAt": 1755300000000,
-    "updatedAt": 1755400000000,
-    "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e"
+    "seq": 42,
+    "actor": { "userId": "u1x2y3z4a5b6c7d8e9f0g1h2", "agentId": null },
+    "source": "api",
+    "mutationId": "...",
+    "createdAt": 1755400000000,
+    "size": 318
 }
 ```
 
-`text` is an uninterpreted Markdown string of at most 262,144 UTF-16 code units (JavaScript
-`string.length`), with no NUL.
-Empty and whitespace-only documents are valid. Line endings and whitespace are retained exactly.
-The limit bounds UTF-8 content at 1 MiB. Rendering never executes embedded code or grants access
-to local files. `authorUserId` is the immutable Surface creator's local Happy user ID or null.
-`lastEditorUserId` is the latest revision actor's user ID or null, including for the initial
-snapshot. Neither can be supplied through HTTP document bodies. Tool creation uses its explicit
-Surface creator for authorship, independently of the actual revision actor. Timestamps are epoch
-milliseconds. The document has its own UUIDv7 version; editing content does not change the
-catalog Surface version, memberships, image, or name.
+`actor.userId` is the authenticated person who sent the change (null in standalone mode or for a
+conversion); `actor.agentId` is the agent for tool edits, otherwise null. `source` is `api`,
+`tool`, or `conversion`. `mutationId` is the request's value verbatim, or null. `size` is the
+decoded change in bytes. The log is never pruned, by event retention, restart, or compaction.
+The version at `seq` N is the log replayed through entry N. There is no delete or restore: to
+revert, read an old version and write its content as a new change, so history only grows.
 
-The prefix is `/v0/surfaces/document/:surfaceId`:
+A change is at most 1 MiB decoded. A document's stored state is at most 16 MiB encoded and its
+Markdown at most 262,144 UTF-16 code units. A change that does not decode as a Yjs update, or
+that would exceed a limit, returns `400 invalid_request` and changes nothing. A change that adds
+nothing the document does not already contain returns the current `seq` and appends nothing.
+Document data has the same access as other Surface data.
 
-- `GET` returns `200 { "document": {...}, "cursor": "..." }`. The shared event cursor is
-  captured before the document read, closing the snapshot/stream window.
-- `PUT` accepts `{ "text": "replacement Markdown", "mutationId": "..." }`. It replaces the
-  whole text and requires the current document version in `If-Match`. A changed text advances
-  `updatedAt`, `lastEditorUserId`, and `version`, stores a full immutable revision, and returns
-  `200 { "document": {...} }`. Identical text is an exact no-op, preserving version, actor
-  attribution, timestamps, and history. A successful change emits `surface.document.updated`
-  after commit. A stale version is a conflict even when the supplied text equals the current text.
-- `GET /versions` returns `200 { "versions": [...], "nextAfterVersion": null }`. Entries are
-  immutable summaries `{ "version": "...", "updatedAt": 1755400000000,
-"actor": { "userId": null, "agentId": null }, "source": "api", "mutationId": "..." }`, oldest first. They omit
-  document text so listing history stays bounded. Optional `afterVersion` is an exclusive UUIDv7
-  cursor belonging to this document; an unknown cursor returns `404 not_found`. Optional `limit`
-  is an integer from 1 through 200, default 100. `nextAfterVersion` is the last returned version
-  when another page exists, otherwise null. New revisions never change previous pages.
-- `GET /versions/:version` returns `200 { "revision": { "document": {...}, "actor": {...},
-"source": "api", "mutationId": "..." } }` with the exact immutable snapshot. Unknown versions return `404 not_found`.
+#### Routes
 
-Every document revision records the committing request's `mutationId` verbatim, or null when
-none was supplied. The initial revision records the Surface creation request's value. This
-immutable metadata appears on both the summary and the full revision, not on the document
-snapshot. Identical-text no-ops, conflicts, and supplied-ID creation retries neither append a
-revision nor replace an existing revision's mutation ID. The field is optional and additive on
-the wire for older compatible daemons; current daemons always emit a string or null. An omitted
-field means that correlation metadata is unavailable, not proof that no mutation ID was supplied.
+The prefix is `/v0/surfaces/document/:surfaceId`. Every route checks the Surface has type
+`document`; unknown or wrong-type Surfaces return `404 not_found`. Unsupported body or query
+fields and malformed values return `400 invalid_request`.
 
-After an uncertain save whose HTTP response and change event were both lost, an editor can page
-through revisions after its base version, find the revision with its own mutation ID, and fetch
-that revision's text as the merge base. This still works when another person has edited on top
-of that save; text equality alone is not evidence that the editor's write landed. Clients choose
-a fresh mutation ID for each logical save and retain it only while resolving that same save.
-The daemon does not interpret the value, enforce uniqueness, or deduplicate writes by it. A
-retry still obeys `If-Match`, and an identical-text no-op creates no new revision to find.
+- `GET` returns `200 { "document": {...}, "cursor": "..." }`, the Markdown projection:
 
-Every route checks the Surface has type `document`; unknown or wrong-type Surfaces return
-`404 not_found`. Missing or malformed `If-Match`, oversized or invalid text, unsupported body
-fields, and malformed history paging return `400 invalid_request`. A stale `If-Match` returns
-`409 conflict` with `currentVersion` and the authoritative `document`. Rejections have no effect
-on the current document, history, or events. Actor and source use the same trusted-context rules
-as todo revisions: source is `api` or `tool`, with the actual user and agent IDs or null.
+    ```json
+    {
+        "surfaceId": "s4k8m2q9w1e5r7y3u6i0o2p4",
+        "text": "# Notes\n",
+        "authorUserId": "u1x2y3z4a5b6c7d8e9f0g1h2",
+        "lastEditorUserId": "u1x2y3z4a5b6c7d8e9f0g1h2",
+        "createdAt": 1755300000000,
+        "updatedAt": 1755400000000,
+        "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e",
+        "seq": 42
+    }
+    ```
 
-Every successful change commits the current snapshot, immutable revision, and durable event
-intent in one transaction, composable with its caller's transaction. Revisions are permanent
-and survive restart and ordinary event retention. There is no document delete or restore route:
-replace with empty text to clear content, or read an old revision and use ordinary guarded `PUT`
-to apply its text as a new revision. Neither action erases history.
+    `text` is normalized Markdown of the content. Formatting Markdown cannot express, such as
+    colors, underline, alignment, and comment threads, is left out. `authorUserId` is the
+    immutable Surface creator or null. `lastEditorUserId` is the latest entry's `actor.userId`.
+    `updatedAt` is the latest entry's time, or `createdAt` when there is none. `version` is a
+    UUIDv7 derived from `seq`; it changes exactly when `seq` does. `seq` is the latest entry's,
+    or 0; it is optional on the wire because older daemons omit it. The shared event cursor is
+    captured before the read. Optional `?seq=N` returns the projection as of entry N; `N`
+    outside 1 through the latest `seq` returns `404 not_found`.
 
-`surface.document.updated` contains `surfaceId`, `previousVersion`, `version`, `changes` with
-the full new `text`, `lastEditorUserId`, and `updatedAt`, and optional `mutationId`. It is shared
-like todo events; clients reconcile the document version chain and refetch on gaps. Document
-content and revisions are not included in desktop bootstrap.
+- `PUT` is withdrawn. It returns `405 method_not_allowed` with `Allow: GET` and the message
+  "Editing this document needs a newer Happy.", reads no body, and changes nothing.
+- `GET /state` returns `200 { "seq": 42, "update": "...", "stateVector": "..." }`: the document's
+  current state as one Yjs update, its state vector, and the latest `seq`. Optional
+  `?stateVector=` returns only what that state lacks; absent or empty means the whole document.
+  Optional `?seq=N` instead returns the whole document as of entry N. Supplying both, or a `seq`
+  outside 1 through the latest, is invalid.
+- `POST /updates` accepts `{ "mutationId": "...", "update": "..." }`, both required, and returns
+  `200 { "seq": 43 }` once the change is stored. It needs no `If-Match`: changes merge. Repeating
+  a `mutationId` already accepted for this document returns its original `seq` and appends and
+  sends nothing. Clients choose a fresh mutation ID for each change and reuse it only to retry
+  that same change.
+- `GET /updates` returns `200 { "updates": [...], "nextAfterSeq": null }`: log entries without
+  change bytes, oldest first. Optional `afterSeq` is an exclusive non-negative integer; optional
+  `limit` is 1 through 200, default 100. `nextAfterSeq` is the last returned `seq` when another
+  page exists, otherwise null. New entries never change earlier pages.
+- `GET /versions` and `GET /versions/:version` read the Markdown revisions a document had before
+  it became collaborative; a document created collaboratively has none. `GET /versions` returns
+  `200 { "versions": [...], "nextAfterVersion": null }` with immutable summaries
+  `{ "version": "...", "updatedAt": 1755400000000, "actor": { "userId": null, "agentId": null },
+"source": "api", "mutationId": "..." }`, oldest first, without text. Optional `afterVersion`
+  is an exclusive UUIDv7 cursor belonging to this document (unknown: `404 not_found`); optional
+  `limit` is 1 through 200, default 100; `nextAfterVersion` is the last returned version when
+  another page exists, otherwise null. `GET /versions/:version` returns `200 { "revision":
+{ "document": {...}, "actor": {...}, "source": "api", "mutationId": "..." } }`, the exact
+  frozen Markdown snapshot without `seq`. Unknown versions return `404 not_found`.
+- `POST /subscribe` accepts `{ "streamId": "..." }` and returns `200 { "seq": 42 }`.
+  `POST /unsubscribe` accepts the same body and returns `200 {}`; unsubscribing a stream that is
+  not subscribed is a no-op. Both are described under live editing below.
+- `POST /presence` accepts `{ "streamId": "...", "awarenessClientId": 123, "update": "..." }`
+  and returns `200 {}`. Presence is relayed, never stored.
 
-Ordinary models receive `read_document` (`surfaceId`, optional `version` to read history),
-`update_document` (`surfaceId`, current `version`, full replacement `text`), and
-`list_document_versions` (`surfaceId`, optional `afterVersion`, optional `limit` from 1 through
-20, default 10). History listing returns summaries, not full text. These tools use the same
-operations and conflicts as HTTP. Reading needs no review; updates are durable and own ordinary
-shared-data Auto review with no filesystem elevation. Active admin bots additionally receive
-`create_document_surface`, accepting `name`, required explicit `creatorUserId`, optional initial
-`text`, and optional absolute `imagePath`. Its authority, attribution, creator join rules, image
-handling, and permission boundaries match `create_todo_surface`. No document operation joins
-anyone automatically other than the explicit creator rule during Surface creation.
+Every accepted change commits its log entry and stored state in one transaction, composable with
+its caller's transaction, and is sent to subscribers only after commit. Writes to one document
+are serialized, so entries commit and are sent in `seq` order.
+
+#### Live editing through the event stream
+
+Live changes and presence travel on the existing `GET /v0/events/stream`, so no other connection
+is needed. Its `hello` frame carries an optional `streamId`, a CUID2 naming that one stream
+connection; it is absent on daemons without collaborative documents. A client subscribes the
+stream to each document it has open. Only the person who opened a stream can subscribe it or
+send presence through it; another person's, a closed, or an unknown `streamId` returns
+`404 not_found`. A stream can be subscribed to at most 32 documents, and a document can have at
+most 64 subscribed streams; more returns `409 conflict`.
+
+Subscribed streams receive two kinds of live frame. Live frames have no SSE `id:` line and no
+cursor, never enter the event journal, are never replayed, and are sent only to subscribed
+streams; a client that never subscribes never receives one, and a reconnect's `Last-Event-ID` is
+unaffected.
+
+- `event: document.update` with data `{ "surfaceId": "...", "seq": 43, "update": "...",
+"mutationId": "...", "actor": {...}, "source": "api" }`. A stream receives each subscribed
+  document's changes in strictly increasing `seq` from the moment it subscribed, including
+  changes its own client sent. Applying a change twice is harmless.
+- `event: document.presence` with data `{ "surfaceId": "...", "clientKey": "...",
+"revision": 7, "active": true, "awarenessClientId": 123, "update": "..." }`. `clientKey` is
+  opaque and assigned per stream and document; `revision` increases with each frame for that
+  key. A stream never receives its own presence. When the presence's stream closes or
+  unsubscribes, or sends no presence for 30 seconds, the others receive
+  `{ "surfaceId": "...", "clientKey": "...", "revision": 8, "active": false,
+"awarenessClientId": 123 }`. On subscribing, a stream receives the document's current active
+  presence.
+
+To catch up, a client reads `GET /state?stateVector=` with its own state vector after
+subscribing. A change committed in between arrives in that response, as a frame, or both, which
+is harmless. A gap in a document's `seq`, and a stream that was closed for falling behind, are
+repaired the same way. A reconnected stream has a new `streamId`, and the old stream's
+subscriptions and presence end when it closes; the client subscribes each open document again
+and catches up.
+
+Clients batch typing: at most one `POST /updates` in flight per document, at least 200 ms apart.
+They send presence at most every 250 ms and refresh it every 15 seconds while it stays active.
+Every window shares a few connections per host, so a client never holds a request open waiting
+for changes; the event stream delivers them.
+
+#### Older documents
+
+A document stored as Markdown by an earlier daemon becomes collaborative once, the first time it
+is read or written, in one transaction: its current text becomes entry 1, with
+`source: "conversion"` and a null actor. Its Markdown revisions stay readable at `/versions`.
+
+#### Events
+
+`surface.document.updated` is no longer emitted, and its name is not reused. Document content
+never enters the event journal; live clients receive it through subscribed streams, and others
+read it on demand. Document content and history are not included in desktop bootstrap.
+
+#### Agent tools
+
+Ordinary models receive `read_document` (`surfaceId`, optional `seq` to read an older version),
+`update_document` (`surfaceId`, the `seq` it read, and full replacement Markdown `text`), and
+`list_document_versions` (`surfaceId`, optional `afterSeq`, optional `limit` from 1 through 20,
+default 10). `read_document` returns the Markdown and the `seq` it was read at, and says when
+content Markdown cannot show was left out. `update_document` compares the agent's Markdown with
+the version at that `seq`, block by block, and applies only the difference to the current
+document as one change, inside the write transaction. Edits people made after that version are
+kept, and unchanged text appends nothing. A `seq` outside 1 through the latest is invalid, except
+0 for an empty document. A document containing content outside the content model refuses the
+write with an error telling the agent why. `list_document_versions` lists log entries.
+Reading needs no review; updates are durable and own ordinary shared-data Auto review with no
+filesystem elevation. Active admin bots additionally receive `create_document_surface`,
+accepting `name`, required explicit `creatorUserId`, optional initial Markdown `text`, and
+optional absolute `imagePath`. Its authority, attribution, creator join rules, image handling,
+and permission boundaries match `create_todo_surface`. No document operation joins anyone
+automatically other than the explicit creator rule during Surface creation.
 
 ### Reference Surfaces
 
@@ -6911,8 +7010,8 @@ The reference never joins anyone to the target's own task list or changes its ex
 
 The chat-enabled types are `todo`, `document`, `artifact`, `bot`, and `task`. Each may own exactly
 one shared persistent conversation, created lazily when a person explicitly opens its chat.
-Separators and unsupported types have no chat: their ensure operation returns `409 conflict`
-and leaves `chatAgentId` null. A reference Surface's contextual chat is separate from the target
+Unsupported types have no chat: their ensure operation returns `409 conflict` and leaves
+`chatAgentId` null. A reference Surface's contextual chat is separate from the target
 bot/task's existing conversation; ordinary reference opening still opens that existing target.
 
 `POST /v0/surfaces/:surfaceId/chat` accepts `{}` or `{ "mutationId": "..." }` and returns
@@ -6926,7 +7025,7 @@ control routes. Sending the first message is a separate ordinary agent `send` wi
 stable message ID.
 
 The chat route matches only this exact POST path. In particular, it does not capture
-`POST /v0/surfaces/todo/:surfaceId`, document GET/PUT/history routes, or membership routes.
+`POST /v0/surfaces/todo/:surfaceId`, document routes, or membership routes.
 The Surface ID must be a 24-character CUID2, never a route word such as `todo`, `document`, or
 `chat`. No valid existing method/path pair is repurposed.
 
@@ -9031,6 +9130,9 @@ data: {"cursor":"01991f3a-...","gap":false,"resumed":true,"connectedAt":17554000
 - `draining` — whether the process has entered its sticky draining phase. This closes the race
   where draining began while the client was disconnected and its `daemon.draining` event is no
   longer replayable.
+- `streamId` — a CUID2 naming this one stream connection, for subscribing it to collaborative
+  documents. A reconnect gets a new one. Additive; absent on daemons without collaborative
+  documents.
 
 `daemonId`, `daemonStartedAt`, and `draining` are additive and may be absent on older compatible
 protocol-22 daemons. `HappyAgentClient.updates()` emits `daemon_started` once for each distinct
@@ -9039,7 +9141,9 @@ protocol-22 daemons. `HappyAgentClient.updates()` emits `daemon_started` once fo
 
 After `hello`, every event is one SSE frame: the SSE `id:` field carries the event's `cursor`
 (feeding `Last-Event-ID`), the `event:` field is the event's `type`, and `data:` is the
-envelope.
+envelope. The one exception is the live `document.update` and `document.presence` frames
+described under Document Surfaces: they carry no `id:` line and no cursor, are not journal
+events, and reach only a stream its client subscribed to a document.
 In team mode, the same owner filtering applies to replay and live delivery. Hidden Happy
 integration events produce no event frame for another member; resuming after the last visible
 cursor must still deliver all subsequent visible events in journal order. The hello cursor and

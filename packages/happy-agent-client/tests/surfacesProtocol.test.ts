@@ -99,40 +99,11 @@ describe("Surface and Todo protocol", () => {
         }
     });
 
-    it("creates named contentless separators through the catalog without image inputs", async () => {
-        const request = { type: "separator", name: "Work", mutationId: "section" } as const;
-        expect(Value.Check(createSurfaceRequestSchema, request)).toBe(true);
+    it("no longer creates separators, so sections live inside todo lists", () => {
+        expect(Value.Check(createSurfaceRequestSchema, { type: "separator", name: "Work" })).toBe(
+            false,
+        );
         expect(Value.Check(createSurfaceRequestSchema, { type: "todo", name: "Inbox" })).toBe(true);
-        for (const image of [null, { data: "aW1hZ2U=" }]) {
-            expect(Value.Check(createSurfaceRequestSchema, { ...request, image })).toBe(false);
-        }
-        for (const invalid of [
-            { ...request, name: " " },
-            { ...request, type: "unknown" },
-            { ...request, content: "Not contentless" },
-            { ...request, creatorUserId: null },
-        ])
-            expect(Value.Check(createSurfaceRequestSchema, invalid)).toBe(false);
-        const separator: Surface = { ...surface, type: "separator", name: "Work", image: null };
-        expect(Value.Check(surfaceSchema, separator)).toBe(true);
-        expect(Value.Check(surfaceCreatedPayloadSchema, { surface: separator })).toBe(true);
-        const requests: { method: string; url: string; body: unknown }[] = [];
-        const client = new HappyAgentClient({
-            endpoint: "http://agent.local",
-            token: "t",
-            fetch: async (input, init) => {
-                requests.push({
-                    method: init?.method ?? "GET",
-                    url: input.toString(),
-                    body: JSON.parse(init?.body as string),
-                });
-                return new Response(JSON.stringify({ surface: separator }), { status: 201 });
-            },
-        });
-        await expect(client.createSurface(request)).resolves.toEqual({ surface: separator });
-        expect(requests).toEqual([
-            { method: "POST", url: "http://agent.local/v0/surfaces", body: request },
-        ]);
     });
 
     it("validates nullable user attribution while accepting older responses without it", () => {
