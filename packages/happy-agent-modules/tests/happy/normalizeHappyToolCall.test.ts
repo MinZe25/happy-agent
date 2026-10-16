@@ -184,6 +184,7 @@ describe("Happy mobile tool-call normalization", () => {
         ["create_agent", { title: "Review auth" }, "Starting collaborator: Review auth"],
         ["send_agent_message", { toAgentId: "agent42" }, "Sending a message to agent42"],
         ["interrupt_agent", { targetAgentId: "agent42" }, "Interrupting agent42"],
+        ["archive_agent", { targetAgentId: "agent42" }, "Archiving collaborator agent42"],
         ["create_task", { name: "Fix sync" }, "Creating task: Fix sync"],
         ["send_task_message", { taskId: "task7" }, "Sending a message to task task7"],
         ["archive_task", { taskId: "task7" }, "Archiving task task7"],

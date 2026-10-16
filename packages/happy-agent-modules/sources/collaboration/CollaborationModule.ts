@@ -15,10 +15,11 @@ import {
 } from "@slopus/happy-agent-base";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { Context } from "@steve.kite/stdlib";
+import { afterCommit, type Context } from "@steve.kite/stdlib";
 
 import { AbortModule } from "../abort/index.js";
 import type { BotSettingsModule } from "../botSettings/index.js";
+import type { ComputeModule } from "../compute/index.js";
 import { HistoryModule } from "../history/index.js";
 import type { ConfigModule } from "../config/index.js";
 import { senderAgentIdMetadata } from "../impl/messageOrigin.js";
@@ -34,6 +35,7 @@ import {
     type CollaborationSendInput,
 } from "./CollaborationAgent.js";
 import { collaborationMigrations } from "./CollaborationMigrations.js";
+import { archiveAgentTool } from "./tools/archive_agent.js";
 import { createAgentTool } from "./tools/create_agent.js";
 import { interruptAgentTool } from "./tools/interrupt_agent.js";
 import { sendMessageTool } from "./tools/send_message.js";
@@ -64,6 +66,7 @@ export class CollaborationModule implements AgentModule {
     readonly #abort: AbortModule;
     readonly #config: ConfigModule;
     readonly #history: HistoryModule;
+    readonly #compute: ComputeModule;
     readonly #crossWorkspace: boolean;
     readonly #botSettings: BotSettingsModule | undefined;
     #agents: AgentSystemRef | undefined;
@@ -77,11 +80,13 @@ export class CollaborationModule implements AgentModule {
         config: ConfigModule,
         abort: AbortModule,
         history: HistoryModule,
+        compute: ComputeModule,
         botSettings?: BotSettingsModule,
     ) {
         this.#config = config;
         this.#abort = abort;
         this.#history = history;
+        this.#compute = compute;
         this.#botSettings = botSettings;
         this.#crossWorkspace = config.configuration.values.features.crossWorkspace;
     }
@@ -286,6 +291,55 @@ export class CollaborationModule implements AgentModule {
         await this.#abort.abort(ctx, targetAgentId);
     }
 
+    /**
+     * Archive a collaborator this agent created, giving its place in the tree's collaborator
+     * budget back.
+     *
+     * A collaborator's model is fixed when it is created, so one whose provider stopped working
+     * cannot be repaired by talking to it, and it held its slot forever: a tree of such
+     * collaborators could create nothing at all. Archival is the explicit way out. It stops the
+     * collaborator and its running descendants the way an interruption does, marks only the
+     * collaborator archived, and keeps its conversation. Archived agents refuse further messages.
+     *
+     * Subtasks and workflow agents are archived by the modules that own them. Repeating the call
+     * is harmless: an already archived collaborator only has its machine released again. The
+     * model tool runs this in one transaction, so the checks and the archival share a snapshot.
+     */
+    async archiveAgent(ctx: Context, actingAgentId: string, targetAgentId: string): Promise<void> {
+        this.#assert(collaborationAgentIdSchema, actingAgentId, "acting agent ID");
+        this.#assert(collaborationAgentIdSchema, targetAgentId, "target agent ID");
+        const agents = this.#requireAgents();
+        const target = await agents.config(ctx, targetAgentId);
+        if (target === undefined || (await agents.parentOf(ctx, targetAgentId)) !== actingAgentId) {
+            throw new Error(
+                `Agent "${actingAgentId}" may archive only collaborators it created, and "${targetAgentId}" is not one of them.`,
+            );
+        }
+        if (isSubtask(target.metadata)) {
+            throw new Error(`Agent "${targetAgentId}" is a subtask; use archive_subtask.`);
+        }
+        if (belongsToWorkflow(target.metadata)) {
+            throw new Error(
+                `Agent "${targetAgentId}" belongs to a workflow, which owns its lifetime.`,
+            );
+        }
+        if (!isArchived(target.metadata)) {
+            await this.#abort.abort(ctx, targetAgentId);
+            const now = Date.now();
+            const version = target.metadata?.["version"];
+            await agents.updateMetadata(ctx, targetAgentId, {
+                archivedAt: now,
+                updatedAt: now,
+                version: typeof version === "number" ? version + 1 : 1,
+            });
+        }
+        // Releasing the machine cannot join the transaction, so it follows the commit. It is
+        // idempotent, which lets a retry after a crash past the commit still release it.
+        afterCommit(ctx, async (postCommitCtx) => {
+            await this.#compute.archiveAgent(postCommitCtx, targetAgentId);
+        });
+    }
+
     readonly #hooks: AgentModuleHooks = {
         /**
          * The identities and routing rules this agent needs to reach others by ID.
@@ -381,6 +435,7 @@ export class CollaborationModule implements AgentModule {
                     await this.#reachesAcrossWorkspaces(ctx, scope.agent.id),
                 ),
                 interruptAgentTool(this, scope.agent.id),
+                archiveAgentTool(this, scope.agent.id),
             ];
         },
     };
@@ -416,8 +471,7 @@ export class CollaborationModule implements AgentModule {
         const agents = this.#requireAgents();
         const parent = await agents.parentOf(ctx, scope.agent.id);
         if (parent === null) return;
-        if (Value.Check(archivedAgentMetadataSchema, (await agents.config(ctx, parent))?.metadata))
-            return;
+        if (isArchived((await agents.config(ctx, parent))?.metadata)) return;
         if ((await scope.runKV.read(ctx, INTERRUPTED_KEY)) === true) return;
         const said = await scope.runKV.read(ctx, LAST_TEXT_KEY);
         // Whitespace is not an answer. The note is written trimmed, so a blank one can only come
@@ -475,12 +529,7 @@ export class CollaborationModule implements AgentModule {
         selection: (CollaborationAgentSelection & { readonly provider: string }) | undefined,
     ): Promise<void> {
         const agents = this.#requireAgents();
-        if (
-            Value.Check(
-                archivedAgentMetadataSchema,
-                (await agents.config(ctx, toAgentId))?.metadata,
-            )
-        ) {
+        if (isArchived((await agents.config(ctx, toAgentId))?.metadata)) {
             throw new Error("The agent is archived and cannot receive messages.");
         }
         const message = {
@@ -645,11 +694,12 @@ export class CollaborationModule implements AgentModule {
                 // not consume the model-facing create_agent budget of the workflow owner.
                 if (belongsToWorkflow(config.metadata)) continue;
                 // A subtask is not a collaborator, but the collaborators below it are in this tree.
-                if (!isSubtask(config.metadata)) {
+                // An archived collaborator gave its slot back; anything below it still counts.
+                if (!isSubtask(config.metadata) && !isArchived(config.metadata)) {
                     toolCollaborators += 1;
                     if (toolCollaborators >= maxCollaborators) {
                         throw new Error(
-                            `Each root agent tree is limited to ${maxCollaborators} collaborators. Reuse an existing collaborator with send_agent_message.`,
+                            `Each root agent tree is limited to ${maxCollaborators} collaborators. Reuse an existing collaborator with send_agent_message, or free a place by archiving one that can no longer work with archive_agent.`,
                         );
                     }
                 }
@@ -826,6 +876,10 @@ function reportsToCreator(metadata: AgentMetadata | undefined): boolean {
 /** Subtasks stay in their tree but are neither counted collaborators nor a level of depth. */
 function isSubtask(metadata: AgentMetadata | undefined): boolean {
     return Value.Check(subtaskAgentMetadataSchema, metadata);
+}
+
+function isArchived(metadata: AgentMetadata | undefined): boolean {
+    return Value.Check(archivedAgentMetadataSchema, metadata);
 }
 
 /** Workflow metadata is the explicit ownership boundary for collaborators created by its agents. */

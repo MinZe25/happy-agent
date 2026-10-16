@@ -25,6 +25,18 @@ subtask itself is never counted toward `max_collaborators` and adds no level tow
 `max_collaboration_depth`. The check reads a local schema of the `subtask` marker because the
 subtasks module depends on this one, not the other way round.
 
+## Broken collaborators can be archived to free their slot
+
+Five collaborators created on a provider whose API key was invalid all failed at once. Their
+model could not change, messages only reached the same broken provider, and nothing could remove
+them, so they held every `max_collaborators` slot and the tree could create no collaborator on a
+working model. `archive_agent` now lets a creator archive an ordinary collaborator it created
+directly. Archival aborts the collaborator's subtree, marks only the collaborator archived,
+preserves its history, and releases its machine after commit. Archived collaborators no longer
+count toward the limit, but anything below them still does. The limit error and the
+`create_agent` description point to `archive_agent`. Subtasks keep `archive_subtask`, and
+workflow agents remain owned by their workflow.
+
 ## Spawn rows describe resolved execution, not task titles
 
 A creation row cannot infer its model from the task name or wait for an arbitrary result string.

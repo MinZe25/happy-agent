@@ -4,11 +4,11 @@ Lets one agent put another to work.
 
 ```ts
 const abort = new AbortModule(compute);
-new CollaborationModule(config, abort, history);
+new CollaborationModule(config, abort, history, compute);
 ```
 
-The module takes Config, Abort for transactional descendant-tree cancellation, and History for
-durable creation presentations,
+The module takes Config, Abort for transactional descendant-tree cancellation, History for
+durable creation presentations, and Compute to release an archived collaborator's machine,
 then reaches the rest of the runtime through the `AgentSystemRef` it is handed at `beforeStart`.
 `features.cross_workspace`, enabled by default, controls whether a known Agent ID may route a
 message outside direct collaboration ancestry.
@@ -178,6 +178,9 @@ creation has no `create_agent` call to present and continues through its own ope
 `max_collaborators` in `[settings]` controls how many collaborators created through `create_agent`
 one root agent tree retains across all branches and defaults to five. Collaborators are durable and
 reusable, so completed agents still count and accept later work through `send_agent_message`.
+A collaborator's model cannot change, so one whose provider stopped working can only be archived:
+`archive_agent` lets its creator do that, and an archived collaborator no longer counts. The
+collaborators below it are not archived and still count.
 Parallel tool calls share one reservation path and cannot race past the configured limit.
 Workflows call the module operation directly instead of going through the tool and remain under the
 workflow system's separate call limit. Workflow metadata is an explicit tree boundary, so those
@@ -203,8 +206,13 @@ own — so whatever shows a person their agents names it the same way it names e
 | `create_agent`       | Creates a capped collaborator and delivers its opening task. |
 | `send_agent_message` | Delivers one message to an allowed agent by Agent ID.        |
 | `interrupt_agent`    | Aborts a collaborator subtree and hard-kills its processes.  |
+| `archive_agent`      | Stops and archives a collaborator, freeing its limit slot.   |
 
-`interrupt_agent` is reviewed in Auto mode; the other two are not. Before process trees receive
+`interrupt_agent` and `archive_agent` are reviewed in Auto mode; the other two are not.
+`archive_agent` accepts only an ordinary collaborator the caller created directly. Subtasks use
+`archive_subtask`, and workflow agents belong to their workflow. It runs in one transaction that
+aborts the collaborator's subtree and marks only the collaborator archived, then releases its
+machine after commit. Repeating it is harmless. Before process trees receive
 their immediate hard kill, Compute stores a one-shot notice for each affected process owner and
 prepends it to that agent's next inference. The tool never waits for any run to settle.
 
