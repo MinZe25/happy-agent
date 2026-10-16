@@ -134,10 +134,6 @@ export const createTodoSurfaceRequestSchema = Type.Object(
     },
     { additionalProperties: false },
 );
-export const createSeparatorSurfaceRequestSchema = Type.Object(
-    { ...surfaceCreationFields, type: Type.Literal("separator") },
-    { additionalProperties: false },
-);
 export const createDocumentSurfaceRequestSchema = Type.Object(
     {
         ...surfaceCreationFields,
@@ -176,7 +172,6 @@ export const createTaskSurfaceRequestSchema = Type.Object(
 );
 export const createSurfaceRequestSchema = Type.Union([
     createTodoSurfaceRequestSchema,
-    createSeparatorSurfaceRequestSchema,
     createDocumentSurfaceRequestSchema,
     createArtifactSurfaceRequestSchema,
     createBotSurfaceRequestSchema,
@@ -339,11 +334,23 @@ export type ReorderTodoRequest = Static<typeof reorderTodoRequestSchema>;
 export const todoMutationRequestSchema = surfaceMemberRequestSchema;
 export type TodoMutationRequest = Static<typeof todoMutationRequestSchema>;
 
-/** A document's content version is independent of its catalog Surface version. */
+/** A position in a document's permanent change log; 0 before its first change. */
+export const surfaceDocumentSeqSchema = Type.Integer({
+    minimum: 0,
+    maximum: Number.MAX_SAFE_INTEGER,
+});
+export type SurfaceDocumentSeq = Static<typeof surfaceDocumentSeqSchema>;
+
+/**
+ * A document's read-only Markdown projection. Its content version is independent of its catalog
+ * Surface version; `seq` is absent on daemons without collaborative documents and on revisions
+ * frozen before a document became collaborative.
+ */
 export const surfaceDocumentSchema = Type.Object({
     authorUserId: Nullable(userIdSchema),
     createdAt: timestampSchema,
     lastEditorUserId: Nullable(userIdSchema),
+    seq: Type.Optional(surfaceDocumentSeqSchema),
     surfaceId: surfaceIdSchema,
     text: surfaceDocumentTextSchema,
     updatedAt: timestampSchema,
@@ -351,20 +358,11 @@ export const surfaceDocumentSchema = Type.Object({
 });
 export type SurfaceDocument = Static<typeof surfaceDocumentSchema>;
 
-export const surfaceDocumentResponseSchema = Type.Object({ document: surfaceDocumentSchema });
-export type SurfaceDocumentResponse = Static<typeof surfaceDocumentResponseSchema>;
-
 export const surfaceDocumentSnapshotResponseSchema = Type.Object({
     cursor: eventCursorSchema,
     document: surfaceDocumentSchema,
 });
 export type SurfaceDocumentSnapshotResponse = Static<typeof surfaceDocumentSnapshotResponseSchema>;
-
-export const updateSurfaceDocumentRequestSchema = Type.Object(
-    { text: surfaceDocumentTextSchema, mutationId: Type.Optional(mutationIdSchema) },
-    { additionalProperties: false },
-);
-export type UpdateSurfaceDocumentRequest = Static<typeof updateSurfaceDocumentRequestSchema>;
 
 export const surfaceDocumentRevisionSchema = Type.Object({
     actor: surfaceRevisionActorSchema,
@@ -398,3 +396,112 @@ export const surfaceDocumentVersionResponseSchema = Type.Object({
     revision: surfaceDocumentRevisionSchema,
 });
 export type SurfaceDocumentVersionResponse = Static<typeof surfaceDocumentVersionResponseSchema>;
+
+const BASE64_PATTERN = "^[A-Za-z0-9+/]*={0,2}$";
+
+/** Standard base64 for Yjs updates, state vectors, and awareness updates. */
+const surfaceDocumentBytesSchema = Type.String({ pattern: BASE64_PATTERN });
+
+/** One change: a Yjs update of at most 1 MiB decoded. */
+export const surfaceDocumentUpdateBytesSchema = Type.String({
+    pattern: BASE64_PATTERN,
+    maxLength: 1_398_104,
+});
+
+/** Where a change came from. Conversion is the one-time import of an older Markdown document. */
+export const surfaceDocumentChangeSourceSchema = Type.Union([
+    Type.Literal("api"),
+    Type.Literal("tool"),
+    Type.Literal("conversion"),
+]);
+export type SurfaceDocumentChangeSource = Static<typeof surfaceDocumentChangeSourceSchema>;
+
+/** One permanent log entry, without the change bytes. */
+export const surfaceDocumentChangeSchema = Type.Object({
+    actor: surfaceRevisionActorSchema,
+    createdAt: timestampSchema,
+    mutationId: Nullable(mutationIdSchema),
+    seq: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    size: Type.Integer({ minimum: 0 }),
+    source: surfaceDocumentChangeSourceSchema,
+});
+export type SurfaceDocumentChange = Static<typeof surfaceDocumentChangeSchema>;
+
+export const surfaceDocumentChangeListResponseSchema = Type.Object({
+    nextAfterSeq: Nullable(surfaceDocumentSeqSchema),
+    updates: Type.Array(surfaceDocumentChangeSchema),
+});
+export type SurfaceDocumentChangeListResponse = Static<
+    typeof surfaceDocumentChangeListResponseSchema
+>;
+
+/** `GET /state`: the document, or only what a supplied state vector lacks, as one Yjs update. */
+export const surfaceDocumentStateResponseSchema = Type.Object({
+    seq: surfaceDocumentSeqSchema,
+    stateVector: surfaceDocumentBytesSchema,
+    update: surfaceDocumentBytesSchema,
+});
+export type SurfaceDocumentStateResponse = Static<typeof surfaceDocumentStateResponseSchema>;
+
+/** A mutation ID names one change; repeating it returns that change's original `seq`. */
+export const sendSurfaceDocumentUpdateRequestSchema = Type.Object(
+    { mutationId: mutationIdSchema, update: surfaceDocumentUpdateBytesSchema },
+    { additionalProperties: false },
+);
+export type SendSurfaceDocumentUpdateRequest = Static<
+    typeof sendSurfaceDocumentUpdateRequestSchema
+>;
+
+export const surfaceDocumentSeqResponseSchema = Type.Object({ seq: surfaceDocumentSeqSchema });
+export type SurfaceDocumentSeqResponse = Static<typeof surfaceDocumentSeqResponseSchema>;
+
+/** Subscribes or unsubscribes one event stream, named by its hello `streamId`. */
+export const surfaceDocumentSubscriptionRequestSchema = Type.Object(
+    { streamId: cuid2Schema },
+    { additionalProperties: false },
+);
+export type SurfaceDocumentSubscriptionRequest = Static<
+    typeof surfaceDocumentSubscriptionRequestSchema
+>;
+
+/** Relayed to the document's other subscribed streams; never stored. */
+export const sendSurfaceDocumentPresenceRequestSchema = Type.Object(
+    {
+        awarenessClientId: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+        streamId: cuid2Schema,
+        update: surfaceDocumentUpdateBytesSchema,
+    },
+    { additionalProperties: false },
+);
+export type SendSurfaceDocumentPresenceRequest = Static<
+    typeof sendSurfaceDocumentPresenceRequestSchema
+>;
+
+/** The data of a live `document.update` frame on a subscribed event stream. */
+export const surfaceDocumentUpdateFrameSchema = Type.Object({
+    actor: surfaceRevisionActorSchema,
+    mutationId: Nullable(mutationIdSchema),
+    seq: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    source: surfaceDocumentChangeSourceSchema,
+    surfaceId: surfaceIdSchema,
+    update: surfaceDocumentUpdateBytesSchema,
+});
+export type SurfaceDocumentUpdateFrame = Static<typeof surfaceDocumentUpdateFrameSchema>;
+
+/** The data of a live `document.presence` frame; inactive frames carry no awareness update. */
+export const surfaceDocumentPresenceFrameSchema = Type.Object({
+    active: Type.Boolean(),
+    awarenessClientId: Type.Optional(
+        Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    ),
+    clientKey: Type.String({ minLength: 1, maxLength: 128 }),
+    revision: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    surfaceId: surfaceIdSchema,
+    update: Type.Optional(surfaceDocumentUpdateBytesSchema),
+});
+export type SurfaceDocumentPresenceFrame = Static<typeof surfaceDocumentPresenceFrameSchema>;
+
+/** One live frame from a subscribed event stream: never journaled, never replayed. */
+export type SurfaceDocumentLiveFrame =
+    | { type: "document.update"; data: SurfaceDocumentUpdateFrame }
+    | { type: "document.presence"; data: SurfaceDocumentPresenceFrame };

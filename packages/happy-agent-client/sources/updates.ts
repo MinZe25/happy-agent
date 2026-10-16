@@ -1,5 +1,6 @@
 import type { Cuid2, EventCursor, Timestamp } from "./protocol/common.js";
 import type { EventStreamFrame, EventStreamOptions, HappyAgentEvent } from "./protocol/events.js";
+import type { SurfaceDocumentLiveFrame } from "./protocol/surfaces.js";
 import { EventStreamProtocolError } from "./readEventStream.js";
 
 const INITIAL_RECONNECT_DELAY_MS = 100;
@@ -16,7 +17,8 @@ export interface HappyAgentUpdatesOptions {
 
 /** One item from the client's reconnecting event feed. */
 export type HappyAgentUpdate =
-    | { kind: "connected"; cursor: EventCursor }
+    /** `streamId` names this connection for document subscriptions; each reconnect has a new one. */
+    | { kind: "connected"; cursor: EventCursor; streamId?: Cuid2 }
     | {
           kind: "daemon_started";
           cursor: EventCursor;
@@ -28,7 +30,9 @@ export type HappyAgentUpdate =
     | { kind: "draining"; cursor: EventCursor; daemonId?: Cuid2 }
     | { kind: "state_lost"; cursor: EventCursor }
     | { kind: "disconnected"; cursor?: EventCursor }
-    | { kind: "event"; event: HappyAgentEvent; cursor: EventCursor };
+    | { kind: "event"; event: HappyAgentEvent; cursor: EventCursor }
+    /** A live frame for a document subscribed on the current connection; never replayed. */
+    | { kind: "document"; frame: SurfaceDocumentLiveFrame };
 
 type OpenEventStream = (options: EventStreamOptions) => AsyncIterable<EventStreamFrame>;
 
@@ -75,7 +79,13 @@ export async function* reconnectingUpdates(
                     if (cursor === undefined || stateLost) cursor = frame.hello.cursor;
 
                     connection = "connected";
-                    yield { kind: "connected", cursor };
+                    yield {
+                        kind: "connected",
+                        cursor,
+                        ...(frame.hello.streamId === undefined
+                            ? {}
+                            : { streamId: frame.hello.streamId }),
+                    };
                     if (
                         frame.hello.daemonId !== undefined &&
                         frame.hello.daemonStartedAt !== undefined &&
@@ -109,6 +119,10 @@ export async function* reconnectingUpdates(
                     throw new EventStreamProtocolError(
                         "An event stream sent an event before its hello frame.",
                     );
+                }
+                if (frame.kind === "document") {
+                    yield { kind: "document", frame: frame.frame };
+                    continue;
                 }
                 if (cursor !== undefined && frame.cursor <= cursor) continue;
 
