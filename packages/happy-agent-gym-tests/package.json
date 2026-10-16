@@ -8,13 +8,14 @@
         "test:gym:api": "node --experimental-strip-types scripts/runHappyApiSuite.ts"
     },
     "devDependencies": {
-        "@slopus/happy-agent-client": "0.0.92",
+        "@slopus/happy-agent-client": "0.0.94",
         "@slopus/happy-agent-gym": "workspace:*",
         "@types/node": "^24.0.10",
         "@types/ws": "8.18.1",
         "tweetnacl": "0.14.5",
         "typescript": "^5.8.3",
         "vitest": "^3.2.4",
-        "ws": "^8.21.1"
+        "ws": "^8.21.1",
+        "yjs": "13.6.31"
     }
 }

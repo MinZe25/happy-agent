@@ -12,11 +12,12 @@ describe("separators are not a Surface type", () => {
         running.push(gym);
         const client = gym.client;
         const list = (await client.createSurface({ type: "todo", name: "Inbox" })).surface;
+        // An older desktop may still send the withdrawn type; the current client cannot express it.
         for (const request of [
             { type: "separator", name: "Work" },
             { type: "separator", name: "Work", id: "separatorsurface00000001" },
-        ] as const)
-            await expect(client.createSurface(request)).rejects.toMatchObject({
+        ])
+            await expect(client.createSurface(request as never)).rejects.toMatchObject({
                 status: 400,
                 code: "invalid_request",
             });

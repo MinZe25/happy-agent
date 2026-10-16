@@ -32,7 +32,9 @@ import {
     ensureSurfaceChatRequestSchema,
     createTodoRequestSchema,
     updateTodoRequestSchema,
-    updateSurfaceDocumentRequestSchema,
+    sendSurfaceDocumentUpdateRequestSchema,
+    surfaceDocumentSubscriptionRequestSchema,
+    sendSurfaceDocumentPresenceRequestSchema,
     reorderTodoRequestSchema,
     todoMutationRequestSchema,
     todoListScopeSchema,
@@ -95,7 +97,7 @@ import { MAX_RUNNER_FRAME_BYTES, RunnerUnavailableError } from "@slopus/happy-ag
 import { WebSocketServer } from "ws";
 
 import { AbortModule } from "../abort/index.js";
-import { SurfacesModule, SurfaceError, SurfaceDocumentConflictError } from "../surfaces/index.js";
+import { SurfacesModule, SurfaceError } from "../surfaces/index.js";
 import type { SchedulingModule } from "../scheduling/index.js";
 import {
     ArtifactConflictError,
@@ -573,6 +575,8 @@ export class ApiModule implements AgentModule {
     readonly #services: ServicesModule | undefined;
     readonly #unsubscribe: (() => void)[] = [];
     readonly #streams = new Set<SseWriter>();
+    /** Event streams that live document frames can address, with the person who opened each. */
+    readonly #eventStreams = new Map<string, { writer: SseWriter; userId: string | undefined }>();
     readonly #shutdownListeners = new Set<() => void | Promise<void>>();
     readonly #drainSources = new Map<string, ApiDrainSource>();
     readonly #runningDrains = new Map<string, ApiRunningDrain>();
@@ -2511,6 +2515,14 @@ export class ApiModule implements AgentModule {
                             event.payload.mutationId,
                         );
                     this.#journal.append(event.type, event.payload);
+                }),
+                // Live document frames bypass the journal: no id, no cursor, one stream each.
+                this.#surfaces.onDocumentFrame((streamId, frame) => {
+                    this.#eventStreams
+                        .get(streamId)
+                        ?.writer.write(
+                            `event: ${frame.type}\ndata: ${JSON.stringify(frame.data)}\n\n`,
+                        );
                 }),
             );
         if (this.#userSettings !== undefined)
@@ -4961,12 +4973,20 @@ export class ApiModule implements AgentModule {
             maxWritableBytes: MAX_SSE_BUFFER_BYTES,
         });
         this.#streams.add(writer);
+        // Live document frames address a stream by this name; journal events never use it.
+        const streamId = this.#surfaces === undefined ? undefined : createId();
+        if (streamId !== undefined)
+            this.#eventStreams.set(streamId, { writer, userId: teamUser(ctx)?.id });
         let heartbeat: NodeJS.Timeout | undefined;
         let unsubscribe = (): void => undefined;
         void writer.done.then(() => {
             if (heartbeat !== undefined) clearInterval(heartbeat);
             unsubscribe();
             this.#streams.delete(writer);
+            if (streamId !== undefined) {
+                this.#eventStreams.delete(streamId);
+                this.#surfaces?.closeDocumentStream(streamId);
+            }
         });
         unsubscribe = this.#journal.subscribe((event) => {
             if (writer.closed) return;
@@ -4997,6 +5017,7 @@ export class ApiModule implements AgentModule {
                     daemonId: this.#daemonId,
                     daemonStartedAt: this.#daemonStartedAt,
                     draining: this.#draining,
+                    ...(streamId === undefined ? {} : { streamId }),
                 })}\n\n`,
             )
         ) {
@@ -5514,22 +5535,77 @@ export class ApiModule implements AgentModule {
                 return true;
             }
             const documentMatch =
-                /^\/v0\/surfaces\/document\/([a-z][a-z0-9]*)(?:\/(versions)(?:\/([^/]+))?)?$/.exec(
+                /^\/v0\/surfaces\/document\/([a-z][a-z0-9]*)(?:\/(state|updates|versions|subscribe|unsubscribe|presence)(?:\/([^/]+))?)?$/.exec(
                     url.pathname,
                 );
             if (documentMatch !== null) {
                 const surfaceId = documentMatch[1]!;
                 if (!Value.Check(surfaceIdSchema, surfaceId)) return false;
-                const history = documentMatch[2] !== undefined;
+                const route = documentMatch[2];
                 const selectedVersion = documentMatch[3];
-                if (request.method === "GET") {
-                    if (!history) {
-                        const cursor = this.#journal.cursor();
-                        sendJson(response, 200, {
-                            document: await surfaces.getDocument(ctx, surfaceId),
-                            cursor,
-                        });
-                    } else if (selectedVersion !== undefined) {
+                if (selectedVersion !== undefined && route !== "versions") return false;
+                if (route === undefined && request.method === "PUT") {
+                    // Older clients saved Markdown here; they stop on 405 instead of retrying.
+                    response.setHeader("allow", "GET");
+                    throw new ApiError(
+                        405,
+                        "method_not_allowed",
+                        "Editing this document needs a newer Happy.",
+                    );
+                }
+                if (route === undefined && request.method === "GET") {
+                    const { seq } = documentQuery(url, ["seq"]);
+                    const cursor = this.#journal.cursor();
+                    const { document } = await surfaces.document(ctx, surfaceId, seq);
+                    sendJson(response, 200, { document, cursor });
+                    return true;
+                }
+                if (route === "state" && request.method === "GET") {
+                    const { seq, stateVector } = documentQuery(url, ["seq", "stateVector"]);
+                    sendJson(
+                        response,
+                        200,
+                        await surfaces.documentState(ctx, surfaceId, {
+                            ...(seq === undefined ? {} : { seq }),
+                            ...(stateVector === undefined ? {} : { stateVector }),
+                        }),
+                    );
+                    return true;
+                }
+                if (route === "updates" && request.method === "POST") {
+                    const body = await bodyAs(
+                        request,
+                        sendSurfaceDocumentUpdateRequestSchema,
+                        "document change",
+                        2 * 1024 * 1024,
+                    );
+                    sendJson(
+                        response,
+                        200,
+                        await surfaces.changeDocument(
+                            ctx,
+                            surfaceId,
+                            body.update,
+                            { userId: await surfaces.owner(ctx), agentId: null },
+                            body.mutationId,
+                        ),
+                    );
+                    return true;
+                }
+                if (route === "updates" && request.method === "GET") {
+                    const { afterSeq, limit } = documentQuery(url, ["afterSeq", "limit"]);
+                    if (limit !== undefined && (limit < 1 || limit > 200))
+                        throw invalidRequest("The document change page is invalid.");
+                    sendJson(
+                        response,
+                        200,
+                        await surfaces.documentChanges(ctx, surfaceId, afterSeq ?? 0, limit ?? 100),
+                    );
+                    return true;
+                }
+                if (route === "versions" && request.method === "GET") {
+                    if (selectedVersion !== undefined) {
+                        documentQuery(url, []);
                         sendJson(response, 200, {
                             revision: await surfaces.getDocumentVersion(
                                 ctx,
@@ -5537,48 +5613,70 @@ export class ApiModule implements AgentModule {
                                 decodePathSegment(selectedVersion, "document revision"),
                             ),
                         });
-                    } else {
-                        const after = url.searchParams.getAll("afterVersion");
-                        const limits = url.searchParams.getAll("limit");
-                        const limit = limits[0] === undefined ? 100 : Number(limits[0]);
-                        if (
-                            after.length > 1 ||
-                            limits.length > 1 ||
-                            (limits[0] !== undefined &&
-                                !Value.Check(
-                                    Type.String({ pattern: "^[1-9][0-9]*$" }),
-                                    limits[0],
-                                )) ||
-                            !Value.Check(Type.Integer({ minimum: 1, maximum: 200 }), limit)
-                        )
-                            throw invalidRequest("The document history page is invalid.");
+                        return true;
+                    }
+                    const after = url.searchParams.getAll("afterVersion");
+                    const limits = url.searchParams.getAll("limit");
+                    const limit = limits[0] === undefined ? 100 : Number(limits[0]);
+                    if (
+                        [...url.searchParams.keys()].some(
+                            (key) => key !== "afterVersion" && key !== "limit",
+                        ) ||
+                        after.length > 1 ||
+                        limits.length > 1 ||
+                        (limits[0] !== undefined &&
+                            !Value.Check(Type.String({ pattern: "^[1-9][0-9]*$" }), limits[0])) ||
+                        !Value.Check(Type.Integer({ minimum: 1, maximum: 200 }), limit)
+                    )
+                        throw invalidRequest("The document history page is invalid.");
+                    sendJson(
+                        response,
+                        200,
+                        await surfaces.documentVersions(ctx, surfaceId, after[0], limit),
+                    );
+                    return true;
+                }
+                if (route === "presence" && request.method === "POST") {
+                    const body = await bodyAs(
+                        request,
+                        sendSurfaceDocumentPresenceRequestSchema,
+                        "document presence",
+                        2 * 1024 * 1024,
+                    );
+                    this.#requireOwnEventStream(ctx, body.streamId);
+                    await surfaces.shareDocumentPresence(
+                        ctx,
+                        surfaceId,
+                        body.streamId,
+                        body.awarenessClientId,
+                        body.update,
+                    );
+                    sendJson(response, 200, {});
+                    return true;
+                }
+                if (
+                    (route === "subscribe" || route === "unsubscribe") &&
+                    request.method === "POST"
+                ) {
+                    const body = await bodyAs(
+                        request,
+                        surfaceDocumentSubscriptionRequestSchema,
+                        "document subscription",
+                    );
+                    this.#requireOwnEventStream(ctx, body.streamId);
+                    if (route === "subscribe")
                         sendJson(
                             response,
                             200,
-                            await surfaces.documentVersions(ctx, surfaceId, after[0], limit),
+                            await surfaces.subscribeDocument(ctx, surfaceId, body.streamId),
                         );
+                    else {
+                        await surfaces.unsubscribeDocument(ctx, surfaceId, body.streamId);
+                        sendJson(response, 200, {});
                     }
                     return true;
                 }
-                if (request.method !== "PUT" || history) return false;
-                const current = await surfaces.getDocument(ctx, surfaceId);
-                const version = requireIfMatch(request, current.version, {
-                    currentVersion: current.version,
-                    document: current,
-                });
-                const body = await bodyAs(
-                    request,
-                    updateSurfaceDocumentRequestSchema,
-                    "document update",
-                    2 * 1024 * 1024,
-                );
-                sendJson(response, 200, {
-                    document: await surfaces.updateDocument(ctx, surfaceId, version, body, {
-                        userId: await surfaces.owner(ctx),
-                        agentId: null,
-                    }),
-                });
-                return true;
+                return false;
             }
             const match =
                 /^\/v0\/surfaces\/todo\/([a-z][a-z0-9]*)(?:\/([a-z][a-z0-9]*)(?:\/(reorder|versions)(?:\/([^/]+))?)?)?$/.exec(
@@ -5702,11 +5800,6 @@ export class ApiModule implements AgentModule {
             sendJson(response, 200, { todo });
             return true;
         } catch (error) {
-            if (error instanceof SurfaceDocumentConflictError)
-                throw new ApiError(409, "conflict", error.message, {
-                    currentVersion: error.document.version,
-                    document: error.document,
-                });
             if (!(error instanceof SurfaceError)) throw error;
             throw new ApiError(
                 error.code === "not_found"
@@ -5725,6 +5818,13 @@ export class ApiModule implements AgentModule {
                     : { todo: error.todo, currentVersion: error.todo.version },
             );
         }
+    }
+
+    /** Only the person who opened an event stream may route live document frames to it. */
+    #requireOwnEventStream(ctx: Context, streamId: string): void {
+        const stream = this.#eventStreams.get(streamId);
+        if (stream === undefined || stream.writer.closed || stream.userId !== teamUser(ctx)?.id)
+            throw new ApiError(404, "not_found", "The event stream was not found.");
     }
 
     async #handleTaskRoute(
@@ -7860,6 +7960,7 @@ export class ApiModule implements AgentModule {
             capabilities: {
                 desktopLiveControl: this.#live !== undefined,
                 ...(this.#bridges === undefined ? {} : { workspaceBridges: true }),
+                ...(this.#surfaces === undefined ? {} : { collaborativeDocuments: true }),
             },
             version: {
                 protocol: API_PROTOCOL_VERSION,
@@ -8388,6 +8489,33 @@ const runtimeConfigPatchSchema = Type.Object(
     },
     { additionalProperties: false, minProperties: 1 },
 );
+
+/**
+ * A document route's query: only the named fields, each at most once. Positions are non-negative
+ * integers and state vectors are base64.
+ */
+function documentQuery<const Key extends "seq" | "afterSeq" | "limit" | "stateVector">(
+    url: URL,
+    allowed: readonly Key[],
+): { seq?: number; afterSeq?: number; limit?: number; stateVector?: string } {
+    const query: { seq?: number; afterSeq?: number; limit?: number; stateVector?: string } = {};
+    for (const key of new Set(url.searchParams.keys())) {
+        const values = url.searchParams.getAll(key);
+        const value = values[0]!;
+        if (!allowed.includes(key as Key) || values.length > 1)
+            throw invalidRequest("The document query is invalid.");
+        if (key === "stateVector") {
+            if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value))
+                throw invalidRequest("The state vector must be base64.");
+            query.stateVector = value;
+        } else {
+            if (!/^(0|[1-9][0-9]{0,15})$/.test(value) || !Number.isSafeInteger(Number(value)))
+                throw invalidRequest("The document query is invalid.");
+            query[key as "seq" | "afterSeq" | "limit"] = Number(value);
+        }
+    }
+    return query;
+}
 
 async function bodyAs<Schema extends TSchema>(
     request: IncomingMessage,

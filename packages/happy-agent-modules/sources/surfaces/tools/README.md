@@ -4,10 +4,12 @@ One fixed common array serves every model. Todo operations name their Surface in
 current-version guards. A separate fixed admin array adds type-specific creation and user
 administration only for actual active admin bots. Every mutation owns its permission policy.
 
-Document tools read current or historical Markdown, replace the full text with a current-version
-guard, and list bounded revision summaries. Reads skip review; updates require shared-data Auto
-review without filesystem elevation. Document creation has the same optional managed-image
-boundary as todo creation.
+Document tools read the Markdown projection at the latest or an earlier `seq`, write full
+replacement Markdown against the `seq` the model read, and list the change log. A write applies
+only the difference from that version, so people's concurrent edits survive, and it is refused
+with an explanation when the document holds content Markdown cannot represent. Reads skip review;
+writes require shared-data Auto review without filesystem elevation. Document creation has the
+same optional managed-image boundary as todo creation.
 
 Admin bots receive `create_artifact_surface`, `create_bot_surface`, and `create_task_surface`.
 Each names its own target field, requires an explicit creator, and accepts an optional image.

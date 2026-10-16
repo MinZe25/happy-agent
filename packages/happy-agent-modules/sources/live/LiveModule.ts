@@ -648,6 +648,8 @@ export class LiveModule implements AgentModule {
             clearTimeout(pending.timer);
             pending.result = message.result;
             pending.resolve(message.result);
+        } else if (message.type === "appState") {
+            throw new Error("This Happy does not accept desktop AppState updates.");
         } else {
             const key = sessionKey(message.target);
             if (

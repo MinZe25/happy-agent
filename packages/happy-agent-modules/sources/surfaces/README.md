@@ -1,7 +1,9 @@
 # Surfaces
 
-Shared typed feature instances, including todo lists, Markdown documents, and references to
-artifacts, bots, and tasks, with each person's sidebar order on the nested member record. All heads and immutable revisions live in module-owned AgentKV storage.
+Shared typed feature instances, including todo lists, collaborative documents, and references to
+artifacts, bots, and tasks, with each person's sidebar order on the nested member record. Heads and
+immutable revisions live in module-owned AgentKV storage; document change logs live in their own
+tables beside it.
 
 ```text
 HTTP / model tools -> SurfacesModule -> one composing database transaction
@@ -19,11 +21,20 @@ Separators are withdrawn. Rows an earlier daemon stored stay untouched, but the 
 filters them out, so listing, membership, ordering, content routes, and chats all treat their IDs
 as not found, and a creation request reusing one is refused rather than echoing it back.
 
-Document Surfaces keep a separately versioned current snapshot and permanent full revisions.
-Guarded replacements, including clearing or applying historical text, never change the catalog
-version. History listing reads a bounded range of separately stored metadata summaries, not full
-document text. Every revision retains its actor, source, and immutable mutation ID for uncertain-save
-recovery. Ordinary models can read, update, and list versions; only active admin bots create them.
+Document Surfaces are Yjs documents edited with BlockNote. `documents/` owns them: every accepted
+change is appended to a permanent log with its `seq`, actor, source, and mutation ID, and the head
+and periodic snapshots let any version be rebuilt by replaying from the nearest snapshot. Changes
+merge, so writes need no version guard; a repeated mutation ID returns its first `seq`. Markdown
+is a read-only projection made by converting the Yjs fragment through BlockNote's schema on a
+private copy, so content outside that schema is detected and left out instead of deleted. Agent
+writes compare their Markdown with the version they read, block by block, and apply only the
+difference to the current document inside the write transaction. A document stored as Markdown
+by an earlier daemon converts on first touch; its Markdown revisions stay readable.
+
+Live changes and presence ride the API's existing event stream as unjournaled frames. The module
+keeps which streams follow which documents in memory and publishes a change only after its
+transaction commits; the API checks that a stream belongs to the caller before routing to it.
+Ordinary models can read, update, and list changes; only active admin bots create documents.
 
 Reference Surfaces store only an immutable binding to their target beside the shared record.
 Every read resolves it against the owning Artifacts, Bots, or Tasks module, so the live name,

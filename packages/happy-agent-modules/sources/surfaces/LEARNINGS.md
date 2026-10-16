@@ -87,18 +87,54 @@ Markdown syntax. Creation, editing, ordering, state changes, and permanent histo
 todo operations. Clients edit the full text so removing the prefix returns the row to an ordinary
 task; historical row styling remains a client choice.
 
-## Document content has its own version and permanent audit history
+## Documents are collaborative, not guarded Markdown
 
-A document Surface is shared Markdown, not a workspace file or an artifact. Content edits use
-their own guarded version without changing the Surface's catalog version or sidebar state.
-The full snapshot, immutable revision, bounded history summary, and notification intent commit
-together. Authors remain the explicit creator; editors and audit actors come from trusted callers.
+Documents first stored whole Markdown replaced under `If-Match`, so two people editing at once
+had one save rejected and had to redo it. The request was a WYSIWYG editor with real-time editing
+on a good CRDT. A document is now a Yjs document edited with BlockNote. Changes merge, every
+accepted change is a permanent log entry with its `seq`, actor, source, and mutation ID, and any
+version is the log replayed to that entry. A repeated mutation ID returns its original `seq`,
+which is how a client recovers a change whose response was lost. Nothing is deleted or restored:
+reverting writes an old version's content as a new change. Live changes and presence ride the
+existing event stream as frames that never enter the journal, so a desktop opens no extra
+connection and a reconnect's cursor is unaffected.
 
-Each revision keeps the request's mutation ID verbatim, or null when absent. Text equality could
-not identify a save whose response was lost after a collaborator edited again; the revision's
-immutable correlation metadata can. This is not a deduplication key, and no-ops or conflicts do
-not append or overwrite revisions. Reading an old version and performing an ordinary guarded
-replacement restores its text while retaining every intermediate version.
+Presence sent through a stream that does not follow the document relays nothing and is not an
+error. A window's throttled presence can land just after it closed the document, and answering
+with a conflict would only produce noise while relaying it would bring that presence back.
+
+## The daemon reads documents through the editor's exact schema
+
+Markdown, agent writes, and the content check all convert the Yjs fragment through BlockNote's
+schema, so the daemon and the desktop editor must run the same BlockNote. A unit test fails when
+the installed or declared `@blocknote/core` differs from the version the desktop pins (0.51.4);
+upgrade both together. Conversion runs on a private copy because y-prosemirror deletes nodes it
+cannot place, and any such delete marks content outside the model. That content is still stored
+and relayed unchanged and left out of Markdown, and an agent's Markdown write to such a document
+is refused with an error saying why, because rewriting from Markdown would delete what Markdown
+cannot see.
+
+## Agent writes are differences from the version the agent read
+
+An agent sends full Markdown and the `seq` it read. Replacing the content outright would erase
+whatever people typed since, and would drop block IDs, comments, colors, and nesting that
+Markdown cannot express. The write instead aligns blocks between that version and the agent's
+Markdown, keeps unchanged blocks and their invisible attributes, and applies only the computed
+difference to the current document in the write transaction. Unchanged Markdown appends nothing.
+
+## Markdown escapes only what would change the meaning
+
+Escaping every punctuation character made `a_snake_name` read back as `a\_snake\_name`, which
+agents then copied into their writes. Escaping is now decided by context: intraword underscores,
+lone asterisks, and ordinary punctuation stay literal, and each formatted run is checked by
+parsing the result back, falling back to plainer output when the parse would differ.
+
+## Older documents convert once, on first touch
+
+Documents an earlier daemon stored as Markdown become collaborative the first time they are read
+or written, in that transaction, as entry 1 with source `conversion` and no actor. Their Markdown
+revisions stay readable as history and are never written again. The withdrawn `PUT` returns
+`405` without reading its body, so an older client stops instead of retrying a save forever.
 
 ## Nothing historical is destroyed
 
