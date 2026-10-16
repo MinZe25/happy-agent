@@ -496,20 +496,20 @@ Define these on `:root`, either directly or through the fallback mapping in
 These are the roles the core vocabulary has no key for. Define them alongside
 the core variables; they follow appearance changes in exactly the same way.
 
-| Variable                      | Meaning                                                             | Light      | Dark       |
-| ----------------------------- | ------------------------------------------------------------------- | ---------- | ---------- |
-| `--happy-canvas`              | The page canvas **behind** cards; use when your page is a card list | `#f5f5f5`  | `#1e1e1e`  |
-| `--happy-header-background`   | A content header strip's fill (your own, not the outer shell's)     | `#ffffff`  | `#212121`  |
-| `--happy-header-text`         | Text on that strip                                                  | `#18171c`  | `#ffffff`  |
-| `--happy-selected-background` | The fill of a **selected** row or tab                               | `#eaeaea`  | `#2c2c2e`  |
-| `--happy-link`                | Hyperlink text (Happy teal, identical in both schemes)              | `#2baccc`  | `#2baccc`  |
-| `--happy-input-background`    | A text field's fill                                                 | `#f5f5f5`  | `#303030`  |
-| `--happy-input-text`          | A text field's value                                                | `#000000`  | `#ffffff`  |
-| `--happy-input-placeholder`   | A text field's placeholder                                          | `#999999`  | `#8e8e93`  |
-| `--happy-code-background`     | The code/diff/log surface                                           | `#f6f8fa`  | `#161b22`  |
-| `--happy-scrim`               | Backdrop behind an in-app overlay you own                           | 48 % black | 48 % black |
-| `--happy-scrollbar-thumb`     | Custom scrollbar thumb                                              | 40 % grey  | 40 % grey  |
-| `--happy-shadow-color`        | The base elevation tint, for a shadow you compose yourself          | 10 % black | 10 % black |
+| Variable                      | Meaning                                                              | Light      | Dark       |
+| ----------------------------- | -------------------------------------------------------------------- | ---------- | ---------- |
+| `--happy-canvas`              | The host's canvas; never paint your page's background with it (§7.1) | `#f5f5f5`  | `#1e1e1e`  |
+| `--happy-header-background`   | A content header strip's fill (your own, not the outer shell's)      | `#ffffff`  | `#212121`  |
+| `--happy-header-text`         | Text on that strip                                                   | `#18171c`  | `#ffffff`  |
+| `--happy-selected-background` | The fill of a **selected** row or tab                                | `#eaeaea`  | `#2c2c2e`  |
+| `--happy-link`                | Hyperlink text (Happy teal, identical in both schemes)               | `#2baccc`  | `#2baccc`  |
+| `--happy-input-background`    | A text field's fill                                                  | `#f5f5f5`  | `#303030`  |
+| `--happy-input-text`          | A text field's value                                                 | `#000000`  | `#ffffff`  |
+| `--happy-input-placeholder`   | A text field's placeholder                                           | `#999999`  | `#8e8e93`  |
+| `--happy-code-background`     | The code/diff/log surface                                            | `#f6f8fa`  | `#161b22`  |
+| `--happy-scrim`               | Backdrop behind an in-app overlay you own                            | 48 % black | 48 % black |
+| `--happy-scrollbar-thumb`     | Custom scrollbar thumb                                               | 40 % grey  | 40 % grey  |
+| `--happy-shadow-color`        | The base elevation tint, for a shadow you compose yourself           | 10 % black | 10 % black |
 
 No other `--happy-*` name exists. If you need a role that is not listed, build
 it from the documented ones with `color-mix`:
@@ -668,21 +668,28 @@ hard-code `MM/DD/YYYY` or a currency symbol.
 
 ### 7.1 Choosing a background
 
-| You are painting                                  | Background                     |
-| ------------------------------------------------- | ------------------------------ |
-| The document, when the content **is** the surface | `--color-background-primary`   |
-| The document, when it holds a list of cards       | `--happy-canvas`               |
-| A card on the canvas                              | `--color-background-primary`   |
-| A recessed panel: table header, sidebar, well     | `--color-background-secondary` |
-| A code, log, or diff block                        | `--happy-code-background`      |
-| A hovered row                                     | `--color-background-ghost`     |
-| A selected row or active tab                      | `--happy-selected-background`  |
-| A pressed control                                 | `--color-background-tertiary`  |
-| A text input                                      | `--happy-input-background`     |
+| You are painting                              | Background                     |
+| --------------------------------------------- | ------------------------------ |
+| `html`, `body`, and the page's root element   | none — leave it transparent    |
+| A card                                        | `--color-background-primary`   |
+| A recessed panel: table header, sidebar, well | `--color-background-secondary` |
+| A code, log, or diff block                    | `--happy-code-background`      |
+| A hovered row                                 | `--color-background-ghost`     |
+| A selected row or active tab                  | `--happy-selected-background`  |
+| A pressed control                             | `--color-background-tertiary`  |
+| A text input                                  | `--happy-input-background`     |
 
-Default to the first row. Painting the outer document
-`--color-background-primary` creates one quiet continuous surface. Reach for
-`--happy-canvas` only when you genuinely have separated cards.
+**The page does not paint its own background.** Whatever shows the page — the
+desktop artifact pane, a chat preview, a panel — already paints the surface the
+page sits on, and an opaque page background shows up as a mismatched block, or
+as a flash of the wrong colour while the host resizes. Leave `html` and `body`
+transparent and keep `color-scheme: light dark` (§5.4), so text and controls
+follow the host's appearance. Opened alone in a browser tab, the browser's own
+canvas shows through, which is also correct.
+
+An artifact that genuinely needs a fixed canvas — a print-like document, or a
+visualization drawn for one palette — asks for it through its version's
+`background`, not with page CSS. That is rare; transparent is the default.
 
 ### 7.2 Borders
 
@@ -733,6 +740,21 @@ Use a shadow only for something that genuinely floats above the page:
 Never put a shadow on a button, input, row, chip, badge, or table. Never write a
 shadow with your own colour; if you must compose one, tint it with
 `--happy-shadow-color`.
+
+### 7.5 One surface deep
+
+Build hierarchy from spacing, hairline dividers, and type weight, not from more
+boxes.
+
+- **Never nest surfaces.** No card inside a card, no bordered box inside a
+  bordered box, no filled panel inside a filled panel. Inside a card, separate
+  its parts with a `gap`, a `border-top` hairline, or a section title (§6.2).
+  A box that exists only to group things reads as generated filler; remove it.
+- **No accent stripe.** Never give a card, callout, quote, or list item a thick,
+  coloured, or rounded left border. A callout is a soft semantic fill with a
+  word or glyph (§9.7), or plain text with a section title.
+- Flat is the default. Most pages need no card at all: a column of sections,
+  each a title and its rows, on the host's surface.
 
 ---
 
@@ -1079,6 +1101,8 @@ Prefer `<table>` — you get semantics and keyboard behaviour for free.
 A card grid is a flex row with `flex-wrap: wrap; gap: 12px` and children at
 `flex: 1 1 280px`, or a real Grid with `repeat(auto-fill, minmax(280px, 1fr))`
 (comment the Grid, §4.1).
+
+A card holds text, rows, and controls — never another card (§7.5).
 
 ### 9.6 Your own navigation, toolbars, and tabs
 
@@ -1757,6 +1781,14 @@ generating a web page tends to do by default.
 33. `outline: none` without a replacement focus indicator (§12).
 34. A `<div>` with an `onclick` and no role, tabindex, or key handler (§12).
 
+**Surfaces**
+
+35. A background on `html`, `body`, or the page's root element. The host paints
+    the surface (§7.1).
+36. A card inside a card, or any box nested inside another box (§7.5).
+37. A thick, coloured, or rounded left border used as an accent on a card,
+    callout, or quote (§7.5).
+
 ---
 
 ## 17. A complete baseline
@@ -1853,7 +1885,7 @@ body {
     font-weight: 400;
     font-synthesis: none;
     color: var(--app-text);
-    background: var(--app-surface);
+    /* No background: the host's surface shows through (§7.1). */
     -webkit-font-smoothing: antialiased;
 }
 
@@ -1994,7 +2026,6 @@ function Page() {
     flex-direction: column;
     height: 100%;
     min-height: 0;
-    background: var(--app-surface);
 }
 .page-title {
     font-size: 20px;
@@ -2065,6 +2096,11 @@ in **both** light and dark, at **three** container widths: **400**, **640**, and
       which are 2 px.
 - [ ] For each nested rounded corner, `inner === max(0, outer − inset)`.
 - [ ] No `box-shadow` on a button, input, row, chip, or table.
+- [ ] `html`, `body`, and the root element compute `background-color` to
+      `rgba(0, 0, 0, 0)`.
+- [ ] No element with a border or fill sits inside another element with a
+      border or fill, other than controls and badges.
+- [ ] No `border-left` wider than 1 px.
 
 **Accent and contrast**
 
