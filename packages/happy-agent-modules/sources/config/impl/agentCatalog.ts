@@ -30,6 +30,8 @@ import {
 import type { HappyAgentConfigValues, HappyAgentConfiguration } from "../ConfigModule.js";
 import { RoundRobinRouterProvider } from "./RoundRobinRouterProvider.js";
 import { CredentialDiagnosticSources } from "./credentialDiagnosticSanitizer.js";
+import type { ProviderExecutionObservations } from "./ProviderExecutionObservations.js";
+import { observeProviderExecution } from "./observeProviderExecution.js";
 import { resolveDefaultNodeName } from "./resolveDefaultNodeName.js";
 
 type ConfiguredProvider = HappyAgentConfigValues["providers"][string];
@@ -423,6 +425,7 @@ export function agentProviders(
     isProviderEnabled: (providerId: string) => boolean = () => true,
     providerSignal: (providerId: string) => AbortSignal | undefined = () => undefined,
     concreteProviders?: AgentProviders,
+    observations?: ProviderExecutionObservations,
 ): AgentProviders {
     const providers = new AgentProviders();
     const retryLimit = configuration.values.settings.inferenceMaxRetries;
@@ -437,7 +440,9 @@ export function agentProviders(
                 async ({ model }) => {
                     const provider = await concreteProviders.resolve(id, model);
                     if (provider === null) throw new Error(`Provider "${id}" is unavailable.`);
-                    return provider;
+                    return observations === undefined
+                        ? provider
+                        : observeProviderExecution(provider, observations, id, null);
                 },
                 type,
             );
@@ -463,7 +468,19 @@ export function agentProviders(
                         sources,
                         onAccountUsage,
                     );
-                    return sources.snapshot().protect(concrete);
+                    const diagnostics = sources.snapshot();
+                    const protectedProvider = diagnostics.protect(concrete);
+                    return observations === undefined
+                        ? protectedProvider
+                        : observeProviderExecution(
+                              protectedProvider,
+                              observations,
+                              id,
+                              sources.credentialSource,
+                              sources.recovery,
+                              provider.type,
+                              diagnostics,
+                          );
                 } catch (error) {
                     // Discovery may throw before a credential exists. Only inputs already passed
                     // to that discovery can be removed; no after-the-fact source inference.
@@ -612,7 +629,7 @@ async function createProvider(
             else if (ambient) {
                 const directory = environment.CODEX_HOME?.trim();
                 sources.environment("CODEX_HOME", directory);
-                sources.path(directory);
+                sources.path(directory || join(homedir(), ".codex"));
                 sources.path(
                     join(directory || homedir(), directory ? "auth.json" : ".codex/auth.json"),
                 );
@@ -633,6 +650,16 @@ async function createProvider(
         if (ambient && !provider.apiKey?.trim() && credential instanceof CodexApiKeyCredential)
             sources.environment("OPENAI_API_KEY", environment.OPENAI_API_KEY);
         if (credential instanceof CodexSessionCredential) sources.path(credential.authFile);
+        if (credential !== null) {
+            if (provider.apiKey?.trim())
+                sources.selected("configuration", `providers.${id}.api_key`);
+            else if (
+                credential instanceof CodexApiKeyCredential &&
+                environment.OPENAI_API_KEY?.trim()
+            )
+                sources.selected("environment", "OPENAI_API_KEY");
+            else sources.selected("native_login", "Codex sign-in");
+        }
         return new CodexProvider({
             credential: required(credential, "Codex", id),
             parallelToolCalls: true,
@@ -697,6 +724,24 @@ async function createProvider(
             ));
         if (credential instanceof ClaudeCodeCredential)
             sources.path(credential.configDir ?? join(homedir(), ".claude"));
+        if (credential instanceof ClaudeCodeCredential) {
+            sources.selected(
+                "native_login",
+                "Claude Code sign-in",
+                provider.configDir === undefined && !process.env.CLAUDE_CONFIG_DIR?.trim(),
+            );
+        } else if (credential !== null) {
+            const [key, value, variable] =
+                credential instanceof ClaudeOAuthCredential
+                    ? ["oauth_token", provider.oauthToken, "CLAUDE_CODE_OAUTH_TOKEN"]
+                    : credential instanceof ClaudeApiKeyCredential
+                      ? ["api_key", provider.apiKey, "ANTHROPIC_API_KEY"]
+                      : ["auth_token", provider.authToken, "ANTHROPIC_AUTH_TOKEN"];
+            sources.selected(
+                value === undefined ? "environment" : "configuration",
+                value === undefined ? variable! : `providers.${id}.${key}`,
+            );
+        }
         await ensureClaudeWorkingDirectory(claudeWorkingDirectory);
         return new AnthropicProvider({
             credential: required(credential, "Claude", id),
@@ -731,7 +776,7 @@ async function createProvider(
                 else {
                     const directory = env.GROK_HOME?.trim();
                     sources.environment("GROK_HOME", directory);
-                    sources.path(directory);
+                    sources.path(directory || join(homedir(), ".grok"));
                     sources.path(
                         join(directory || homedir(), directory ? "auth.json" : ".grok/auth.json"),
                     );
@@ -754,6 +799,12 @@ async function createProvider(
                       ),
                   )
                 : null);
+        if (credential !== null) {
+            if (provider.apiKey?.trim())
+                sources.selected("configuration", `providers.${id}.api_key`);
+            else if (env.XAI_API_KEY?.trim()) sources.selected("environment", "XAI_API_KEY");
+            else sources.selected("native_login", "Grok sign-in");
+        }
         return new GrokProvider({
             credential: required(credential, "Grok", id),
             ...(provider.baseUrl === undefined ? {} : { endpoint: provider.baseUrl }),
@@ -822,6 +873,14 @@ async function createProvider(
         "Bedrock",
         id,
     );
+    if (bearerCredential !== null) {
+        sources.selected(
+            provider.bearerToken?.trim() ? "configuration" : "environment",
+            provider.bearerToken?.trim()
+                ? `providers.${id}.bearer_token`
+                : (provider.bearerTokenEnvVar ?? "AWS_BEARER_TOKEN_BEDROCK"),
+        );
+    }
     // Bedrock serves each family through that family's own wire protocol, so the selected model
     // decides which client speaks to it.
     const override =

@@ -167,3 +167,36 @@ messages. History accepts the published shapes, but its readable formatter and s
 configuration blocks, and a configuration-only row contributes no header or blank entry. Ordinary
 safe error prose remains intact, including paragraphs. This also protects model-facing history
 reads and copied excerpts without weakening the durable record used by authorized API readers.
+
+Excerpt assembly filters empty formatted rows before adding separators, so configuration-only
+history stays truly empty rather than producing blank headers or whitespace.
+
+## Execution history records actual attempts, not requested selections
+
+History consumes Config's bounded execution observations and commits configuration records with
+the affected inference. The last actual snapshot lives in agent KV, so compaction and restart do
+not invent a new baseline. Requested user modes remain untouched. Coalesced requests record only
+the route actually used; concrete fallback attempts remain ordered. A committed visible message
+in the same run can anchor the first change, while a mid-run fallback stays chronological.
+Account labels and uncertainty update the baseline without proving an account switch.
+
+Completion-time configuration creation put live assistant messages before rows that durable
+history placed first. History now prepares the committed baseline and visible anchor before
+inference, then reserves immutable records synchronously when a provider block is published.
+Earlier finalized attempts and the current attempt are considered in order against the last
+allocated mode. A failed current lookup prevents late backfill; no-output terminal failures still
+record all observed attempts before the error. Completion persists the exact reserved IDs and
+content. The cache holds at most 512 operations, 64 attempts each, for fifteen minutes from
+preparation; settlement and abort release it. Restart and persistence rollback discard uncommitted
+reservations like streamed output, and a resumed attempt creates fresh configuration IDs.
+
+Typed terminal failures carry the last actual attempt's source and mode. An exception translated
+outside the native observation boundary retains safe plain text without invented classification;
+the API explicitly makes structured error metadata optional. Config exposes only public snapshot
+types through its module index; History never imports the observation store implementation.
+
+Base can currently resume a settled failure as an unsolicited inference after restart. Such an
+inference has no accepted visible History run, so History does not manufacture configuration rows
+or make its existing raw orphan error visible. This deliberate Base behavior (8be07b97) remains
+under maintainer discussion #9, outside the writer, and is recorded by an explicit expected-failure
+test of the alternative: one foreground request per send.

@@ -277,7 +277,7 @@ describe("user input tool requests", () => {
 
             const history = await gym.client.getMessages(gym.defaultSessionId);
             const messages = history.runs.flatMap((run) => run.messages);
-            expect(messages).toHaveLength(3);
+            expect(messages).toHaveLength(4);
             expect(messages[0]).toMatchObject({
                 id: sent.message.id,
                 role: "user",
@@ -290,10 +290,23 @@ describe("user input tool requests", () => {
                 ],
             });
             expect(messages[2]).toMatchObject({
+                role: "service",
+            });
+            // API.md 4612-4614: the baseline follows the requested tool chronologically,
+            // while its placement anchor remains the already committed user message.
+            expect(messages[2]?.content).toEqual([
+                {
+                    type: "configuration",
+                    before: null,
+                    after: mode,
+                    beforeMessageId: nonemptyId(sent.message),
+                },
+            ]);
+            expect(messages[3]).toMatchObject({
                 role: "agent",
                 content: [{ type: "text", text: "Skills inspected." }],
             });
-            expect(new Set(messages.map((message) => message.id)).size).toBe(3);
+            expect(new Set(messages.map((message) => message.id)).size).toBe(4);
             expect(gym.inference.requests).toHaveLength(1);
             expect(gym.inference.requests[0]!.messages.map((message) => message.role)).toEqual([
                 "user",
@@ -352,3 +365,8 @@ describe("user input tool requests", () => {
         }
     }, 60_000);
 });
+
+function nonemptyId(value: { readonly id: string }): string {
+    expect(value.id).toMatch(/\S/);
+    return value.id;
+}

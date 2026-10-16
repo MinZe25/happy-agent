@@ -17,6 +17,46 @@ remain untouched. Unrelated exceptions retain their identity. Changed exceptions
 prototype, classification fields, own properties, and bounded causes without mutating the original.
 The concrete provider also retains its identity for native account, quota, and live checks.
 
+The snapshot also includes exact configured credential values and the default native login
+directory derived from the selected home. Removing only configuration keys or a full auth-file
+path left echoed values and directory-only errors exposed. These values remain private sanitizer
+inputs, never structured source descriptors.
+
+Native providers currently construct fresh sessions. A caching adapter must still be safe:
+equal string sets and source descriptors preserve one decoration and its attribution; differing
+snapshots combine sanitization and permanently invalidate that shared session's attribution.
+The bounded union never drops old strings: overflow replaces the entire diagnostic with safe
+generic text. Per-session state is weakly held and contains no provider or execution context.
+
+## Execution provenance belongs to one actual operation
+
+A provider session can outlive many runs, so a session-level last-account value is not evidence
+about the current failure. Config observes concrete native and scripted session entry points in
+place, capturing an operation handle before inference or compaction begins. Late events use only
+that handle. Naming, verification, and permission-review sessions cannot claim a foreground
+operation, and compaction has a separate claim kind. Settlement, abort, overlap, expiry and bounds
+invalidate the whole observation rather than retaining an earlier source as if it were terminal.
+
+Observations retain at most 512 operations for fifteen minutes from begin, with at most 64 actual
+attempts each. Snapshots are copied, bounded and frozen; no credential, provider, session, or
+context enters the store. Source descriptors come from successful credential selection, not error
+prose or a later configuration read. Default native Claude alone receives the curated login
+command; configured tokens, environment overrides and custom directories get their own guidance.
+Unknown native account identity stays null, and scripted providers do not manufacture native
+family or account provenance.
+
+The current attempt is captured at native `run` entry, separately from finalized observations.
+This lets streaming consumers attribute the first block before completion without changing
+`read()`'s terminal-only contract. A concrete terminal is finalized before a router can start its
+next account. Provider-owned transport retries remain inside the same native call and observation;
+their internal HTTP requests do not invent additional source snapshots.
+
+Observation decorates a provider instance once per process. Reusing an injected provider across
+runtimes leaves it bound to the first observation store; the new runtime reads its own store and
+fails closed to unknown provenance. Native factories create fresh providers. Gym restarts must do
+the same while preserving script progress, rather than carrying decorated provider instances into
+another runtime or rebinding production observation state.
+
 ## Claude Code runs in a private empty folder
 
 Claude providers never named a working directory, so Claude Code ran wherever the daemon was

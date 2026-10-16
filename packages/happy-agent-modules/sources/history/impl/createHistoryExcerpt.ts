@@ -53,11 +53,13 @@ export function createHistoryExcerpt(
 
 /** Render as many of these messages as fit, filling from whichever end matters. */
 function render(records: readonly HistoryRecord[], budget: number, fromEnd: boolean): string {
-    const formatted = records.map((record) =>
-        formatHistoryMessage(record.message, record.position + 1, {
-            textLimit: MESSAGE_TEXT_LIMIT,
-        }),
-    );
+    const formatted = records
+        .map((record) =>
+            formatHistoryMessage(record.message, record.position + 1, {
+                textLimit: MESSAGE_TEXT_LIMIT,
+            }),
+        )
+        .filter((message) => message.length > 0);
     const selected: string[] = [];
     let characters = 0;
     const indexes = fromEnd

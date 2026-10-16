@@ -226,6 +226,22 @@ shutdown and does not claim that terminals or background processes have exited.
   before it can read messages. Runner, service, and exported-bot credentials remain outside the
   ordinary API admission boundary.
 
+- Invalid diagnostic shapes must not take the unredacted fast path. An unauthorized reader loses
+  an out-of-schema error object entirely; an unexpected message-event payload recursively loses
+  sensitive diagnostic keys. Valid ordinary content stays unchanged, and authorized delivery
+  retains the original immutable record. No recipient-specific variants accumulate in the journal.
+
+- A live failure uses the error row's durable History identity and projection. Synthesizing a
+  second ID at settlement made a keyed client show two errors after reload or replay. Settlement
+  looks up the existing failure only within its visible run; it never exposes orphan raw records.
+
+- Configuration reservations are captured synchronously when a provider block enters the event
+  queue. Looking up its account later during conversion could read the next routed attempt.
+  Journal the reserved record immediately before that block, and suppress its durable append
+  only after creation was actually announced. Every eligible History creation uses the same
+  per-agent queue, so committed service rows cannot overtake delayed stream conversion. Snapshot
+  failures log identifiers only and prevent completion-time backfill instead of guessing a mode.
+
 ## Composer mode
 
 - Execution provenance is output-only. Send, slash-command, and draft inputs validate known

@@ -57,6 +57,8 @@ export type GymBlock =
 
 /** How the scripted model answers one inference request. */
 export interface GymTurn {
+    /** When specified, only this concrete scripted provider may consume the turn. */
+    readonly providerId?: string;
     /** What the model produces, in order. */
     readonly content?: readonly GymBlock[];
     /**
@@ -90,6 +92,8 @@ export interface GymTurn {
 
 /** What the scripted model was asked, exactly as the agent asked it. */
 export interface GymInferenceRequest {
+    /** The concrete scripted provider instance that served this request. */
+    readonly providerId: string;
     /** Zero-based position in the selected inference seam; see `GymInference`. */
     readonly callIndex: number;
     /** The provider session, which is the agent the request belongs to. */
@@ -165,12 +169,15 @@ export interface ScriptedInferenceOptions {
     readonly inference?: GymInference;
     readonly compaction?: GymCompactionHandler;
     readonly models?: readonly AgentModel[];
+    readonly providerIds?: readonly string[];
 }
 
 export interface ScriptedInference {
     readonly models: readonly AgentModel[];
     readonly providers: AgentProviders;
     readonly log: GymInferenceLog;
+    /** Fresh provider instances for one daemon lifetime, sharing this script's progress. */
+    createProviders(): AgentProviders;
 }
 
 /**
@@ -188,18 +195,24 @@ export function createScriptedInference(options: ScriptedInferenceOptions = {}):
     const script = options.inference ?? [];
     let scriptCallIndex = 0;
 
-    const provider = new GymProvider({
-        answer: async (request) => {
+    const providerOptions = {
+        answer: async (request: GymInferenceRequest): Promise<GymTurn> => {
             if (typeof script === "function") {
                 requests.push(request);
                 return await script(request);
             }
             if (request.sessionId.startsWith("naming:")) return DEFAULT_NAMING_TURN;
             const turnIndex = scriptCallIndex;
-            scriptCallIndex += 1;
             const scriptedRequest = { ...request, callIndex: turnIndex };
             requests.push(scriptedRequest);
             const turn = script[turnIndex];
+            if (turn?.providerId !== undefined && turn.providerId !== request.providerId) {
+                throw new Error(
+                    `Gym turn ${String(turnIndex)} requires provider ${turn.providerId}, ` +
+                        `but provider ${request.providerId} attempted it.`,
+                );
+            }
+            scriptCallIndex += 1;
             if (turn === undefined) {
                 unscripted.push(scriptedRequest);
                 return {
@@ -212,14 +225,24 @@ export function createScriptedInference(options: ScriptedInferenceOptions = {}):
             }
             return turn;
         },
-        compact: async (request) => {
+        compact: async (request: GymCompactionRequest) => {
             compactions.push(request);
             return await (options.compaction ?? defaultCompaction)(request);
         },
-    });
+    };
 
-    const providers = new AgentProviders();
-    providers.add(GYM_PROVIDER_ID, provider, "gym");
+    const providerStates = (options.providerIds ?? [GYM_PROVIDER_ID]).map((providerId) => ({
+        ...providerOptions,
+        providerId,
+        state: { callIndex: 0 },
+    }));
+    const createProviders = (): AgentProviders => {
+        const providers = new AgentProviders();
+        for (const provider of providerStates) {
+            providers.add(provider.providerId, new GymProvider(provider), "gym");
+        }
+        return providers;
+    };
 
     const log: GymInferenceLog = {
         requests,
@@ -260,10 +283,17 @@ export function createScriptedInference(options: ScriptedInferenceOptions = {}):
         lastTools: () => (requests.at(-1)?.tools ?? []).map((tool) => tool.name),
     };
 
-    return { log, models: options.models ?? GYM_MODELS, providers };
+    return {
+        log,
+        models: options.models ?? GYM_MODELS,
+        providers: createProviders(),
+        createProviders,
+    };
 }
 
 interface GymProviderOptions {
+    readonly providerId: string;
+    readonly state: { callIndex: number };
     readonly answer: (request: GymInferenceRequest) => Promise<GymTurn>;
     readonly compact: (request: GymCompactionRequest) => Promise<SessionCompaction>;
 }
@@ -274,7 +304,6 @@ class GymProvider extends BaseProvider {
     static override readonly outputTypes: readonly ProviderModality[] = ["text"];
 
     readonly #options: GymProviderOptions;
-    #callIndex = 0;
 
     constructor(options: GymProviderOptions) {
         super();
@@ -284,18 +313,27 @@ class GymProvider extends BaseProvider {
     async session(id: string, options: { readonly tools?: readonly SessionTool[] }) {
         return new GymSession(id, options.tools ?? [], {
             answer: async (request) => {
-                const callIndex = this.#callIndex;
-                this.#callIndex += 1;
-                return await this.#options.answer({ ...request, callIndex });
+                const callIndex = this.#options.state.callIndex;
+                this.#options.state.callIndex += 1;
+                return await this.#options.answer({
+                    ...request,
+                    callIndex,
+                    providerId: this.#options.providerId,
+                });
             },
             compact: async (request) =>
-                await this.#options.compact({ ...request, callIndex: this.#callIndex }),
+                await this.#options.compact({
+                    ...request,
+                    callIndex: this.#options.state.callIndex,
+                }),
         });
     }
 }
 
 interface GymSessionOptions {
-    readonly answer: (request: Omit<GymInferenceRequest, "callIndex">) => Promise<GymTurn>;
+    readonly answer: (
+        request: Omit<GymInferenceRequest, "callIndex" | "providerId">,
+    ) => Promise<GymTurn>;
     readonly compact: (
         request: Omit<GymCompactionRequest, "callIndex">,
     ) => Promise<SessionCompaction>;

@@ -439,7 +439,7 @@ export async function startHappyAgentRuntime(
         });
 
         const events = new EventsModule();
-        const history = new HistoryModule(events, botSettings);
+        const history = new HistoryModule(events, botSettings, config);
         history.onAppend(observation.recordHistory);
         const presence = new PresenceModule(config);
         const systemPrompt = new SystemPromptModule(config, compute.computeModule);

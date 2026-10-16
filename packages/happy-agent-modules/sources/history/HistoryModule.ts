@@ -21,8 +21,10 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
     clientMetadataValueSchema,
+    messageModeSchema,
     userIdSchema,
     type AgentSpawnPresentation,
+    type MessageMode,
 } from "@slopus/happy-agent-client";
 import { afterCommit, withLogContext, type Context } from "@steve.kite/stdlib";
 import {
@@ -41,6 +43,10 @@ import {
 import { decodeRequestProfile } from "../impl/requestProfile.js";
 import type { BotSettingsModule } from "../botSettings/index.js";
 import type { EventsModule } from "../events/index.js";
+import type { ConfigModule, ProviderExecutionAttempt } from "../config/index.js";
+import { executionConfigurationChanged } from "./impl/executionConfigurationChanged.js";
+import { executionFailure } from "./impl/executionFailure.js";
+import { ExecutionConfigurationReservations } from "./impl/ExecutionConfigurationReservations.js";
 import { queryToolCallMessage } from "./persistence/queryToolCallMessage.js";
 import { queryRecordToolSpawnPresentation } from "./persistence/queryToolSpawnPresentation.js";
 import {
@@ -131,6 +137,8 @@ type HistoryToolArguments = Static<typeof historyToolArgumentsSchema>;
 
 const PENDING_BLOCKS_KEY = "pending_blocks";
 const PENDING_INFERENCE_ID_KEY = "pending_inference_id";
+const EXECUTION_BASELINE_KEY = "execution_baseline";
+const EXECUTION_ANCHOR_KEY = "execution_anchor";
 const TOOL_NAME_KEY = "tool_name";
 const TOOL_PRESENTATION_KEY = "tool_presentation";
 const toolOutcomePresentationSchema = Type.Object(
@@ -205,6 +213,8 @@ export class HistoryModule implements AgentModule {
     readonly name = "history";
     readonly #events: EventsModule | undefined;
     readonly #botSettings: BotSettingsModule | undefined;
+    readonly #config: ConfigModule | undefined;
+    readonly #executionReservations = new ExecutionConfigurationReservations();
 
     /** Who is watching the archive: the live subscriptions this module supervises. */
     readonly #appendListeners = new Set<HistoryAppendListener>();
@@ -216,9 +226,10 @@ export class HistoryModule implements AgentModule {
      * @param botSettings Whether a bot keeps the agents it governs from reading the history of
      * agents outside its own tree. Without it, any agent may read any agent's history.
      */
-    constructor(events?: EventsModule, botSettings?: BotSettingsModule) {
+    constructor(events?: EventsModule, botSettings?: BotSettingsModule, config?: ConfigModule) {
         this.#events = events;
         this.#botSettings = botSettings;
+        this.#config = config;
         // Compile during module construction, not while the first history request owns the
         // database transaction. The cache contains fixed schemas, never transcript content.
         for (const schema of [
@@ -235,6 +246,24 @@ export class HistoryModule implements AgentModule {
     /** Preserve user control inputs alongside text and images in pending and accepted history. */
     inputBlocks(content: readonly SessionInputBlock[]): HistoryBlock[] {
         return content.map(toHistoryInputBlock);
+    }
+
+    /** Synchronous, bounded and I/O-free; called when a provider block is published, not later. */
+    pendingExecutionConfigurations(
+        agentId: string,
+        inferenceId: string,
+    ): readonly HistoryMessage[] {
+        return this.#executionReservations.reserve(
+            agentId,
+            inferenceId,
+            this.#config?.executionObservation(agentId, inferenceId),
+            this.#config?.currentExecutionObservation(agentId, inferenceId),
+        );
+    }
+
+    /** A failed optional snapshot must not be replaced with a late finalized observation. */
+    invalidateExecutionConfigurations(agentId: string, inferenceId: string): void {
+        this.#executionReservations.invalidate(agentId, inferenceId);
     }
 
     readonly migrations: readonly AgentModuleMigration[] = [
@@ -582,6 +611,29 @@ export class HistoryModule implements AgentModule {
                     FROM ${sql.raw(HISTORY_TABLE)}
                     WHERE agent_id = ${agentId} AND record_id = ${messageId}
                     LIMIT 1`,
+            );
+            return rows[0] === undefined ? undefined : toHistoryRecord(rows[0]).message;
+        });
+    }
+
+    /** The same durable failure identity is used by reload, live delivery and replay. */
+    async runFailure(
+        ctx: Context,
+        agentId: string,
+        runId: string,
+    ): Promise<HistoryMessage | undefined> {
+        if (
+            !Value.Check(historyAgentIdSchema, agentId) ||
+            !Value.Check(historyRecordIdSchema, runId)
+        )
+            throw new Error("The history module received an invalid failure lookup.");
+        return await this.#direct(ctx, async (txCtx) => {
+            const rows = await agentDatabaseRows<HistoryRow>(
+                txCtx.db,
+                sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
+                    FROM ${sql.raw(HISTORY_TABLE)}
+                    WHERE agent_id = ${agentId} AND run_id = ${runId} AND role = 'error'
+                    ORDER BY position DESC LIMIT 1`,
             );
             return rows[0] === undefined ? undefined : toHistoryRecord(rows[0]).message;
         });
@@ -1230,6 +1282,18 @@ export class HistoryModule implements AgentModule {
             provider: scope.agent.provider,
         };
         const messages: HistoryMessage[] = [];
+        const attempts = this.#config?.executionObservation(scope.agent.id, inference.inferenceId);
+        const prepared = this.#executionReservations.complete(
+            scope.agent.id,
+            inference.inferenceId,
+            attempts,
+        );
+        if (prepared !== undefined) {
+            messages.push(...prepared.records);
+            if (prepared.baseline !== null)
+                await scope.kv.write(ctx, EXECUTION_BASELINE_KEY, prepared.baseline);
+        }
+        if (this.#config !== undefined) await scope.runKV.delete(ctx, EXECUTION_ANCHOR_KEY);
         if (blocks.length > 0) {
             messages.push({
                 role: "assistant",
@@ -1243,6 +1307,12 @@ export class HistoryModule implements AgentModule {
                 role: "error",
                 blocks: [{ type: "text", text: inference.errorMessage }],
                 recordId: createRecordId(),
+                // A thrown exception may be translated by a router after the native boundary.
+                // Keep its sanitized text, but do not invent native terminal classification.
+                // API.md:4658-4659,4689 make structured error details optional on these rows.
+                ...(attempts?.at(-1)?.errorCode === undefined
+                    ? {}
+                    : { error: executionFailure(attempts.at(-1)) }),
                 ...attribution,
             });
         }
@@ -1254,6 +1324,60 @@ export class HistoryModule implements AgentModule {
         await this.#append(ctx, scope.agent.id, ...messages);
         await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
         await scope.runKV.delete(ctx, PENDING_INFERENCE_ID_KEY);
+    }
+
+    async #executionConfigurations(
+        ctx: Context,
+        scope: AgentModuleScope,
+        attempts: readonly ProviderExecutionAttempt[] | undefined,
+        runId: string | undefined,
+        useMessageAnchor = true,
+    ): Promise<HistoryMessage[]> {
+        const anchor = useMessageAnchor
+            ? await scope.runKV.read(ctx, EXECUTION_ANCHOR_KEY)
+            : undefined;
+        if (useMessageAnchor) await scope.runKV.delete(ctx, EXECUTION_ANCHOR_KEY);
+        if (attempts === undefined || attempts.length === 0 || runId === undefined) return [];
+        // A Base recovery inference without an accepted boundary has no visible history run.
+        // Preserve its existing raw failure record, but never manufacture public configuration.
+        const runs = await agentDatabaseRows<{ run_id: string }>(
+            ctx.db,
+            sql`SELECT run_id FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+                WHERE agent_id = ${scope.agent.id} AND run_id = ${runId} LIMIT 1`,
+        );
+        if (runs.length === 0) return [];
+        const stored = await scope.kv.read(ctx, EXECUTION_BASELINE_KEY);
+        let baseline: MessageMode | null = Value.Check(messageModeSchema, stored) ? stored : null;
+        const anchorMessage = Value.Check(historyRecordIdSchema, anchor)
+            ? await this.message(ctx, scope.agent.id, anchor)
+            : undefined;
+        let beforeMessageId =
+            anchorMessage?.runId === runId && anchorMessage.hideFromUser !== true
+                ? anchorMessage.recordId
+                : null;
+        const messages: HistoryMessage[] = [];
+        for (const attempt of attempts) {
+            if (baseline === null || executionConfigurationChanged(baseline, attempt.mode)) {
+                messages.push({
+                    at: Date.now(),
+                    role: "service",
+                    recordId: createRecordId(),
+                    runId,
+                    blocks: [
+                        {
+                            type: "configuration",
+                            before: baseline,
+                            after: attempt.mode,
+                            beforeMessageId,
+                        },
+                    ],
+                });
+            }
+            baseline = attempt.mode;
+            beforeMessageId = null;
+        }
+        await scope.kv.write(ctx, EXECUTION_BASELINE_KEY, baseline);
+        return messages;
     }
 
     async #appendPendingBlock(
@@ -1381,6 +1505,7 @@ export class HistoryModule implements AgentModule {
             blocks: [{ type: "text", text: error }],
             recordId: settlementId,
             role: "error",
+            error: executionFailure(undefined),
             runId,
             ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
             provider: scope.agent.provider,
@@ -1915,6 +2040,8 @@ export class HistoryModule implements AgentModule {
                     : { hideFromUser: accepted.metadata.hideFromUser }),
                 ...(remoteMessageId === undefined ? {} : { remoteMessageId }),
             });
+            if (this.#config !== undefined && fromUser && accepted.metadata?.hideFromUser !== true)
+                await scope.runKV.write(ctx, EXECUTION_ANCHOR_KEY, accepted.id);
             if (pending !== undefined) {
                 await agentDatabaseRun(
                     ctx.db,
@@ -1935,6 +2062,67 @@ export class HistoryModule implements AgentModule {
         /** Keep the current inference identity durable until its completed blocks are appended. */
         beforeInferenceTransact: async (ctx, scope, inference): Promise<void> => {
             await scope.runKV.write(ctx, PENDING_INFERENCE_ID_KEY, inference.inferenceId);
+            if (this.#config === undefined) return;
+            const runId = this.#events?.activeRunId(scope.agent.id);
+            if (runId === undefined) return;
+            const runs = await agentDatabaseRows<{ run_id: string }>(
+                ctx.db,
+                sql`SELECT run_id FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+                    WHERE agent_id = ${scope.agent.id} AND run_id = ${runId} LIMIT 1`,
+            );
+            if (runs.length === 0) return;
+            const stored = await scope.kv.read(ctx, EXECUTION_BASELINE_KEY);
+            const baseline = Value.Check(messageModeSchema, stored) ? stored : null;
+            const anchor = await scope.runKV.read(ctx, EXECUTION_ANCHOR_KEY);
+            const message = Value.Check(historyRecordIdSchema, anchor)
+                ? await this.message(ctx, scope.agent.id, anchor)
+                : undefined;
+            const beforeMessageId =
+                message?.runId === runId && message.hideFromUser !== true ? message.recordId : null;
+            const agentId = scope.agent.id;
+            const inferenceId = inference.inferenceId;
+            afterCommit(ctx, () => {
+                this.#executionReservations.prepare(
+                    agentId,
+                    inferenceId,
+                    runId,
+                    baseline,
+                    beforeMessageId,
+                );
+            });
+        },
+
+        beforeInference: (_ctx, scope, inference): void => {
+            this.#config?.beginExecutionObservation(
+                scope.agent.id,
+                inference.inferenceId,
+                "inference",
+            );
+        },
+
+        beforeCompaction: (_ctx, scope, compaction): void => {
+            this.#config?.beginExecutionObservation(
+                scope.agent.id,
+                compaction.compactionId,
+                "compaction",
+            );
+        },
+
+        afterCompaction: async (ctx, scope, compaction): Promise<void> => {
+            try {
+                await ctx.inTx(async (txCtx) => {
+                    const messages = await this.#executionConfigurations(
+                        txCtx,
+                        scope,
+                        this.#config?.executionObservation(scope.agent.id, compaction.compactionId),
+                        this.#events?.activeRunId(scope.agent.id),
+                        false,
+                    );
+                    if (messages.length > 0) await this.#append(txCtx, scope.agent.id, ...messages);
+                });
+            } finally {
+                this.#config?.endExecutionObservation(scope.agent.id, compaction.compactionId);
+            }
         },
 
         /**
@@ -2010,11 +2198,21 @@ export class HistoryModule implements AgentModule {
          * transaction, because a conversation the archive could not record is not one the agent
          * should go on to claim it remembers.
          */
-        afterInferenceTransact: (
+        afterInferenceTransact: async (
             ctx: Context,
             scope: AgentModuleScope,
             inference: AgentBaseInference,
-        ): Promise<void> => this.#afterInference(ctx, scope, inference),
+        ): Promise<void> => {
+            try {
+                await this.#afterInference(ctx, scope, inference);
+            } finally {
+                this.#config?.endExecutionObservation(scope.agent.id, inference.inferenceId);
+                // Reservations have the same lifetime as streamed output. A crash loses the
+                // uncommitted snapshot; rollback also releases it, so a retried inference makes
+                // fresh configuration IDs rather than persisting previously announced rows late.
+                this.#executionReservations.end(scope.agent.id, inference.inferenceId);
+            }
+        },
 
         afterTurnTransact: async (
             ctx: Context,
@@ -2022,6 +2220,8 @@ export class HistoryModule implements AgentModule {
             turn: AgentBaseTurn,
         ): Promise<void> => {
             if (!turn.aborted) return;
+            this.#config?.endAgentExecutionObservations(scope.agent.id);
+            this.#executionReservations.endAgent(scope.agent.id);
             await this.#finishRun(ctx, scope.agent.id, "aborted", "abort", Date.now());
         },
 
@@ -2036,6 +2236,8 @@ export class HistoryModule implements AgentModule {
             scope: AgentModuleScope,
             settlement: AgentBaseSettlement,
         ): Promise<void> => {
+            this.#config?.endAgentExecutionObservations(scope.agent.id);
+            this.#executionReservations.endAgent(scope.agent.id);
             await this.#flushPendingBlocks(ctx, scope);
             await scope.runKV.delete(ctx, PENDING_INFERENCE_ID_KEY);
             if (settlement.error !== undefined) {

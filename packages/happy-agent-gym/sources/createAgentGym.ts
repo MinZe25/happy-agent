@@ -42,6 +42,8 @@ export interface AgentGymOptions extends GymHomeOptions {
     readonly models?: readonly AgentModel[];
     /** Build configured smart routes over the scripted accounts instead of replacing routing. */
     readonly routeConfiguredProviders?: boolean;
+    /** Concrete scripted provider instances. Defaults to the single gym provider. */
+    readonly providerIds?: readonly string[];
     /** Test-owned environment values supplied to the daemon's configuration module. */
     readonly environment?: Readonly<NodeJS.ProcessEnv>;
     /** A test-issued JWT and profile for a real team-mode HTTP fixture. */
@@ -247,13 +249,14 @@ class AgentGymInstance implements AgentGym {
             ...(options.compaction === undefined ? {} : { compaction: options.compaction }),
             ...(options.inference === undefined ? {} : { inference: options.inference }),
             ...(options.models === undefined ? {} : { models: options.models }),
+            ...(options.providerIds === undefined ? {} : { providerIds: options.providerIds }),
         });
     }
 
     async start(): Promise<void> {
         const inference = {
             models: this.#scripted.models,
-            providers: this.#scripted.providers,
+            providers: this.#scripted.createProviders(),
         };
         const daemon = await startHappyAgentDaemon({
             compute: createGymCompute(),

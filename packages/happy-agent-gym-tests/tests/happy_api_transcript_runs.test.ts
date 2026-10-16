@@ -277,9 +277,21 @@ describe("public transcript and run APIs", () => {
         expect(history.runs.map((run) => run.id)).toEqual([firstRunId, secondRunId]);
         expect(history.runs.flatMap((run) => run.messages).map((message) => message.role)).toEqual([
             "user",
+            "service",
             "agent",
             "user",
             "agent",
+        ]);
+        const baseline = history.runs[0]?.messages[1];
+        expect(baseline?.role).toBe("service");
+        // API.md 4612-4614: the committed user anchors the chronologically appended baseline.
+        expect(baseline?.content).toEqual([
+            {
+                type: "configuration",
+                before: null,
+                after: modeFor(gym),
+                beforeMessageId: nonemptyId(firstResponse.message),
+            },
         ]);
         expect(JSON.stringify(history.runs)).toContain("first question");
         expect(JSON.stringify(history.runs)).toContain("second answer");
@@ -906,6 +918,7 @@ describe("public transcript and run APIs", () => {
         const run = history.runs.find((candidate) => candidate.id === sent.runId);
         expect(run?.messages).toMatchObject([
             { role: "user" },
+            { role: "service", content: [{ type: "configuration" }] },
             {
                 role: "agent",
                 content: [
@@ -937,6 +950,15 @@ describe("public transcript and run APIs", () => {
             {
                 role: "agent",
                 content: [{ text: "append-only history complete", type: "text" }],
+            },
+        ]);
+        // API.md 4612-4614: compactions retain this first committed user's anchor.
+        expect(run?.messages[1]?.content).toEqual([
+            {
+                type: "configuration",
+                before: null,
+                after: { ...modeFor(gym), permissionMode: "full_access" },
+                beforeMessageId: nonemptyId(sent),
             },
         ]);
         const publicToolIds = run?.messages.flatMap((message) =>
@@ -1546,6 +1568,11 @@ function modeFor(gym: AgentGym) {
         providerId: gym.selection.providerId,
         serviceTier: null,
     };
+}
+
+function nonemptyId(value: { readonly id: string }): string {
+    expect(value.id).toMatch(/\S/);
+    return value.id;
 }
 
 function contextWindowModel() {

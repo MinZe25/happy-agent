@@ -346,10 +346,50 @@ async function createCollaboratorGym(): Promise<{
     });
     parentId = gym.defaultSessionId;
     await gym.send("Create a collaborator.");
-    const child = await gym.waitUntil(async () => {
-        const candidate = (await gym.client.getAgentActivity(parentId)).subagents[0];
-        return candidate?.status === "idle" ? candidate : undefined;
-    }, "the collaborator");
+    const child = await gym.waitUntil(
+        async () => (await gym.client.getAgentActivity(parentId)).subagents[0],
+        "the collaborator",
+    );
+    // A newly spawned child is initially idle before its first run starts. Wait for
+    // that run to finish before interpreting idle as the collaborator's completion.
+    const input = await gym.waitForEvent(
+        (event) =>
+            event.type === "message.created" &&
+            event.payload.agentId === child.id &&
+            event.payload.message.metadata.senderAgentId === parentId,
+        "the collaborator's initial message",
+        15_000,
+    );
+    if (input.type !== "message.created") throw new Error("Missing collaborator input.");
+    const inputMessageId = nonemptyId(input.payload.message);
+    const started = await gym.waitForEvent(
+        (event) =>
+            event.type === "run.started" &&
+            event.payload.agentId === child.id &&
+            event.payload.acceptedMessageIds.includes(inputMessageId),
+        "the run accepting the collaborator's initial message",
+        15_000,
+    );
+    if (started.type !== "run.started") throw new Error("Missing collaborator run.");
+    const runId = nonemptyId(started.payload.run);
+    await gym.waitForEvent(
+        (event) =>
+            event.type === "run.finished" &&
+            event.payload.agentId === child.id &&
+            event.payload.run.id === runId,
+        "the collaborator's initial run to finish",
+        15_000,
+    );
+    await gym.waitUntil(
+        async () => {
+            const candidate = (await gym.client.getAgentActivity(parentId)).subagents.find(
+                (agent) => agent.id === child.id,
+            );
+            return candidate?.status === "idle" ? candidate : undefined;
+        },
+        "the completed collaborator",
+        15_000,
+    );
     return { childId: child.id, gym, parentId };
 }
 
@@ -360,6 +400,11 @@ async function runningProcess(gym: AgentGym) {
             ? activity
             : undefined;
     }, "a running process");
+}
+
+function nonemptyId(value: { readonly id: string }): string {
+    expect(value.id).toMatch(/\S/);
+    return value.id;
 }
 
 async function stopFirstProcess(

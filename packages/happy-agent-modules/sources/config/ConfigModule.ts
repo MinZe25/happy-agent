@@ -58,6 +58,12 @@ import { discoverGithubCliToken, githubTokenSchema } from "./impl/discoverGithub
 import { ProviderEnablement, providerRegistryUntil } from "./impl/providerRegistryUntil.js";
 import { ProviderServiceTiers } from "./impl/ProviderServiceTiers.js";
 import { RoundRobinRouterProvider } from "./impl/RoundRobinRouterProvider.js";
+import {
+    ProviderExecutionObservations,
+    type CurrentProviderExecutionAttempt,
+    type ProviderExecutionAttempt,
+    type ProviderExecutionKind,
+} from "./impl/ProviderExecutionObservations.js";
 import { VoiceCredentialPoolError } from "./VoiceCredentialPoolError.js";
 import { modelServiceTierOptions } from "./impl/modelServiceTierOptions.js";
 import { readGlobalInstructions } from "./impl/readGlobalInstructions.js";
@@ -1376,6 +1382,37 @@ export interface RuntimeProviderStateUpdate {
  * system and passed to every module that needs configuration.
  */
 export class ConfigModule implements AgentModule {
+    readonly #executionObservations = new ProviderExecutionObservations();
+
+    beginExecutionObservation(
+        agentId: string,
+        operationId: string,
+        kind: ProviderExecutionKind,
+    ): void {
+        this.#executionObservations.begin(agentId, operationId, kind);
+    }
+
+    executionObservation(
+        agentId: string,
+        operationId: string,
+    ): readonly ProviderExecutionAttempt[] | undefined {
+        return this.#executionObservations.read(agentId, operationId);
+    }
+
+    endExecutionObservation(agentId: string, operationId: string): void {
+        this.#executionObservations.end(agentId, operationId);
+    }
+
+    currentExecutionObservation(
+        agentId: string,
+        operationId: string,
+    ): CurrentProviderExecutionAttempt | undefined {
+        return this.#executionObservations.current(agentId, operationId);
+    }
+
+    endAgentExecutionObservations(agentId: string): void {
+        this.#executionObservations.endAgent(agentId);
+    }
     readonly name = "config";
     readonly configuration: HappyAgentConfiguration;
 
@@ -2529,6 +2566,8 @@ export class ConfigModule implements AgentModule {
                     undefined,
                     (id) => this.#isAccountEnabled(id),
                     (id) => this.#providerEnablement?.signal(id),
+                    undefined,
+                    this.#executionObservations,
                 ),
             },
             this.configuration,
@@ -2557,16 +2596,14 @@ export class ConfigModule implements AgentModule {
     #providerSource(): AgentProviders {
         if (this.#sourceProviders === undefined) {
             const scripted = this.#resolveScripted()?.providers;
-            this.#sourceProviders =
-                typeof this.#scripted !== "function" && scripted !== undefined
-                    ? scripted
-                    : agentProviders(
-                          this.configuration,
-                          (usage) => this.#reportAccountUsage(usage),
-                          (id) => this.#isAccountEnabled(id),
-                          (id) => this.#providerEnablement?.signal(id),
-                          scripted,
-                      );
+            this.#sourceProviders = agentProviders(
+                this.configuration,
+                (usage) => this.#reportAccountUsage(usage),
+                (id) => this.#isAccountEnabled(id),
+                (id) => this.#providerEnablement?.signal(id),
+                scripted,
+                this.#executionObservations,
+            );
             // A test-owned inference registry is already authenticated. Initialize all its
             // accounts as usable, including canonical IDs whose production defaults are off. This
             // happens exactly once: ProviderScanModule may subsequently gate them without a later

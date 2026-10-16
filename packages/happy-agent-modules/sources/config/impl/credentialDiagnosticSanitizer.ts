@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
+import type { CredentialSource, ErrorRecovery } from "@slopus/happy-agent-client";
 import {
     type BaseSession,
     sessionProviderErrorDiagnosticsSchema,
@@ -9,15 +10,20 @@ import {
     type SessionProviderErrorDiagnostics,
 } from "@slopus/happy-providers";
 
-const protectedSessions = new WeakSet<BaseSession>();
+const protectedSessions = new WeakMap<BaseSession, CredentialDiagnosticSanitizer>();
+// sharedNativeSessionDoesNotReuseCredentialSource.test.ts checks 260 + 260 overflow this cap.
+const MAX_DIAGNOSTIC_SOURCE_VALUES = 512;
+const MAX_DIAGNOSTIC_SOURCE_CHARACTERS = 65_536;
 
 /** Selection-time inputs only. Never reads credentials, configuration or environment after failure. */
 export class CredentialDiagnosticSources {
     readonly #values = new Set<string>();
+    #credentialSource: CredentialSource | null = null;
+    #recovery: ErrorRecovery | undefined;
 
     constructor(
         readonly providerId: string,
-        hosts: readonly string[],
+        readonly hosts: readonly string[],
     ) {
         for (const host of hosts) this.add(host);
     }
@@ -27,7 +33,10 @@ export class CredentialDiagnosticSources {
     }
 
     configured(key: string, value: string | undefined): void {
-        if (value !== undefined) this.add(`providers.${this.providerId}.${key}`);
+        if (value !== undefined) {
+            this.add(`providers.${this.providerId}.${key}`);
+            this.add(value);
+        }
     }
 
     path(value: string | undefined): void {
@@ -37,20 +46,98 @@ export class CredentialDiagnosticSources {
     }
 
     environment(name: string, value: string | undefined): void {
-        if (value !== undefined && value.trim().length > 0) this.add(name);
+        if (value !== undefined && value.trim().length > 0) {
+            this.add(name);
+            this.add(value);
+        }
     }
 
     snapshot(): CredentialDiagnosticSanitizer {
         return new CredentialDiagnosticSanitizer([...this.#values]);
     }
+
+    get credentialSource(): CredentialSource | null {
+        return this.#credentialSource;
+    }
+
+    get recovery(): ErrorRecovery | undefined {
+        return this.#recovery;
+    }
+
+    /** Called only after the concrete credential loader has selected this source. */
+    selected(kind: CredentialSource["kind"], location: string, defaultClaude = false): void {
+        const host = this.hosts.at(-1);
+        this.#credentialSource = {
+            kind,
+            location,
+            host: host !== undefined && host.length > 0 && host.length <= 256 ? host : null,
+        };
+        const instruction =
+            kind === "configuration"
+                ? `If retry still fails, check ${location} in this installation's configuration, replace it if needed, reload the configuration, and retry. Signing into the native assistant alone does not replace this override.`
+                : kind === "environment"
+                  ? `If retry still fails, check ${location} in the daemon's environment, replace it if needed, reload that environment, and retry. Signing into the native assistant alone does not replace this override.`
+                  : defaultClaude
+                    ? "If retry still fails, run claude auth login on the machine hosting the agent as the same operating-system user that runs the daemon, complete the browser sign-in, then retry this conversation."
+                    : "If retry still fails, check the selected native assistant sign-in using its selected configuration on the machine hosting the agent, as the same operating-system user that runs the daemon. Then retry this conversation.";
+        this.#recovery = {
+            steps: ["Retry this conversation first.", instruction],
+            actions: ["ask_chief"],
+            ...(defaultClaude
+                ? { commands: [{ label: "Sign in to Claude Code", command: "claude auth login" }] }
+                : {}),
+        };
+    }
 }
 
 /** Exact matches with identifier boundaries; ordinary model output never enters this sanitizer. */
-class CredentialDiagnosticSanitizer {
-    readonly #pattern: RegExp | undefined;
+export class CredentialDiagnosticSanitizer {
+    #pattern: RegExp | undefined;
+    readonly #values = new Set<string>();
+    readonly #initialValues: ReadonlySet<string>;
+    #redactAll = false;
 
     constructor(values: readonly string[]) {
-        const alternatives = [...values]
+        this.#include(values);
+        this.#initialValues = new Set(this.#values);
+    }
+
+    /** Value equality of the original snapshot, unaffected by later shared-session unions. */
+    equivalent(other: CredentialDiagnosticSanitizer): boolean {
+        return (
+            !this.#redactAll &&
+            !other.#redactAll &&
+            this.#initialValues.size === other.#initialValues.size &&
+            [...this.#initialValues].every((value) => other.#initialValues.has(value))
+        );
+    }
+
+    merge(other: CredentialDiagnosticSanitizer): void {
+        this.#include([...other.#values], other.#redactAll);
+    }
+
+    #include(values: readonly string[], redactAll = false): void {
+        if (this.#redactAll) return;
+        let characters = [...this.#values].reduce((total, value) => total + value.length, 0);
+        for (const value of values) {
+            if (this.#values.has(value)) continue;
+            characters += value.length;
+            if (
+                this.#values.size >= MAX_DIAGNOSTIC_SOURCE_VALUES ||
+                characters > MAX_DIAGNOSTIC_SOURCE_CHARACTERS
+            ) {
+                redactAll = true;
+                break;
+            }
+            this.#values.add(value);
+        }
+        if (redactAll) {
+            this.#redactAll = true;
+            this.#values.clear();
+            this.#pattern = undefined;
+            return;
+        }
+        const alternatives = [...this.#values]
             .filter((value) => value.trim().length > 0)
             .sort((left, right) => right.length - left.length)
             .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
@@ -61,6 +148,7 @@ class CredentialDiagnosticSanitizer {
     }
 
     text(value: string): string {
+        if (this.#redactAll) return "[private credential diagnostic]";
         return this.#pattern === undefined
             ? value
             : value.replace(this.#pattern, "[private credential source]");
@@ -153,7 +241,13 @@ class CredentialDiagnosticSanitizer {
     }
 
     private protectSession(session: BaseSession): BaseSession {
-        if (protectedSessions.has(session)) return session;
+        const existing = protectedSessions.get(session);
+        if (existing !== undefined) {
+            // Native providers currently return fresh sessions, but adapters may cache one.
+            // Retain one call-through while sanitizing the union, never only the first source.
+            existing.merge(this);
+            return session;
+        }
         const run = session.run.bind(session);
         const compact = session.compact.bind(session);
         // Retain native session properties and identity, not only BaseSession's narrow interface.
@@ -206,7 +300,7 @@ class CredentialDiagnosticSanitizer {
                 throw this.error(error);
             }
         };
-        protectedSessions.add(session);
+        protectedSessions.set(session, this);
         return session;
     }
 }

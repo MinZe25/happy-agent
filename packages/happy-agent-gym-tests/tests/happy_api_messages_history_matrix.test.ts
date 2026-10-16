@@ -38,9 +38,22 @@ describe("public message and history matrix", () => {
             reason: "completed",
             status: "completed",
         });
-        expect(history.runs[0]?.messages.map((message) => message.role)).toEqual(["user", "agent"]);
+        expect(history.runs[0]?.messages.map((message) => message.role)).toEqual([
+            "user",
+            "service",
+            "agent",
+        ]);
+        // API.md 4612-4614: placement is anchored independently of chronological array order.
+        expect(history.runs[0]?.messages[1]?.content).toEqual([
+            {
+                type: "configuration",
+                before: null,
+                after: modeFor(gym),
+                beforeMessageId: nonemptyId(accepted),
+            },
+        ]);
         expect(textOf(history.runs[0]?.messages[0])).toContain("one question");
-        expect(textOf(history.runs[0]?.messages[1])).toContain("one answer");
+        expect(textOf(history.runs[0]?.messages[2])).toContain("one answer");
     });
 
     it("MH-03 keeps a queued message pending while the first provider turn is gated", async () => {
@@ -826,6 +839,11 @@ function namingTurn(title: string): GymTurn {
             },
         ],
     };
+}
+
+function nonemptyId(value: { readonly id: string }): string {
+    expect(value.id).toMatch(/\S/);
+    return value.id;
 }
 
 function modeFor(

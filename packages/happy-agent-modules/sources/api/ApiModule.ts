@@ -173,6 +173,7 @@ import { GitModule } from "../git/index.js";
 import { HappyIntegrationRequestError, HappyModule } from "../happy/index.js";
 import {
     HistoryModule,
+    type HistoryMessage,
     type HistoryPendingMessage,
     type HistoryRunState,
 } from "../history/index.js";
@@ -350,6 +351,7 @@ const MAX_TERMINAL_WIRE_MESSAGE_BYTES = 4 * 1024 * 1024 + 20;
 const MAX_ANNOUNCED_PENDING_MESSAGES = 10_000;
 const MAX_ANNOUNCED_AGENT_CREATIONS = 10_000;
 const MAX_ANNOUNCED_TERMINAL_RUNS = 10_000;
+const MAX_ANNOUNCED_EXECUTION_CONFIGURATIONS = 512 * 64;
 const DRAIN_MUTATION_LOG_INTERVAL_MS = 5_000;
 /** What `artifact.updated` and `artifact.deleted` always carry in `changes`. */
 const ARTIFACT_UPDATED_FIELDS = [
@@ -584,6 +586,7 @@ export class ApiModule implements AgentModule {
     readonly #apiMutations = new Map<symbol, ApiAdmittedMutation>();
     readonly #announcedPendingMessages = new Set<string>();
     readonly #apiPendingMessageIds = new Set<string>();
+    readonly #announcedExecutionConfigurations = new Map<string, string>();
     readonly #announcedAgentCreations = new Set<string>();
     readonly #pendingAgentCreations = new Set<string>();
     readonly #announcedTerminalRuns = new Set<string>();
@@ -794,6 +797,7 @@ export class ApiModule implements AgentModule {
         this.#streams.clear();
         this.#announcedPendingMessages.clear();
         this.#apiPendingMessageIds.clear();
+        this.#announcedExecutionConfigurations.clear();
         this.#announcedAgentCreations.clear();
         this.#pendingAgentCreations.clear();
         this.#acceptedMessageBatches.clear();
@@ -2413,23 +2417,41 @@ export class ApiModule implements AgentModule {
                 });
             }),
             this.#history.onAppend((_ctx, agentId, messages) => {
-                for (const message of messages) {
-                    if (
-                        messageHiddenFromUser(message) ||
-                        message.blocks.some((block) => block.type === "compaction") ||
-                        message.role === "user" ||
-                        message.senderAgentId !== undefined ||
-                        message.provider !== undefined ||
-                        message.model !== undefined
-                    ) {
-                        continue;
-                    }
-                    this.#journal.append("message.created", {
-                        agentId,
-                        runId: message.runId ?? null,
-                        message: messageResource(message),
-                    });
-                }
+                const eligible = messages.filter(
+                    (message) =>
+                        !(
+                            messageHiddenFromUser(message) ||
+                            message.blocks.some((block) => block.type === "compaction") ||
+                            message.role === "user" ||
+                            message.senderAgentId !== undefined ||
+                            message.provider !== undefined ||
+                            message.model !== undefined
+                        ),
+                );
+                if (eligible.length === 0) return;
+                // All eligible service appends share the provider conversion queue. Otherwise
+                // a committed row can overtake a streamed assistant block still awaiting delivery.
+                const queued = this.#queueAgentWork(
+                    ctx,
+                    agentId,
+                    this.#mutationIds.getStore(),
+                    async () => {
+                        for (const message of eligible) {
+                            // Reserved is not announced. Only a successfully journaled creation may
+                            // suppress this durable fallback; a failed conversion leaves it eligible.
+                            if (this.#announcedExecutionConfigurations.delete(message.recordId))
+                                continue;
+                            this.#journal.append("message.created", {
+                                agentId,
+                                runId: message.runId ?? null,
+                                message: messageResource(message),
+                            });
+                        }
+                    },
+                );
+                void queued.catch(() => {
+                    ctx.log.warn("The API could not announce committed messages.", { agentId });
+                });
             }),
             this.#permissions.onEvent(async (eventCtx, event) => {
                 await this.#convertPermissionEvent(eventCtx, event);
@@ -2906,11 +2928,36 @@ export class ApiModule implements AgentModule {
     #enqueueAgentEvent(ctx: Context, event: AgentEvent): void {
         const key = event.agentId ?? "\u0000daemon";
         const mutationId = this.#mutationIds.getStore();
+        let configurations: readonly HistoryMessage[] = [];
+        const payload = recordValue(event.payload);
+        const rigEvent = recordValue(payload?.["rigEvent"]);
+        const inferenceId = stringValue(rigEvent?.["messageId"]);
+        if (
+            event.agentId !== undefined &&
+            event.type === "provider.event" &&
+            rigEvent?.["type"] === "block_start" &&
+            inferenceId !== undefined
+        ) {
+            // Events publishes synchronously. Capture before the Promise chain can fall behind
+            // a different attempt or completion; no database or other I/O belongs at this edge.
+            try {
+                configurations = this.#history.pendingExecutionConfigurations(
+                    event.agentId,
+                    inferenceId,
+                );
+            } catch {
+                this.#history.invalidateExecutionConfigurations(event.agentId, inferenceId);
+                ctx.log.warn("The execution configuration snapshot is unavailable.", {
+                    agentId: event.agentId,
+                    inferenceId,
+                });
+            }
+        }
         const queued = this.#queueAgentWork(
             ctx,
             key,
             mutationId,
-            async () => await this.#convertAgentEvent(ctx, event),
+            async () => await this.#convertAgentEvent(ctx, event, configurations),
         );
         void queued.catch((error: unknown) => {
             ctx.log.error(
@@ -2948,7 +2995,11 @@ export class ApiModule implements AgentModule {
         return result;
     }
 
-    async #convertAgentEvent(ctx: Context, event: AgentEvent): Promise<void> {
+    async #convertAgentEvent(
+        ctx: Context,
+        event: AgentEvent,
+        configurations: readonly HistoryMessage[],
+    ): Promise<void> {
         const agentId = event.agentId;
         if (agentId === undefined) return;
         const payload = recordValue(event.payload);
@@ -3044,6 +3095,9 @@ export class ApiModule implements AgentModule {
         }
         if (event.type === "loop.settled") {
             await this.#flushAcceptedMessages(ctx, agentId);
+            for (const [recordId, owner] of this.#announcedExecutionConfigurations) {
+                if (owner === agentId) this.#announcedExecutionConfigurations.delete(recordId);
+            }
             this.#streamingAssistantBlocks.delete(agentId);
             this.#streamingDeltaOffsets.delete(agentId);
             const runId = stringValue(payload?.["runId"]);
@@ -3068,22 +3122,18 @@ export class ApiModule implements AgentModule {
             const errorText =
                 stringValue(payload?.["error"]) ?? stringValue(payload?.["errorMessage"]);
             if (errorText !== undefined) {
-                // History records the failure as the run's error message; clients watching live
-                // hear about it the same way they hear about any message coming into being.
-                this.#journal.append(
-                    "message.created",
-                    {
-                        agentId,
-                        runId: run.id,
-                        message: {
-                            id: `${run.id}-error`,
-                            role: "service",
-                            createdAt: event.occurredAt,
-                            content: [{ type: "text", text: errorText }],
+                const failure = await this.#history.runFailure(ctx, agentId, run.id);
+                if (failure !== undefined) {
+                    this.#journal.append(
+                        "message.created",
+                        {
+                            agentId,
+                            runId: run.id,
+                            message: messageResource(failure),
                         },
-                    },
-                    event.occurredAt,
-                );
+                        event.occurredAt,
+                    );
+                }
             }
             if (!this.#announcedTerminalRuns.has(run.id)) {
                 boundedAdd(this.#announcedTerminalRuns, run.id, MAX_ANNOUNCED_TERMINAL_RUNS);
@@ -3132,7 +3182,7 @@ export class ApiModule implements AgentModule {
             return;
         }
         if (event.type === "provider.event" || event.type === "tool.completed") {
-            await this.#convertProviderMessageEvent(ctx, event, payload);
+            await this.#convertProviderMessageEvent(ctx, event, payload, configurations);
         }
         const status = statusForAgentEvent(event.type, payload);
         await this.#appendAgentUpdate(ctx, event, {
@@ -3227,6 +3277,7 @@ export class ApiModule implements AgentModule {
         ctx: Context,
         event: AgentEvent,
         payload: Readonly<Record<string, unknown>> | undefined,
+        configurations: readonly HistoryMessage[],
     ): Promise<void> {
         if (payload?.["recovered"] === true) return;
         const agentId = event.agentId;
@@ -3276,6 +3327,25 @@ export class ApiModule implements AgentModule {
                 : { modelId: stringValue(payload?.["model"]) }),
         };
         if (type === "block_start") {
+            for (const configuration of configurations) {
+                this.#journal.append(
+                    "message.created",
+                    {
+                        agentId,
+                        runId: configuration.runId ?? runId,
+                        message: messageResource(configuration),
+                    },
+                    configuration.at,
+                );
+                this.#announcedExecutionConfigurations.set(configuration.recordId, agentId);
+                while (
+                    this.#announcedExecutionConfigurations.size >
+                    MAX_ANNOUNCED_EXECUTION_CONFIGURATIONS
+                ) {
+                    const oldest = this.#announcedExecutionConfigurations.keys().next();
+                    if (!oldest.done) this.#announcedExecutionConfigurations.delete(oldest.value);
+                }
+            }
             // The provider streams one block at a time, but the API message accumulates them:
             // a later block joins the message instead of restarting it.
             if (streaming !== undefined && streaming.messageId === messageId) {
