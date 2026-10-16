@@ -76,6 +76,9 @@ export function messageResource(
         role,
         createdAt: message.at ?? 0,
         content: historyBlocks(message.blocks, options),
+        ...(role === "service" && message.error !== undefined
+            ? { error: structuredClone(message.error) }
+            : {}),
         metadata: {
             ...(role === "user" && message.userId !== undefined ? { userId: message.userId } : {}),
             ...(message.provider === undefined ? {} : { providerId: message.provider }),
@@ -172,6 +175,7 @@ function historyBlocks(
     return blocks
         .filter((block) => block.type !== "tool_result")
         .map((block): Record<string, unknown> => {
+            if (block.type === "configuration") return structuredClone(block);
             if (block.type === "tool_call_request") return structuredClone(block);
             if (block.type === "text") return { type: "text", text: block.text };
             if (block.type === "thinking") {

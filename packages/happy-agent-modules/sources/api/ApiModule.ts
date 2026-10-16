@@ -315,6 +315,10 @@ import {
 } from "./ApiSchemas.js";
 import { WorkspaceProxy } from "./WorkspaceProxy.js";
 import { requestedAgentMode } from "./requestedAgentMode.js";
+import {
+    projectEventDiagnostics,
+    projectMessageDiagnostics,
+} from "./projectCredentialDiagnostics.js";
 import { SubtaskInputError, SubtasksModule } from "../subtasks/index.js";
 
 const API_PROTOCOL_VERSION = 26;
@@ -4492,7 +4496,12 @@ export class ApiModule implements AgentModule {
                         costUsd: usage.costUsd,
                         messages: run.messages
                             .filter((message) => !messageHiddenFromUser(message))
-                            .map((message) => messageResource(message, { omitToolData })),
+                            .map((message) =>
+                                projectMessageDiagnostics(
+                                    messageResource(message, { omitToolData }),
+                                    this.#canDiscloseCredentialSource(ctx),
+                                ),
+                            ),
                     };
                 }),
             );
@@ -4920,9 +4929,11 @@ export class ApiModule implements AgentModule {
         }
         sendJson(response, 200, {
             ...replay,
-            events: replay.events.filter((event) =>
-                this.#journal.visibleTo(event, teamUser(ctx)?.id),
-            ),
+            events: replay.events
+                .filter((event) => this.#journal.visibleTo(event, teamUser(ctx)?.id))
+                .map((event) =>
+                    projectEventDiagnostics(event, this.#canDiscloseCredentialSource(ctx)),
+                ),
         });
     }
 
@@ -4964,7 +4975,11 @@ export class ApiModule implements AgentModule {
                 pending.push(event);
                 return;
             }
-            writer.write(sseEventFrame(event));
+            writer.write(
+                sseEventFrame(
+                    projectEventDiagnostics(event, this.#canDiscloseCredentialSource(ctx)),
+                ),
+            );
         });
         const current = this.#journal.cursor();
         const gap = after !== undefined && !this.#journal.hasCursor(after);
@@ -4989,11 +5004,26 @@ export class ApiModule implements AgentModule {
         }
         for (const event of replay) {
             if (!this.#journal.visibleTo(event, teamUser(ctx)?.id)) continue;
-            if (!writer.write(sseEventFrame(event))) return;
+            if (
+                !writer.write(
+                    sseEventFrame(
+                        projectEventDiagnostics(event, this.#canDiscloseCredentialSource(ctx)),
+                    ),
+                )
+            )
+                return;
         }
         replaying = false;
         for (const event of pending) {
-            if (event.cursor > current && !writer.write(sseEventFrame(event))) return;
+            if (
+                event.cursor > current &&
+                !writer.write(
+                    sseEventFrame(
+                        projectEventDiagnostics(event, this.#canDiscloseCredentialSource(ctx)),
+                    ),
+                )
+            )
+                return;
         }
         pending.splice(0);
         heartbeat = setInterval(() => {
@@ -6126,6 +6156,11 @@ export class ApiModule implements AgentModule {
         const user = teamUser(ctx);
         if (user === undefined) return false;
         return user.isOwner || (task.ownerUserId !== undefined && task.ownerUserId === user.id);
+    }
+
+    /** Standalone API bearer possession is authority; team disclosure requires the proven owner. */
+    #canDiscloseCredentialSource(ctx: Context): boolean {
+        return !this.#team.enabled || teamUser(ctx)?.isOwner === true;
     }
 
     async #taskResource(ctx: Context, task: TaskRecord): Promise<Record<string, unknown>> {

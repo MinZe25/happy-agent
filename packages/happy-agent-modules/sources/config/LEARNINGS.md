@@ -1,5 +1,22 @@
 # Config module learnings
 
+## Credential selectors must leave provider diagnostics before shared consumers see them
+
+Credential-source paths, configuration keys, environment variable names, and host labels used to
+survive in provider error prose even when structured diagnostics were withheld. Configuration now
+captures the exact inputs consulted during concrete credential construction and protects every
+production session, including smart-route candidates, naming, and other background inference.
+Discovery, session construction, run, and compaction failures use that snapshot; they never infer
+sources from prose or look up current configuration after a failure. This happens before history,
+settlement, collaboration reports, workflow errors, or exported-bot durable reply work copies the
+text, so outbound consumers do not need parallel sanitizers.
+
+Only diagnostic text is changed. Longest-first exact matches require identifier boundaries;
+ordinary assistant text, tool arguments, results, machine classifications, and retry semantics
+remain untouched. Unrelated exceptions retain their identity. Changed exceptions preserve their
+prototype, classification fields, own properties, and bounded causes without mutating the original.
+The concrete provider also retains its identity for native account, quota, and live checks.
+
 ## Claude Code runs in a private empty folder
 
 Claude providers never named a working directory, so Claude Code ran wherever the daemon was

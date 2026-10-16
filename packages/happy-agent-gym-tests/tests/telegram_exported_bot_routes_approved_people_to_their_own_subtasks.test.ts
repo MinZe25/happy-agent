@@ -22,6 +22,7 @@ const VISITOR = { id: 444, first_name: "Victor", username: "victor" };
 /** The fixed notice a stranger receives once when they ask to be let in. */
 const NOTICE =
     "Thanks for your message. This bot only talks to people its owner has approved, so your request was sent to them. If they approve it, the bot will answer the message you just sent.";
+const SAFE_AUTH_FAILURE = "Authentication failed.\n\nRetry this conversation when ready.";
 
 interface Sent {
     readonly chatId: number;
@@ -261,6 +262,13 @@ async function telegramGym() {
             if (request.messages.at(-1)?.role === "tool") {
                 return { content: [{ type: "text", text: "Done with that command." }] };
             }
+            if (lastUserText(request) === "AUTH_FAILURE")
+                return {
+                    error: {
+                        message: SAFE_AUTH_FAILURE,
+                        providerError: { type: "authentication", diagnostics: { status: 401 } },
+                    },
+                };
             if (lastUserText(request).startsWith("ESCALATE:")) {
                 return {
                     content: [
@@ -316,6 +324,21 @@ async function telegramGym() {
 }
 
 describe("a bot exported to Telegram", () => {
+    it("preserves the complete safe multiline authentication error in the Telegram reply", async () => {
+        const { gym, telegram, scout, chiefRuns } = await telegramGym();
+        await chiefRuns("set_telegram_exported_bot", {
+            botId: scout.id,
+            token: TOKEN,
+            allowedUsers: [ADA.id],
+        });
+        telegram.write(ADA, "AUTH_FAILURE");
+        const reply = await gym.waitUntil(
+            () => telegram.repliesTo(ADA.id)[0],
+            "terminal error Telegram reply",
+        );
+        expect(reply).toBe(`Sorry, I couldn't finish that reply. ${SAFE_AUTH_FAILURE}`);
+    }, 30_000);
+
     it(
         "is exported by the Chief of Staff, admits people it allows on the fly, and gives each their own durable subtask",
         { timeout: 120_000 },

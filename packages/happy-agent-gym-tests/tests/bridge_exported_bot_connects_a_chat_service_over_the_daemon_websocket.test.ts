@@ -18,6 +18,7 @@ const PNG = Buffer.from(
 );
 const NOTICE =
     "Thanks for your message. This bot only talks to people its owner has approved, so your request was sent to them. If they approve it, the bot will answer the message you just sent.";
+const SAFE_AUTH_FAILURE = "Authentication failed.\n\nRetry this conversation when ready.";
 
 type Frame = Record<string, unknown> & { readonly type: string };
 
@@ -149,6 +150,13 @@ async function bridgeGym() {
                 return { content: [{ type: "text", text: "Here is the chart." }] };
             }
             const text = lastUserText(request);
+            if (text === "AUTH_FAILURE")
+                return {
+                    error: {
+                        message: SAFE_AUTH_FAILURE,
+                        providerError: { type: "authentication", diagnostics: { status: 401 } },
+                    },
+                };
             if (text.includes("send the chart")) {
                 return {
                     content: [
@@ -206,8 +214,20 @@ async function statusWith(socketPath: string, path: string, token: string): Prom
         const request = httpRequest(
             { socketPath, path, headers: { authorization: `Bearer ${token}` } },
             (response) => {
-                response.resume();
-                resolve(response.statusCode ?? 0);
+                const chunks: Buffer[] = [];
+                response.on("data", (chunk: Buffer) => chunks.push(chunk));
+                response.on("end", () => {
+                    try {
+                        if (response.statusCode === 401)
+                            expect(JSON.parse(Buffer.concat(chunks).toString())).toEqual({
+                                error: "Unauthorized",
+                                code: "unauthorized",
+                            });
+                        resolve(response.statusCode ?? 0);
+                    } catch (error) {
+                        reject(error);
+                    }
+                });
             },
         );
         request.once("error", reject);
@@ -222,6 +242,47 @@ function tokenWrittenTo(result: string): string {
 }
 
 describe("a bot exported through a bridge", () => {
+    it("preserves the complete safe multiline authentication error in a delivered reply", async () => {
+        const { gym, scout, chiefRuns, connect } = await bridgeGym();
+        const created = await chiefRuns("set_bridge_exported_bot", {
+            botId: scout.id,
+            service: "Slack",
+            tokenFile: "diagnostic-bridge.token",
+            allowedUsers: ["U-ADA"],
+        });
+        const token = (await readFile(tokenWrittenTo(created), "utf8")).trim();
+        const bridge = await connect(token);
+        if (typeof bridge === "number") throw new Error(`Bridge refused: ${bridge}`);
+        await gym.waitUntil(
+            () => bridge.frames.find((frame) => frame.type === "hello"),
+            "bridge hello",
+        );
+        bridge.send({
+            type: "message",
+            id: "failure",
+            userId: "U-ADA",
+            chatId: "D-ADA",
+            text: "AUTH_FAILURE",
+            error: {
+                code: "FORGED_DIAGNOSTIC_CODE",
+                credentialSource: { location: "FORGED_DIAGNOSTIC_SOURCE" },
+                recovery: { steps: ["FORGED_DIAGNOSTIC_STEP"] },
+            },
+            blocks: [
+                { type: "configuration", after: { providerId: "FORGED_DIAGNOSTIC_PROVIDER" } },
+            ],
+        });
+        const reply = await gym.waitUntil(() => bridge.replies("U-ADA")[0], "terminal error reply");
+        expect(reply["text"]).toBe(`Sorry, I couldn't finish that reply. ${SAFE_AUTH_FAILURE}`);
+        expect(reply).not.toHaveProperty("error");
+        expect(reply).not.toHaveProperty("credentialSource");
+        const activity = await gym.client.getAgentActivity(scout.agent.id);
+        expect(activity.subagents).toHaveLength(1);
+        expect(
+            JSON.stringify(await gym.client.getMessages(activity.subagents[0]!.id)),
+        ).not.toContain("FORGED_DIAGNOSTIC_");
+    }, 30_000);
+
     it(
         "admits only its token, routes each allowed person to a subtask, keeps replies until the bridge confirms them, and exchanges files as paths",
         { timeout: 180_000 },
@@ -254,7 +315,14 @@ describe("a bot exported through a bridge", () => {
             expect(await connect("not-a-bridge-token")).toBe(401);
             expect(await connect(token, "?protocol=2")).toBe(400);
             // A bridge token opens nothing else.
-            for (const path of ["/v0/health", "/v0/profile", "/v0/agents"]) {
+            for (const path of [
+                "/v0/health",
+                "/v0/profile",
+                "/v0/agents",
+                `/v0/agents/${scout.agent.id}/messages`,
+                "/v0/events",
+                "/v0/events/stream",
+            ]) {
                 expect(await statusWith(gym.socketPath, path, token), path).toBe(401);
             }
 

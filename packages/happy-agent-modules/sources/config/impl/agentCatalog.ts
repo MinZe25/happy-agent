@@ -1,4 +1,6 @@
 import { stat } from "node:fs/promises";
+import { homedir, hostname } from "node:os";
+import { join } from "node:path";
 
 import { AgentProviders, type AgentModel } from "@slopus/happy-agent-base";
 import { ensurePrivateDirectory } from "@slopus/happy-agent-compute";
@@ -27,6 +29,8 @@ import {
 } from "@slopus/happy-providers";
 import type { HappyAgentConfigValues, HappyAgentConfiguration } from "../ConfigModule.js";
 import { RoundRobinRouterProvider } from "./RoundRobinRouterProvider.js";
+import { CredentialDiagnosticSources } from "./credentialDiagnosticSanitizer.js";
+import { resolveDefaultNodeName } from "./resolveDefaultNodeName.js";
 
 type ConfiguredProvider = HappyAgentConfigValues["providers"][string];
 type ConcreteConfiguredProvider = Exclude<ConfiguredProvider, { readonly type: "smart" }>;
@@ -422,6 +426,7 @@ export function agentProviders(
 ): AgentProviders {
     const providers = new AgentProviders();
     const retryLimit = configuration.values.settings.inferenceMaxRetries;
+    let hostName: Promise<string> | undefined;
     if (concreteProviders !== undefined) {
         for (const id of concreteProviders.ids) {
             if (configuration.values.providers[id]?.type === "smart") continue;
@@ -442,15 +447,29 @@ export function agentProviders(
         if (provider.type === "smart" || concreteProviders !== undefined) continue;
         providers.add(
             id,
-            async ({ model: selected }) =>
-                await createProvider(
-                    id,
-                    provider,
-                    selected,
-                    retryLimit,
-                    configuration.paths.claudeWorkingDirectory,
-                    onAccountUsage,
-                ),
+            async ({ model: selected }) => {
+                hostName ??=
+                    configuration.values.node.name === undefined
+                        ? resolveDefaultNodeName()
+                        : Promise.resolve(configuration.values.node.name);
+                const sources = new CredentialDiagnosticSources(id, [hostname(), await hostName]);
+                try {
+                    const concrete = await createProvider(
+                        id,
+                        provider,
+                        selected,
+                        retryLimit,
+                        configuration.paths.claudeWorkingDirectory,
+                        sources,
+                        onAccountUsage,
+                    );
+                    return sources.snapshot().protect(concrete);
+                } catch (error) {
+                    // Discovery may throw before a credential exists. Only inputs already passed
+                    // to that discovery can be removed; no after-the-fact source inference.
+                    throw sources.snapshot().error(error);
+                }
+            },
             provider.type,
         );
     }
@@ -566,6 +585,7 @@ async function createProvider(
     selectedModel: string | undefined,
     retryLimit: number | undefined,
     claudeWorkingDirectory: string,
+    sources: CredentialDiagnosticSources,
     onAccountUsage?: (usage: ProviderUsage) => void,
 ): Promise<BaseProvider> {
     // Credential isolation means this provider may use only what its own configuration names.
@@ -574,15 +594,33 @@ async function createProvider(
     const ambient = provider.credentialIsolation !== true;
     const retries = retryLimit === undefined ? {} : { inferenceMaxRetries: retryLimit };
     const configured = async <T>(
+        key: string,
         value: string | undefined,
         fromValue: (value: string) => Promise<T | null>,
         discover: () => Promise<T | null>,
-    ): Promise<T | null> =>
-        value === undefined ? (ambient ? await discover() : null) : await fromValue(value);
+    ): Promise<T | null> => {
+        sources.configured(key, value);
+        return value === undefined ? (ambient ? await discover() : null) : await fromValue(value);
+    };
 
     if (provider.type === "codex") {
+        const environment = { ...process.env };
+        sources.configured("api_key", provider.apiKey);
+        if (!provider.apiKey?.trim()) {
+            sources.configured("auth_file", provider.authFile);
+            if (provider.authFile?.trim()) sources.path(provider.authFile);
+            else if (ambient) {
+                const directory = environment.CODEX_HOME?.trim();
+                sources.environment("CODEX_HOME", directory);
+                sources.path(directory);
+                sources.path(
+                    join(directory || homedir(), directory ? "auth.json" : ".codex/auth.json"),
+                );
+            }
+        }
         const credential = ambient
             ? await loadCodexCredential({
+                  env: environment,
                   ...(provider.apiKey === undefined ? {} : { apiKey: provider.apiKey }),
                   ...(provider.authFile === undefined ? {} : { authFile: provider.authFile }),
               })
@@ -592,6 +630,9 @@ async function createProvider(
               (provider.authFile === undefined
                   ? null
                   : await CodexSessionCredential.tryLoad({ authFile: provider.authFile })));
+        if (ambient && !provider.apiKey?.trim() && credential instanceof CodexApiKeyCredential)
+            sources.environment("OPENAI_API_KEY", environment.OPENAI_API_KEY);
+        if (credential instanceof CodexSessionCredential) sources.path(credential.authFile);
         return new CodexProvider({
             credential: required(credential, "Codex", id),
             parallelToolCalls: true,
@@ -611,25 +652,51 @@ async function createProvider(
     if (provider.type === "claude") {
         const credential =
             (await configured(
+                "oauth_token",
                 provider.oauthToken,
                 async (oauthToken) => await ClaudeOAuthCredential.tryLoad({ oauthToken }),
-                async () => await ClaudeOAuthCredential.tryLoad({}),
+                async () => {
+                    sources.environment(
+                        "CLAUDE_CODE_OAUTH_TOKEN",
+                        process.env.CLAUDE_CODE_OAUTH_TOKEN,
+                    );
+                    return await ClaudeOAuthCredential.tryLoad({});
+                },
             )) ??
             (await configured(
+                "api_key",
                 provider.apiKey,
                 async (apiKey) => await ClaudeApiKeyCredential.tryLoad({ apiKey }),
-                async () => await ClaudeApiKeyCredential.tryLoad({}),
+                async () => {
+                    sources.environment("ANTHROPIC_API_KEY", process.env.ANTHROPIC_API_KEY);
+                    return await ClaudeApiKeyCredential.tryLoad({});
+                },
             )) ??
             (await configured(
+                "auth_token",
                 provider.authToken,
                 async (authToken) => await ClaudeAuthTokenCredential.tryLoad({ authToken }),
-                async () => await ClaudeAuthTokenCredential.tryLoad({}),
+                async () => {
+                    sources.environment("ANTHROPIC_AUTH_TOKEN", process.env.ANTHROPIC_AUTH_TOKEN);
+                    return await ClaudeAuthTokenCredential.tryLoad({});
+                },
             )) ??
             (await configured(
+                "config_dir",
                 provider.configDir,
-                async (configDir) => await ClaudeCodeCredential.tryLoad({ configDir }),
-                async () => await ClaudeCodeCredential.tryLoad({}),
+                async (configDir) => {
+                    sources.path(configDir);
+                    return await ClaudeCodeCredential.tryLoad({ configDir });
+                },
+                async () => {
+                    const directory = process.env.CLAUDE_CONFIG_DIR?.trim();
+                    sources.environment("CLAUDE_CONFIG_DIR", directory);
+                    sources.path(directory || join(homedir(), ".claude"));
+                    return await ClaudeCodeCredential.tryLoad({});
+                },
             ));
+        if (credential instanceof ClaudeCodeCredential)
+            sources.path(credential.configDir ?? join(homedir(), ".claude"));
         await ensureClaudeWorkingDirectory(claudeWorkingDirectory);
         return new AnthropicProvider({
             credential: required(credential, "Claude", id),
@@ -653,9 +720,24 @@ async function createProvider(
     if (provider.type === "grok") {
         // Grok reads its key from the environment unless isolation forbids it. Ambient providers
         // may also reuse the default Grok CLI session; isolated ones must name their auth file.
-        const env = ambient ? undefined : {};
-        const withEnv = <T extends object>(input: T) =>
-            env === undefined ? input : { ...input, env };
+        const env = ambient ? { ...process.env } : {};
+        const withEnv = <T extends object>(input: T) => ({ ...input, env });
+        sources.configured("api_key", provider.apiKey);
+        if (!provider.apiKey?.trim()) {
+            sources.environment("XAI_API_KEY", env.XAI_API_KEY);
+            if (!env.XAI_API_KEY?.trim()) {
+                sources.configured("auth_file", provider.authFile);
+                if (provider.authFile?.trim()) sources.path(provider.authFile);
+                else {
+                    const directory = env.GROK_HOME?.trim();
+                    sources.environment("GROK_HOME", directory);
+                    sources.path(directory);
+                    sources.path(
+                        join(directory || homedir(), directory ? "auth.json" : ".grok/auth.json"),
+                    );
+                }
+            }
+        }
         const credential =
             (await GrokApiKeyCredential.tryLoad(
                 withEnv({
@@ -691,6 +773,24 @@ async function createProvider(
         provider.configFile !== undefined ||
         provider.credentialsFile !== undefined ||
         provider.profile !== undefined;
+    if (explicitAws) {
+        sources.configured("config_file", provider.configFile);
+        sources.configured("credentials_file", provider.credentialsFile);
+        sources.configured("profile", provider.profile);
+        sources.path(provider.configFile);
+        sources.path(provider.credentialsFile);
+        sources.add(provider.profile);
+    } else {
+        sources.configured("bearer_token", provider.bearerToken);
+        sources.configured("bearer_token_env_var", provider.bearerTokenEnvVar);
+        if (
+            !provider.bearerToken?.trim() &&
+            (ambient || provider.bearerTokenEnvVar !== undefined)
+        ) {
+            const name = provider.bearerTokenEnvVar ?? "AWS_BEARER_TOKEN_BEDROCK";
+            sources.environment(name, process.env[name]);
+        }
+    }
     const aws = {
         ...(provider.configFile === undefined ? {} : { configFilepath: provider.configFile }),
         ...(provider.credentialsFile === undefined

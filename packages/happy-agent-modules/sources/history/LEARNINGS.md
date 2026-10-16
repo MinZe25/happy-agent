@@ -159,3 +159,11 @@ the History run makes live events, elapsed-time UI, restart recovery, and paged 
 Any agent may otherwise read any agent's history by ID. A bot whose owner keeps it inside its own
 tree may read only the history of agents in that tree, so `resolveTarget` asks the bot settings
 module and refuses other targets. An agent's own history is always readable.
+
+## Execution diagnostics are not model context
+
+Typed error metadata and configuration blocks are daemon-owned presentation data, not model
+messages. History accepts the published shapes, but its readable formatter and search text omit
+configuration blocks, and a configuration-only row contributes no header or blank entry. Ordinary
+safe error prose remains intact, including paragraphs. This also protects model-facing history
+reads and copied excerpts without weakening the durable record used by authorized API readers.

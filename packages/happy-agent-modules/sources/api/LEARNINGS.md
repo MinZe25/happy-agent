@@ -214,6 +214,18 @@ the read-only transition, event identity, admitted-mutation count, and agent/rev
 barrier identical without creating an unauthenticated HTTP route. Draining remains separate from
 shutdown and does not claim that terminals or background processes have exited.
 
+## Credential diagnostic disclosure
+
+- Credential diagnostics are projected for each authenticated reader. History and the bounded
+  event journal retain one caller-neutral record. History reads, event pulls, SSE replay, pending
+  flush, and live delivery each project it without mutating the original or retaining recipient
+  copies. Team owners may see the source and local recovery commands; members and unresolved
+  owners receive the same code, mode, and actions with generic instructions, no commands, and a
+  null source. In standalone mode possession of the API bearer is the installation authority;
+  there is no separate human credential class. Any future API credential class must be classified
+  before it can read messages. Runner, service, and exported-bot credentials remain outside the
+  ordinary API admission boundary.
+
 ## Composer mode
 
 - Execution provenance is output-only. Send, slash-command, and draft inputs validate known
