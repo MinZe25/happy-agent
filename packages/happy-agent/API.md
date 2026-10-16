@@ -313,6 +313,11 @@ Artifacts are additive and do not increment the protocol version. Clients detect
 `artifact.*` events are absent on older compatible daemons, which also serve none of the artifact
 routes.
 
+Artifact backgrounds are additive and do not increment the protocol version. A daemon that has
+them always includes `background` on artifact and version objects, `null` when unset, and in the
+`changes` of `artifact.updated`. Older compatible daemons omit it and ignore a `background` sent to
+them; a client then shows every artifact on a transparent slot.
+
 User settings are additive and do not increment the protocol version. A daemon that serves them
 always includes `userSettings` in desktop bootstrap and never answers `GET /v0/user-settings` with
 `404`. Older compatible daemons omit the bootstrap field, answer the user-settings routes with
@@ -7456,10 +7461,20 @@ Authors are extensible in the same way; a client shows an unrecognized `kind` as
 files, its author, its source, and when it was made. A new version starts from the files of the
 latest one and adds, replaces, or removes individual files, so files that did not change carry over
 without being sent again; it may also replace every file at once. An update that changes only the
-title makes a new version holding the same files. The artifact object mirrors its latest version in
-`latestVersion`, `title`, `entry`, `fileCount`, and `size`, records its creation in `source`,
-`createdBy`, and `createdAt`, and its latest change in `updatedBy`, `updatedSource`, and
-`updatedAt`.
+title or the background makes a new version holding the same files. The artifact object mirrors
+its latest version in `latestVersion`, `title`, `entry`, `fileCount`, `size`, and `background`,
+records its creation in `source`, `createdBy`, and `createdAt`, and its latest change in
+`updatedBy`, `updatedSource`, and `updatedAt`.
+
+**Backgrounds.** A client shows an artifact on a transparent slot, so the surface around it — a
+desktop pane, a chat card — shows through, in light and dark. A version may instead name a
+`background`, a colour the client paints behind its content. It is for content that needs one
+fixed canvas, such as a print-like document or a visualization drawn for one palette; most
+artifacts leave it `null`. It is a hexadecimal colour, `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`,
+accepted in either case and stored in lowercase, and nothing else: no colour names, functions,
+variables, or other CSS. A new version keeps the latest version's background unless the change
+names another or clears it. A client uses it only as the slot's background colour and checks the
+pattern again before it does.
 
 **Deletion.** Deleting leaves a tombstone. `status` becomes `"deleted"`, `deletedBy`,
 `deletedSource`, and `deletedAt` record the deletion, which is also the artifact's latest change,
@@ -7492,6 +7507,7 @@ updating or deleting an artifact requires `If-Match` with it.
     },
     "fileCount": 3,
     "size": 412870,
+    "background": null,
     "source": {
         "kind": "workspace",
         "workspaceId": "w5v4u3t2s1r0q9p8o7n6m5l4",
@@ -7521,6 +7537,7 @@ Fields:
 - `entry` — the latest version's entry, as a file object.
 - `fileCount`, `size` — how many files the latest version holds, and their bytes together. The
   files themselves are listed by the version.
+- `background` — the latest version's background, or `null` for a transparent slot.
 - `source` — where the artifact was created, or `null`.
 - `createdBy`, `createdAt` — who created the artifact, and when.
 - `updatedBy`, `updatedSource`, `updatedAt` — who made the latest change, where, and when. After
@@ -7543,6 +7560,7 @@ Fields:
     "files": [
         /* file objects, in path order */
     ],
+    "background": null,
     "createdBy": { "kind": "user", "userId": "u1x2y3z4a5b6c7d8e9f0g1h2" },
     "source": null,
     "createdAt": 1755400000000
@@ -7552,6 +7570,7 @@ Fields:
 - `artifactId`, `number` — the artifact and the version's number within it, from 1.
 - `title`, `entry`, `files` — the artifact as this version left it. `files` is the version's whole
   manifest, ordered by `path` in Unicode code point order; `entry` is one of them.
+- `background` — the colour behind this version's content, or `null` for a transparent slot.
 - `createdBy`, `source`, `createdAt` — who made this version, where, and when.
 
 ### The file object
@@ -7788,10 +7807,13 @@ Request:
   the workspace. A source naming a bot, task, project, workspace, or agent that does not exist is
   `400`.
 - `files` — required, 1–256 version files, as described above: every file of the first version.
+- `background` — optional; the first version's background, as described above. Omitted or `null`
+  means none. Leave it out unless the content needs one fixed canvas.
 
-Files that break the type's rules — a missing entry, too many or too few files, a media type the
-type does not accept, a file or total over its limit, an entry that is not valid UTF-8, an invalid
-path, or a path that is also a folder — are `400 invalid_request`. An upload that does not exist,
+A `background` that is not such a colour is `400 invalid_request`. Files that break the type's
+rules — a missing entry, too many or too few files, a media type the type does not accept, a file
+or total over its limit, an entry that is not valid UTF-8, an invalid path, or a path that is also
+a folder — are `400 invalid_request`. An upload that does not exist,
 has expired, or was already used is `404`, and nothing is created.
 
 Repeating `id` returns the current artifact unchanged with `201`, including after updates or
@@ -7817,13 +7839,15 @@ Request:
 }
 ```
 
-Every field is optional, but at least one of `title`, `files`, `remove`, and `replaceAll` is
-required. The new version starts from the latest version's files, or from none when `replaceAll`
-is `true`. `files`, up to 256 version files, then adds each path or replaces the
+Every field is optional, but at least one of `title`, `background`, `files`, `remove`, and
+`replaceAll` is required. The new version starts from the latest version's files, or from none
+when `replaceAll` is `true`. `files`, up to 256 version files, then adds each path or replaces the
 file already there, and `remove`, up to 256 paths, takes files out. A path both written and
 removed, or removed but not present, is `400`, and the result must satisfy the type's rules just
-as a creation does. An omitted `title` keeps the current title. `source` says where this change is
-being made; it becomes the new version's `source` and the artifact's `updatedSource`.
+as a creation does. An omitted `title` keeps the current title. A `background` colour sets the
+new version's background, `null` clears it, and omitting it keeps the latest version's; anything
+else is `400`. `source` says where this change is being made; it becomes the new version's
+`source` and the artifact's `updatedSource`.
 
 Response — `200`: `{ "artifact": { ... } }` with the new `latestVersion`, and an `artifact.updated`
 event after commit, echoing `mutationId`. File errors are `400` and upload errors `404`, as in
@@ -8793,8 +8817,9 @@ agent's change carries none.
     - `artifact` (full artifact object).
 - `artifact.updated` — a new version was made.
     - `artifactId` (ID string), `previousVersion`, `version`, `changes`.
-    - `changes` always holds `latestVersion`, `title`, `entry`, `fileCount`, `size`, `updatedBy`,
-      `updatedSource`, and `updatedAt`. Read the new version's files through the version routes.
+    - `changes` always holds `latestVersion`, `title`, `entry`, `fileCount`, `size`, `background`,
+      `updatedBy`, `updatedSource`, and `updatedAt`. Read the new version's files through the
+      version routes.
 - `artifact.deleted` — the artifact was deleted and is now a tombstone.
     - `artifactId` (ID string), `previousVersion`, `version`, `changes`.
     - `changes` holds `status`, `deletedBy`, `deletedSource`, `deletedAt`, `updatedBy`,

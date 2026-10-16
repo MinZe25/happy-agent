@@ -341,6 +341,12 @@ new version from the latest one's files, adding, replacing, or removing paths, a
 `listArtifactVersions()` reads the history. Follow `artifact.created`, `artifact.updated`, and
 `artifact.deleted`.
 
+Show an artifact on a transparent slot unless its version names `background`, a lowercase hex
+colour (`#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`) to paint behind the content; check
+`artifactBackgroundSchema` again before using it, and only as a background colour. Older daemons
+omit the field. `createArtifact()` takes an optional `background`, and in `updateArtifact()` a
+colour sets it, `null` clears it, and omitting it keeps the latest version's.
+
 `MessageMode.account` is optional server-resolved provenance only in configuration/error execution
 snapshots, not an account selector. It is absent from user-message/composer modes and drafts.
 `null` means unestablished; a known account has an opaque local ID and optional human-readable label.
