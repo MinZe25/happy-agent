@@ -129,6 +129,31 @@ agents then copied into their writes. Escaping is now decided by context: intraw
 lone asterisks, and ordinary punctuation stay literal, and each formatted run is checked by
 parsing the result back, falling back to plainer output when the parse would differ.
 
+## Calendars expand recurrence on the daemon, from series records
+
+A calendar keeps one record per series and no stored occurrences, because there are no
+per-occurrence exceptions: editing or deleting changes the whole series. The daemon expands
+occurrences for every range read and tool, and clients never compute repeats, so desktop and
+models cannot disagree with the daemon about month ends, leap days, or daylight saving. Timed
+series repeat the start's wall-clock time in the event's own zone, using Temporal's
+`compatible` rule for skipped and repeated hours; index 0 is always the event's own timing, so a
+start outside a weekly rule's weekdays still occurs once. Range reads stay cheap by keeping the
+current record in its own table with padded instant bounds, filtering in SQL before decoding.
+
+## Calendar history restores through ordinary update
+
+Steve asked that event history allow anything to be restored, like todos. Every create, edit,
+recurrence change, and deletion appends a full immutable snapshot, and update can set every
+field a snapshot holds: blank titles, cleared notes, location, and rules, timed or all-day
+timing, and active status to undelete. Restoring is reading a revision and sending its fields
+with the current version, which appends exactly one revision and rewrites none.
+
+## Calendar titles may be blank
+
+Steve chose Google Calendar's behavior: an event may have an empty or blank title, and clients
+show their own placeholder. The title is always a string, never null, so a revision restores it
+exactly, and it is stored without trimming.
+
 ## Older documents convert once, on first touch
 
 Documents an earlier daemon stored as Markdown become collaborative the first time they are read

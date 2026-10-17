@@ -1,7 +1,7 @@
 # Surfaces
 
-Shared typed feature instances, including todo lists, collaborative documents, and references to
-artifacts, bots, and tasks, with each person's sidebar order on the nested member record. Heads and
+Shared typed feature instances, including todo lists, collaborative documents, calendars, and
+references to artifacts, bots, and tasks, with each person's sidebar order on the nested member record. Heads and
 immutable revisions live in module-owned AgentKV storage; document change logs live in their own
 tables beside it.
 
@@ -35,6 +35,15 @@ Live changes and presence ride the API's existing event stream as unjournaled fr
 keeps which streams follow which documents in memory and publishes a change only after its
 transaction commits; the API checks that a stream belongs to the caller before routing to it.
 Ordinary models can read, update, and list changes; only active admin bots create documents.
+
+Calendar Surfaces hold series records, never stored occurrences. `calendar/` owns them: each
+event's current record lives in its own table with conservative instant bounds of everything the
+series can cover, so a range read filters in SQL before decoding and expands only those events.
+Expansion walks local dates in the event's own zone through `Intl`, keeps the wall-clock start
+across daylight-saving changes, skips months without the start's day, and numbers occurrences
+from the event's own timing. Every change also appends an immutable full revision, and an
+earlier state is restored by sending its fields through ordinary update. Tools speak local ISO
+8601 date-times with an IANA zone, so models never convert instants or expand repeats.
 
 Reference Surfaces store only an immutable binding to their target beside the shared record.
 Every read resolves it against the owning Artifacts, Bots, or Tasks module, so the live name,

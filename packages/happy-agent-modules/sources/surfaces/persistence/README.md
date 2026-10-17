@@ -16,6 +16,10 @@ share the caller's transaction. Nothing here is pruned.
 revisions, and history summaries an earlier daemon wrote. They are never written again; the first
 read or write converts a document into the log, and its revisions stay readable as history.
 
+`happy_agent_surface_calendar_events` holds each calendar event's current record with padded
+instant bounds (`upper_bound` null for endless series), indexed for range reads.
+`calendar-revision.*` in AgentKV holds its immutable full revisions. Neither is pruned.
+
 `reference.*` holds each reference Surface's immutable target binding. It is written once, with
 the Surface, and never projected into events or reused across callers.
 

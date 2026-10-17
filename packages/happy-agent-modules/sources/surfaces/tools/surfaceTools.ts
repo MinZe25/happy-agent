@@ -23,6 +23,7 @@ import {
     resourceVersionSchema,
 } from "@slopus/happy-agent-client";
 import type { SurfacesModule } from "../SurfacesModule.js";
+import { calendarTools } from "./calendarTools.js";
 
 const identity = { surfaceId: surfaceIdSchema, todoId: cuid2Schema };
 const guard = { ...identity, version: resourceVersionSchema };
@@ -86,7 +87,7 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             capabilities: ["Find shared Surfaces and their members."],
             searchKeywords: ["list surfaces", "shared todo lists", "sidebar members"],
             description:
-                "List shared Surface instances, their IDs, names, types, and joined people. Artifact, bot, and task Surfaces include their target's live name and ID while it is available, or an unavailable state without them. Each todo or document tool requires a Surface ID. Results are paged.",
+                "List shared Surface instances, their IDs, names, types, and joined people. Artifact, bot, and task Surfaces include their target's live name and ID while it is available, or an unavailable state without them. Each todo, document, or calendar tool requires a Surface ID. Results are paged.",
             parameters: Type.Object(page, { additionalProperties: false }),
             returnType: Type.Object({
                 surfaces: Type.Array(surfaceSchema),
@@ -460,6 +461,42 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             toLLM: textResult,
         }),
         defineAgentTool({
+            name: "create_calendar_surface",
+            defer: true,
+            capabilities: ["Create a named shared calendar Surface as an admin bot."],
+            searchKeywords: ["create calendar surface", "new shared calendar", "calendar image"],
+            description:
+                "Admin bots only: create a distinct named shared calendar Surface, empty at first. Explicitly supply creatorUserId as a local Happy user ID or null; only null is allowed in standalone mode. The creator is immutable. A named creator joins at the end of their sidebar; null joins nobody in team mode and the local person in standalone mode. Optionally supply an absolute PNG, JPEG, or WebP image path (8 MiB maximum).",
+            parameters: Type.Object(
+                {
+                    name: surfaceNameSchema,
+                    creatorUserId: surfaceMemberSchema.properties.userId,
+                    imagePath,
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: (input, ctx) =>
+                surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath),
+            describeAutoPermissionAction: (input) =>
+                `creating a shared calendar Surface${fromImage(input.imagePath)}. ${imageAccess}`,
+            execute: async (ctx, input, call) =>
+                surfaces.create(
+                    ctx,
+                    {
+                        ...(await creation(ctx, call, input.imagePath)),
+                        type: "calendar",
+                        name: input.name,
+                    },
+                    input.creatorUserId,
+                    scope.agent.id,
+                ),
+            toLLM: textResult,
+        }),
+        defineAgentTool({
             name: "create_artifact_surface",
             defer: true,
             capabilities: ["Create a Surface that points at an existing artifact as an admin bot."],
@@ -619,5 +656,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             toLLM: textResult,
         }),
     ];
-    return admin ? [...ordinary, ...documents, ...administration] : [...ordinary, ...documents];
+    const calendars = calendarTools(surfaces, actor);
+    return admin
+        ? [...ordinary, ...documents, ...calendars, ...administration]
+        : [...ordinary, ...documents, ...calendars];
 }

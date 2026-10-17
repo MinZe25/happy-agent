@@ -38,6 +38,9 @@ import {
     reorderTodoRequestSchema,
     todoMutationRequestSchema,
     todoListScopeSchema,
+    createCalendarEventRequestSchema,
+    updateCalendarEventRequestSchema,
+    calendarEventMutationRequestSchema,
     WORKSPACE_BRIDGE_MAX_BINARY_MESSAGE_BYTES,
     createLiveSessionRequestSchema,
     closeLiveSessionRequestSchema,
@@ -5748,6 +5751,12 @@ export class ApiModule implements AgentModule {
                 }
                 return false;
             }
+            const calendarMatch =
+                /^\/v0\/surfaces\/calendar\/([a-z][a-z0-9]*)(?:\/([a-z][a-z0-9]*)(?:\/(versions)(?:\/([^/]+))?)?)?$/.exec(
+                    url.pathname,
+                );
+            if (calendarMatch !== null)
+                return await this.#handleCalendarRoute(ctx, request, response, url, calendarMatch);
             const match =
                 /^\/v0\/surfaces\/todo\/([a-z][a-z0-9]*)(?:\/([a-z][a-z0-9]*)(?:\/(reorder|versions)(?:\/([^/]+))?)?)?$/.exec(
                     url.pathname,
@@ -5883,11 +5892,156 @@ export class ApiModule implements AgentModule {
                           : 400,
                 error.code,
                 error.message,
-                error.todo === undefined
+                error.current === undefined
                     ? {}
-                    : { todo: error.todo, currentVersion: error.todo.version },
+                    : {
+                          ...error.current,
+                          currentVersion: ("todo" in error.current
+                              ? error.current.todo
+                              : error.current.event
+                          ).version,
+                      },
             );
         }
+    }
+
+    /** `/v0/surfaces/calendar/:surfaceId` routes; Surface errors map in the caller's handler. */
+    async #handleCalendarRoute(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        url: URL,
+        match: RegExpExecArray,
+    ): Promise<boolean> {
+        const surfaces = this.#surfaces!;
+        const surfaceId = match[1]!;
+        if (!Value.Check(surfaceIdSchema, surfaceId)) return false;
+        const eventId = match[2];
+        const action = match[3];
+        const selectedVersion = match[4];
+        const actor = { userId: await surfaces.owner(ctx), agentId: null };
+        if (eventId === undefined) {
+            if (request.method === "GET") {
+                const single = (name: string) => {
+                    const values = url.searchParams.getAll(name);
+                    if (values.length !== 1)
+                        throw invalidRequest(`The calendar range needs exactly one ${name}.`);
+                    return values[0]!;
+                };
+                const instant = (name: string) => {
+                    const value = single(name);
+                    if (!/^(?:0|[1-9][0-9]{0,15})$/.test(value))
+                        throw invalidRequest(`The calendar range ${name} is invalid.`);
+                    return Number(value);
+                };
+                const range = {
+                    from: instant("from"),
+                    to: instant("to"),
+                    timeZone: single("timeZone"),
+                };
+                const cursor = this.#journal.cursor();
+                sendJson(response, 200, {
+                    ...(await surfaces.listCalendar(ctx, surfaceId, range)),
+                    cursor,
+                });
+                return true;
+            }
+            if (request.method === "POST") {
+                const body = await bodyAs(
+                    request,
+                    createCalendarEventRequestSchema,
+                    "calendar event creation",
+                );
+                sendJson(response, 201, {
+                    event: await surfaces.createCalendarEvent(
+                        ctx,
+                        surfaceId,
+                        body,
+                        actor,
+                        actor.userId,
+                    ),
+                });
+                return true;
+            }
+            return false;
+        }
+        if (request.method === "GET") {
+            if (action === undefined) {
+                sendJson(response, 200, {
+                    event: await surfaces.getCalendarEvent(ctx, surfaceId, eventId),
+                });
+                return true;
+            }
+            if (selectedVersion !== undefined) {
+                sendJson(response, 200, {
+                    revision: await surfaces.getCalendarEventVersion(
+                        ctx,
+                        surfaceId,
+                        eventId,
+                        decodePathSegment(selectedVersion, "calendar event revision"),
+                    ),
+                });
+                return true;
+            }
+            const after = url.searchParams.getAll("afterVersion");
+            const limits = url.searchParams.getAll("limit");
+            const limit = limits[0] === undefined ? 100 : Number(limits[0]);
+            if (
+                after.length > 1 ||
+                limits.length > 1 ||
+                (limits[0] !== undefined &&
+                    !Value.Check(Type.String({ pattern: "^[1-9][0-9]*$" }), limits[0])) ||
+                !Value.Check(Type.Integer({ minimum: 1, maximum: 200 }), limit)
+            )
+                throw invalidRequest("The calendar event history page is invalid.");
+            sendJson(
+                response,
+                200,
+                await surfaces.calendarEventVersions(ctx, surfaceId, eventId, after[0], limit),
+            );
+            return true;
+        }
+        if (action !== undefined) return false;
+        const current = await surfaces.getCalendarEvent(ctx, surfaceId, eventId);
+        const version = requireIfMatch(request, current.version, {
+            currentVersion: current.version,
+            event: current,
+        });
+        let event;
+        if (request.method === "PATCH") {
+            const body = await bodyAs(
+                request,
+                updateCalendarEventRequestSchema,
+                "calendar event update",
+            );
+            event = await surfaces.mutateCalendarEvent(
+                ctx,
+                surfaceId,
+                eventId,
+                version,
+                body,
+                actor,
+                body.mutationId,
+            );
+        } else if (request.method === "DELETE") {
+            const body = await optionalBodyAs(
+                request,
+                calendarEventMutationRequestSchema,
+                "calendar event deletion",
+                2048,
+            );
+            event = await surfaces.mutateCalendarEvent(
+                ctx,
+                surfaceId,
+                eventId,
+                version,
+                "delete",
+                actor,
+                body.mutationId,
+            );
+        } else return false;
+        sendJson(response, 200, { event });
+        return true;
     }
 
     /** Only the person who opened an event stream may route live document frames to it. */
@@ -8030,7 +8184,9 @@ export class ApiModule implements AgentModule {
             capabilities: {
                 desktopLiveControl: this.#live !== undefined,
                 ...(this.#bridges === undefined ? {} : { workspaceBridges: true }),
-                ...(this.#surfaces === undefined ? {} : { collaborativeDocuments: true }),
+                ...(this.#surfaces === undefined
+                    ? {}
+                    : { collaborativeDocuments: true, calendarSurfaces: true }),
             },
             version: {
                 protocol: API_PROTOCOL_VERSION,

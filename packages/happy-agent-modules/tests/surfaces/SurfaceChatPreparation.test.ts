@@ -135,17 +135,17 @@ describe("Surface chat preparation", () => {
             updatedAt: 1,
             version: "01890a5d-ac96-774b-bcce-b302099a8057",
         });
-        const calendar = "calendarsurface000000001";
+        const whiteboard = "whiteboardsurface0000001";
         const separator = "separatorsurface00000001";
-        await f.kv.write(f.ctx, `surface.${calendar}`, stored(calendar, "calendar"));
+        await f.kv.write(f.ctx, `surface.${whiteboard}`, stored(whiteboard, "whiteboard"));
         await f.kv.write(f.ctx, `surface.${separator}`, stored(separator, "separator"));
-        await expect(f.surfaces.requestChat(f.ctx, calendar)).rejects.toMatchObject({
+        await expect(f.surfaces.requestChat(f.ctx, whiteboard)).rejects.toMatchObject({
             code: "conflict",
         });
         await expect(f.surfaces.requestChat(f.ctx, separator)).rejects.toMatchObject({
             code: "not_found",
         });
-        expect(await f.kv.read(f.ctx, `chat.${calendar}`)).toBeUndefined();
+        expect(await f.kv.read(f.ctx, `chat.${whiteboard}`)).toBeUndefined();
         expect(await f.kv.read(f.ctx, `chat.${separator}`)).toBeUndefined();
         expect(f.mkdir).not.toHaveBeenCalled();
     });

@@ -222,6 +222,11 @@ describe("installation-owned Surface state", () => {
             "read_document",
             "update_document",
             "list_document_versions",
+            "list_calendar_events",
+            "create_calendar_event",
+            "update_calendar_event",
+            "delete_calendar_event",
+            "list_calendar_event_versions",
         ]);
         for (const tool of ordinary) {
             const read = tool.name.startsWith("list_") || tool.name === "read_document";

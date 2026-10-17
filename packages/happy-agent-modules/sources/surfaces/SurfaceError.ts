@@ -1,4 +1,4 @@
-import type { Todo } from "@slopus/happy-agent-client";
+import type { CalendarEvent, Todo } from "@slopus/happy-agent-client";
 
 export class SurfaceError extends Error {
     constructor(
@@ -9,7 +9,8 @@ export class SurfaceError extends Error {
             | "forbidden"
             | "not_initialized",
         message: string,
-        readonly todo?: Todo,
+        /** The authoritative record a conflict reports, under the key its route uses. */
+        readonly current?: { readonly todo: Todo } | { readonly event: CalendarEvent },
     ) {
         super(message);
     }

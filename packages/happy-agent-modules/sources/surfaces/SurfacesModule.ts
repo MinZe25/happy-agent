@@ -25,7 +25,14 @@ import {
     surfaceUpdatedPayloadSchema,
     todoCreatedPayloadSchema,
     todoUpdatedPayloadSchema,
+    calendarEventCreatedPayloadSchema,
+    calendarEventUpdatedPayloadSchema,
     resourceVersionSchema,
+    type CalendarEvent,
+    type CalendarEventRevision,
+    type CalendarEventVersionListResponse,
+    type CreateCalendarEventRequest,
+    type UpdateCalendarEventRequest,
     type CreateSurfaceRequest,
     type CreateTodoRequest,
     type UpdateTodoRequest,
@@ -70,12 +77,21 @@ import {
     type DocumentFrameListener,
 } from "./documents/SurfaceDocumentLive.js";
 import { SurfaceDocuments, type DocumentProjection } from "./documents/SurfaceDocuments.js";
+import { SurfaceCalendars, type CalendarRange } from "./calendar/SurfaceCalendars.js";
 
 const eventSchema = Type.Union([
     Type.Object({ type: Type.Literal("surface.created"), payload: surfaceCreatedPayloadSchema }),
     Type.Object({ type: Type.Literal("surface.updated"), payload: surfaceUpdatedPayloadSchema }),
     Type.Object({ type: Type.Literal("todo.created"), payload: todoCreatedPayloadSchema }),
     Type.Object({ type: Type.Literal("todo.updated"), payload: todoUpdatedPayloadSchema }),
+    Type.Object({
+        type: Type.Literal("calendar_event.created"),
+        payload: calendarEventCreatedPayloadSchema,
+    }),
+    Type.Object({
+        type: Type.Literal("calendar_event.updated"),
+        payload: calendarEventUpdatedPayloadSchema,
+    }),
 ]);
 export type SurfaceEvent = Static<typeof eventSchema>;
 type Listener = (ctx: Context, event: SurfaceEvent) => void | Promise<void>;
@@ -86,7 +102,14 @@ export type SurfaceActor = TodoRevision["actor"];
  */
 const WITHDRAWN_TYPES: ReadonlySet<string> = new Set(["separator"]);
 /** Types whose content a shared conversation can work on. */
-const CHAT_TYPES: ReadonlySet<string> = new Set(["todo", "document", "artifact", "bot", "task"]);
+const CHAT_TYPES: ReadonlySet<string> = new Set([
+    "todo",
+    "document",
+    "calendar",
+    "artifact",
+    "bot",
+    "task",
+]);
 const PREPARE_CHAT = "surfaces.prepareChat";
 /** How long a person's request waits for a chat's folder and agent before reporting 503. */
 const CHAT_READY_TIMEOUT_MS = 20_000;
@@ -109,6 +132,7 @@ export class SurfacesModule implements AgentModule {
     #store!: SurfacesPersistence;
     #kv!: AgentKV;
     #documents!: SurfaceDocuments;
+    #calendars!: SurfaceCalendars;
     #agents: AgentSystemRef | undefined;
     constructor(
         readonly durable: DurableFunctionsModule,
@@ -145,6 +169,9 @@ export class SurfacesModule implements AgentModule {
         this.#store = new SurfacesPersistence(agentDatabase(ctx)!);
         this.#kv = this.#store.kv();
         this.#documents = new SurfaceDocuments(this.#store, this.#kv, this.#live);
+        this.#calendars = new SurfaceCalendars(this.#store, this.#kv, (eventCtx, event) =>
+            this.#event(eventCtx, event),
+        );
         this.#agents = agents;
         return {
             instructions: async (hookCtx, scope) => {
@@ -548,7 +575,7 @@ export class SurfacesModule implements AgentModule {
         return ctx.inTx(async (tx) => {
             const current = await this.getTodo(tx, surfaceId, id);
             if (current.version !== version)
-                throw new SurfaceError("conflict", "The todo has changed.", current);
+                throw new SurfaceError("conflict", "The todo has changed.", { todo: current });
             let candidate = { ...current } as Todo;
             if (operation === "update") {
                 const edit = checked(updateTodoRequestSchema, input);
@@ -587,11 +614,9 @@ export class SurfacesModule implements AgentModule {
                 };
             else if (operation === "reorder") {
                 if (current.status !== "active")
-                    throw new SurfaceError(
-                        "conflict",
-                        "Only active todos can be reordered.",
-                        current,
-                    );
+                    throw new SurfaceError("conflict", "Only active todos can be reordered.", {
+                        todo: current,
+                    });
                 const { afterId } = checked(
                     Type.Object({ afterId: Type.Union([cuid2Schema, Type.Null()]) }),
                     input,
@@ -607,7 +632,7 @@ export class SurfacesModule implements AgentModule {
                     if (key !== undefined) candidate = { ...current, orderKey: key };
                 } catch (error) {
                     if (error instanceof SurfaceError)
-                        throw new SurfaceError(error.code, error.message, current);
+                        throw new SurfaceError(error.code, error.message, { todo: current });
                     throw error;
                 }
             }
@@ -678,6 +703,98 @@ export class SurfacesModule implements AgentModule {
             if (row === undefined)
                 throw new SurfaceError("not_found", "The todo revision was not found.");
             return readRevision(row);
+        });
+    }
+    /** Occurrences overlapping `[from, to)`, expanded by the daemon, with their events. */
+    async listCalendar(
+        ctx: Context,
+        surfaceId: string,
+        range: { from: number; to: number; timeZone: string },
+        maxOccurrences?: number,
+    ): Promise<CalendarRange> {
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "calendar");
+            return this.#calendars.range(
+                tx,
+                surfaceId,
+                range.from,
+                range.to,
+                range.timeZone,
+                maxOccurrences,
+            );
+        });
+    }
+    async getCalendarEvent(ctx: Context, surfaceId: string, id: string): Promise<CalendarEvent> {
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "calendar");
+            checked(cuid2Schema, id);
+            return this.#calendars.get(tx, surfaceId, id);
+        });
+    }
+    async createCalendarEvent(
+        ctx: Context,
+        surfaceId: string,
+        input: CreateCalendarEventRequest,
+        actor: SurfaceActor,
+        authorUserId: string | null,
+    ): Promise<CalendarEvent> {
+        if (input.id !== undefined) checked(cuid2Schema, input.id);
+        return ctx.inTx(async (tx) => {
+            await this.#validateUser(tx, authorUserId);
+            await this.#surface(tx, surfaceId, "calendar");
+            return this.#calendars.create(
+                tx,
+                surfaceId,
+                input.id ?? createId(),
+                input,
+                actor,
+                authorUserId,
+            );
+        });
+    }
+    /** Change or delete a whole series; `version` must be the one the caller read. */
+    async mutateCalendarEvent(
+        ctx: Context,
+        surfaceId: string,
+        id: string,
+        version: string,
+        edit: UpdateCalendarEventRequest | "delete",
+        actor: SurfaceActor,
+        mutationId?: string,
+    ): Promise<CalendarEvent> {
+        checked(resourceVersionSchema, version);
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "calendar");
+            checked(cuid2Schema, id);
+            return this.#calendars.mutate(tx, surfaceId, id, version, edit, actor, mutationId);
+        });
+    }
+    async calendarEventVersions(
+        ctx: Context,
+        surfaceId: string,
+        id: string,
+        afterVersion?: string,
+        limit = 100,
+    ): Promise<CalendarEventVersionListResponse> {
+        checked(Type.Integer({ minimum: 1, maximum: 200 }), limit);
+        if (afterVersion !== undefined) checked(resourceVersionSchema, afterVersion);
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "calendar");
+            checked(cuid2Schema, id);
+            return this.#calendars.versions(tx, surfaceId, id, afterVersion, limit);
+        });
+    }
+    async getCalendarEventVersion(
+        ctx: Context,
+        surfaceId: string,
+        id: string,
+        version: string,
+    ): Promise<CalendarEventRevision> {
+        checked(resourceVersionSchema, version);
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "calendar");
+            checked(cuid2Schema, id);
+            return this.#calendars.version(tx, surfaceId, id, version);
         });
     }
     /** The document's Markdown projection, current or as of `seq`. */

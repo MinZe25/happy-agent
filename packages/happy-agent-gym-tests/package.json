@@ -8,7 +8,7 @@
         "test:gym:api": "node --experimental-strip-types scripts/runHappyApiSuite.ts"
     },
     "devDependencies": {
-        "@slopus/happy-agent-client": "0.0.94",
+        "@slopus/happy-agent-client": "0.0.96",
         "@slopus/happy-agent-gym": "workspace:*",
         "@types/node": "^24.0.10",
         "@types/ws": "8.18.1",
