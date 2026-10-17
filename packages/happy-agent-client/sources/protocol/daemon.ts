@@ -76,6 +76,8 @@ export const healthResponseSchema = Type.Object({
             desktopLiveCapabilities: Type.Optional(Type.Array(Type.String())),
             /** True when document Surfaces are collaborative Yjs documents. */
             collaborativeDocuments: Type.Optional(Type.Boolean()),
+            /** True when the daemon serves calendar Surfaces. */
+            calendarSurfaces: Type.Optional(Type.Boolean()),
         }),
     ),
     /** Always `true`; a daemon that cannot answer does not answer. */

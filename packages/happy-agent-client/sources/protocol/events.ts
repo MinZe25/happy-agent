@@ -48,6 +48,13 @@ import {
     surfaceOrderKeySchema,
     surfaceSchema,
     surfaceDocumentSchema,
+    calendarEventSchema,
+    calendarEventLocationSchema,
+    calendarEventNotesSchema,
+    calendarEventStatusSchema,
+    calendarEventTitleSchema,
+    calendarRecurrenceSchema,
+    calendarTimingSchema,
     todoSchema,
     todoTextSchema,
     type SurfaceDocumentLiveFrame,
@@ -244,6 +251,35 @@ export const todoUpdatedPayloadSchema = Type.Object({
     version: resourceVersionSchema,
 });
 export type TodoUpdatedPayload = Static<typeof todoUpdatedPayloadSchema>;
+
+export const calendarEventCreatedPayloadSchema = Type.Object({
+    event: calendarEventSchema,
+    mutationId: Type.Optional(mutationIdSchema),
+});
+export type CalendarEventCreatedPayload = Static<typeof calendarEventCreatedPayloadSchema>;
+
+/**
+ * Only the fields that changed, always with `updatedAt`; timing and recurrence appear whole.
+ * Payloads describe the series record, never occurrences: reread the visible range instead.
+ */
+export const calendarEventUpdatedPayloadSchema = Type.Object({
+    changes: Type.Object({
+        deletedAt: Type.Optional(Nullable(timestampSchema)),
+        location: Type.Optional(Nullable(calendarEventLocationSchema)),
+        notes: Type.Optional(Nullable(calendarEventNotesSchema)),
+        recurrence: Type.Optional(Nullable(calendarRecurrenceSchema)),
+        status: Type.Optional(calendarEventStatusSchema),
+        timing: Type.Optional(calendarTimingSchema),
+        title: Type.Optional(calendarEventTitleSchema),
+        updatedAt: timestampSchema,
+    }),
+    eventId: cuid2Schema,
+    mutationId: Type.Optional(mutationIdSchema),
+    previousVersion: resourceVersionSchema,
+    surfaceId: surfaceIdSchema,
+    version: resourceVersionSchema,
+});
+export type CalendarEventUpdatedPayload = Static<typeof calendarEventUpdatedPayloadSchema>;
 
 /**
  * Emitted only by daemons without collaborative documents; current daemons deliver document
@@ -499,6 +535,8 @@ export type HappyAgentEvent =
     | EventEnvelope<"surface.created", SurfaceCreatedPayload>
     | EventEnvelope<"todo.created", TodoCreatedPayload>
     | EventEnvelope<"todo.updated", TodoUpdatedPayload>
+    | EventEnvelope<"calendar_event.created", CalendarEventCreatedPayload>
+    | EventEnvelope<"calendar_event.updated", CalendarEventUpdatedPayload>
     | EventEnvelope<"surface.document.updated", SurfaceDocumentUpdatedPayload>
     | EventEnvelope<"artifact.created", ArtifactCreatedPayload>
     | EventEnvelope<"artifact.updated", ArtifactUpdatedPayload>

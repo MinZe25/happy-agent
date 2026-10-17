@@ -143,6 +143,14 @@ export const createDocumentSurfaceRequestSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+export const createCalendarSurfaceRequestSchema = Type.Object(
+    {
+        ...surfaceCreationFields,
+        image: Type.Optional(surfaceImageInputSchema),
+        type: Type.Literal("calendar"),
+    },
+    { additionalProperties: false },
+);
 export const createArtifactSurfaceRequestSchema = Type.Object(
     {
         ...surfaceCreationFields,
@@ -173,6 +181,7 @@ export const createTaskSurfaceRequestSchema = Type.Object(
 export const createSurfaceRequestSchema = Type.Union([
     createTodoSurfaceRequestSchema,
     createDocumentSurfaceRequestSchema,
+    createCalendarSurfaceRequestSchema,
     createArtifactSurfaceRequestSchema,
     createBotSurfaceRequestSchema,
     createTaskSurfaceRequestSchema,
@@ -505,3 +514,268 @@ export type SurfaceDocumentPresenceFrame = Static<typeof surfaceDocumentPresence
 export type SurfaceDocumentLiveFrame =
     | { type: "document.update"; data: SurfaceDocumentUpdateFrame }
     | { type: "document.presence"; data: SurfaceDocumentPresenceFrame };
+
+/** An instant in epoch milliseconds, through the end of year 9999 UTC. */
+export const calendarInstantSchema = Type.Integer({ minimum: 0, maximum: 253_402_300_799_999 });
+
+/** A `YYYY-MM-DD` Gregorian date from 1970 through 9999; the daemon rejects impossible days. */
+export const calendarDateSchema = Type.String({
+    pattern: "^(?:19[7-9][0-9]|[2-9][0-9]{3})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$",
+});
+export type CalendarDate = Static<typeof calendarDateSchema>;
+
+/** An IANA time zone name; the daemon accepts only names its time zone database recognizes. */
+export const calendarTimeZoneSchema = Type.String({
+    minLength: 1,
+    maxLength: 64,
+    pattern: "^[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+)*$",
+});
+
+/** May be empty or blank; clients show their own placeholder. Stored without trimming. */
+export const calendarEventTitleSchema = Type.String({
+    maxLength: 1024,
+    pattern: "^[^\\x00-\\x1f\\x7f]*$",
+});
+export const calendarEventNotesSchema = Type.String({
+    minLength: 1,
+    maxLength: 10_000,
+    pattern: "^[^\\x00-\\x08\\x0b-\\x1f\\x7f]+$",
+});
+export const calendarEventLocationSchema = Type.String({
+    minLength: 1,
+    maxLength: 1024,
+    pattern: "^(?=[\\s\\S]*\\S)[^\\x00-\\x1f\\x7f]+$",
+});
+
+const calendarTimingVariants = (strict: boolean) => {
+    const options = strict ? { additionalProperties: false } : {};
+    return [
+        Type.Object(
+            {
+                end: calendarInstantSchema,
+                kind: Type.Literal("timed"),
+                start: calendarInstantSchema,
+                timeZone: calendarTimeZoneSchema,
+            },
+            options,
+        ),
+        Type.Object(
+            {
+                endDate: calendarDateSchema,
+                kind: Type.Literal("allDay"),
+                startDate: calendarDateSchema,
+            },
+            options,
+        ),
+    ] as const;
+};
+
+/** Timed events are instants with the zone that gives them wall-clock time; all-day ends exclude. */
+export const calendarTimingSchema = Type.Union([...calendarTimingVariants(false)]);
+export type CalendarTiming = Static<typeof calendarTimingSchema>;
+export const calendarTimingInputSchema = Type.Union([...calendarTimingVariants(true)]);
+export type CalendarTimingInput = Static<typeof calendarTimingInputSchema>;
+
+export const calendarWeekdaySchema = Type.Union([
+    Type.Literal("monday"),
+    Type.Literal("tuesday"),
+    Type.Literal("wednesday"),
+    Type.Literal("thursday"),
+    Type.Literal("friday"),
+    Type.Literal("saturday"),
+    Type.Literal("sunday"),
+]);
+export type CalendarWeekday = Static<typeof calendarWeekdaySchema>;
+
+const calendarIntervalSchema = Type.Integer({ minimum: 1, maximum: 1000 });
+const calendarCountSchema = Type.Integer({ minimum: 1, maximum: 10_000 });
+const calendarWeekdaysSchema = Type.Array(calendarWeekdaySchema, {
+    minItems: 1,
+    maxItems: 7,
+    uniqueItems: true,
+});
+const otherFrequencySchema = Type.Union([
+    Type.Literal("daily"),
+    Type.Literal("monthly"),
+    Type.Literal("yearly"),
+]);
+
+/**
+ * Responses carry every field, so a stored rule can be sent back verbatim. Weekly `weekdays: null`
+ * means the start's weekday. At most one of `until` and `count` is non-null.
+ */
+export const calendarRecurrenceSchema = Type.Union([
+    Type.Object({
+        count: Nullable(calendarCountSchema),
+        frequency: Type.Literal("weekly"),
+        interval: calendarIntervalSchema,
+        until: Nullable(calendarDateSchema),
+        weekdays: Nullable(calendarWeekdaysSchema),
+    }),
+    Type.Object({
+        count: Nullable(calendarCountSchema),
+        frequency: otherFrequencySchema,
+        interval: calendarIntervalSchema,
+        until: Nullable(calendarDateSchema),
+    }),
+]);
+export type CalendarRecurrence = Static<typeof calendarRecurrenceSchema>;
+
+/** Requests may omit the defaults: interval 1, weekdays, until, and count null. */
+export const calendarRecurrenceInputSchema = Type.Union([
+    Type.Object(
+        {
+            count: Type.Optional(Nullable(calendarCountSchema)),
+            frequency: Type.Literal("weekly"),
+            interval: Type.Optional(calendarIntervalSchema),
+            until: Type.Optional(Nullable(calendarDateSchema)),
+            weekdays: Type.Optional(Nullable(calendarWeekdaysSchema)),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            count: Type.Optional(Nullable(calendarCountSchema)),
+            frequency: otherFrequencySchema,
+            interval: Type.Optional(calendarIntervalSchema),
+            until: Type.Optional(Nullable(calendarDateSchema)),
+        },
+        { additionalProperties: false },
+    ),
+]);
+export type CalendarRecurrenceInput = Static<typeof calendarRecurrenceInputSchema>;
+
+export const calendarEventStatusSchema = Type.Union([
+    Type.Literal("active"),
+    Type.Literal("deleted"),
+]);
+export type CalendarEventStatus = Static<typeof calendarEventStatusSchema>;
+
+const calendarEventFields = {
+    /** Immutable author, distinct from revision actors. */
+    authorUserId: Nullable(userIdSchema),
+    createdAt: timestampSchema,
+    id: cuid2Schema,
+    location: Nullable(calendarEventLocationSchema),
+    notes: Nullable(calendarEventNotesSchema),
+    recurrence: Nullable(calendarRecurrenceSchema),
+    surfaceId: surfaceIdSchema,
+    timing: calendarTimingSchema,
+    title: calendarEventTitleSchema,
+    updatedAt: timestampSchema,
+    version: resourceVersionSchema,
+};
+
+/** One series record. A deleted event is a tombstone that keeps every other field. */
+export const calendarEventSchema = Type.Union([
+    Type.Object({
+        ...calendarEventFields,
+        deletedAt: Type.Null(),
+        status: Type.Literal("active"),
+    }),
+    Type.Object({
+        ...calendarEventFields,
+        deletedAt: timestampSchema,
+        status: Type.Literal("deleted"),
+    }),
+]);
+export type CalendarEvent = Static<typeof calendarEventSchema>;
+
+/** One expanded occurrence; its identity is `eventId` with `index` at the event version read. */
+export const calendarOccurrenceSchema = Type.Object({
+    eventId: cuid2Schema,
+    index: Type.Integer({ minimum: 0 }),
+    timing: calendarTimingSchema,
+});
+export type CalendarOccurrence = Static<typeof calendarOccurrenceSchema>;
+
+/** The longest range one read may cover: 100 days. */
+export const CALENDAR_RANGE_MAX_MS = 8_640_000_000;
+/** The most occurrences one range read returns before reporting `truncated`. */
+export const CALENDAR_RANGE_MAX_OCCURRENCES = 5000;
+
+/** Occurrences overlapping `[from, to)`, with exactly the events they belong to. */
+export const calendarRangeResponseSchema = Type.Object({
+    cursor: eventCursorSchema,
+    events: Type.Array(calendarEventSchema),
+    occurrences: Type.Array(calendarOccurrenceSchema),
+    truncated: Type.Boolean(),
+});
+export type CalendarRangeResponse = Static<typeof calendarRangeResponseSchema>;
+
+export const calendarEventResponseSchema = Type.Object({ event: calendarEventSchema });
+export type CalendarEventResponse = Static<typeof calendarEventResponseSchema>;
+
+export const calendarEventRevisionSchema = Type.Object({
+    actor: surfaceRevisionActorSchema,
+    event: calendarEventSchema,
+    source: surfaceRevisionSourceSchema,
+});
+export type CalendarEventRevision = Static<typeof calendarEventRevisionSchema>;
+
+export const calendarEventVersionListResponseSchema = Type.Object({
+    nextAfterVersion: Nullable(resourceVersionSchema),
+    versions: Type.Array(calendarEventRevisionSchema),
+});
+export type CalendarEventVersionListResponse = Static<
+    typeof calendarEventVersionListResponseSchema
+>;
+
+export const calendarEventVersionResponseSchema = Type.Object({
+    revision: calendarEventRevisionSchema,
+});
+export type CalendarEventVersionResponse = Static<typeof calendarEventVersionResponseSchema>;
+
+export const createCalendarEventRequestSchema = Type.Object(
+    {
+        id: Type.Optional(cuid2Schema),
+        location: Type.Optional(Nullable(calendarEventLocationSchema)),
+        mutationId: Type.Optional(mutationIdSchema),
+        notes: Type.Optional(Nullable(calendarEventNotesSchema)),
+        recurrence: Type.Optional(Nullable(calendarRecurrenceInputSchema)),
+        timing: calendarTimingInputSchema,
+        title: Type.Optional(calendarEventTitleSchema),
+    },
+    { additionalProperties: false },
+);
+export type CreateCalendarEventRequest = Static<typeof createCalendarEventRequestSchema>;
+
+const calendarEventEdits = {
+    location: Nullable(calendarEventLocationSchema),
+    notes: Nullable(calendarEventNotesSchema),
+    recurrence: Nullable(calendarRecurrenceInputSchema),
+    status: calendarEventStatusSchema,
+    timing: calendarTimingInputSchema,
+    title: calendarEventTitleSchema,
+};
+const optionalCalendarEventEdits = {
+    location: Type.Optional(calendarEventEdits.location),
+    mutationId: Type.Optional(mutationIdSchema),
+    notes: Type.Optional(calendarEventEdits.notes),
+    recurrence: Type.Optional(calendarEventEdits.recurrence),
+    status: Type.Optional(calendarEventEdits.status),
+    timing: Type.Optional(calendarEventEdits.timing),
+    title: Type.Optional(calendarEventEdits.title),
+};
+const strict = { additionalProperties: false } as const;
+
+/**
+ * Any non-empty subset of the editable fields; a mutation echo alone is not an edit. `timing`
+ * and `recurrence` replace the whole value, so a revision's fields restore it exactly.
+ */
+export const updateCalendarEventRequestSchema = Type.Union([
+    Type.Object({ ...optionalCalendarEventEdits, title: calendarEventEdits.title }, strict),
+    Type.Object({ ...optionalCalendarEventEdits, notes: calendarEventEdits.notes }, strict),
+    Type.Object({ ...optionalCalendarEventEdits, location: calendarEventEdits.location }, strict),
+    Type.Object({ ...optionalCalendarEventEdits, timing: calendarEventEdits.timing }, strict),
+    Type.Object(
+        { ...optionalCalendarEventEdits, recurrence: calendarEventEdits.recurrence },
+        strict,
+    ),
+    Type.Object({ ...optionalCalendarEventEdits, status: calendarEventEdits.status }, strict),
+]);
+export type UpdateCalendarEventRequest = Static<typeof updateCalendarEventRequestSchema>;
+
+/** Delete accepts this optional echo-only body. */
+export const calendarEventMutationRequestSchema = surfaceMemberRequestSchema;
+export type CalendarEventMutationRequest = Static<typeof calendarEventMutationRequestSchema>;

@@ -292,6 +292,12 @@ additive fields. A missing `chatAgentId` is treated as null. Surface chat worksp
 `kind: "surface"` and are discovered only through their Surface chat, never ordinary workspace
 listings. An older daemon may reject new Surface types or return `404`/`501` for document or
 chat routes; clients leave those features unavailable without disabling existing todo lists.
+Calendar Surfaces are additive and do not increment the protocol version. A daemon that serves
+them reports `capabilities.calendarSurfaces: true` from health. Older daemons omit it, reject
+`{ "type": "calendar" }` creation with `400`, and answer calendar routes with `404`; clients
+then offer no calendar creation. A calendar Surface listed by a daemon a client does not
+support is left unavailable like any unknown type. The `calendar_event.*` events are absent on
+older compatible daemons.
 
 Collaborative documents and the removal of the `separator` Surface type are a one-off exception
 to additive compatibility, approved for client and daemon together; the protocol number does not
@@ -988,7 +994,8 @@ Fields:
   bridges described under Workspaces. Optional `desktopLiveCapabilities` lists the additive
   voice desktop capability names the daemon accepts; see Live voice sessions.
   `collaborativeDocuments: true` advertises collaborative document Surfaces, described under
-  Document Surfaces.
+  Document Surfaces. `calendarSurfaces: true` advertises calendar Surfaces, described under
+  Calendar Surfaces.
 - `ready` — `false` while starting, `true` once the agent system is loaded.
 - `status` — `"starting"` or `"ready"`; the human-readable form of `ready`.
 - `version` — one identity object. `protocol` is the wire protocol number, the client's
@@ -6478,9 +6485,8 @@ Response — `200`: `{ "bot": { ... } }` with `avatar` `null`.
 
 A Surface is an instance of a predefined feature with its own typed API. Every instance has a
 CUID2 ID and a human name. Multiple independent Surfaces of each type may exist, with separate
-content, history, and members. Supported types are `todo`, `document`, `artifact`, `bot`, and
-`task`; calendars
-are a future type, not a current endpoint. The catalog initially has no instances.
+content, history, and members. Supported types are `todo`, `document`, `calendar`, `artifact`, `bot`,
+and `task`. The catalog initially has no instances.
 All onboarded authenticated people may read and modify Surface data, whether
 or not they joined. Joining and leaving control only the person's sidebar. Creating a Surface
 does not create a workspace, agent, or chat; the separate chat-ensure operation below is lazy.
@@ -6942,6 +6948,348 @@ optional absolute `imagePath`. Its authority, attribution, creator join rules, i
 and permission boundaries match `create_todo_surface`. No document operation joins anyone
 automatically other than the explicit creator rule during Surface creation.
 
+### Calendar Surfaces
+
+A `calendar` Surface owns one shared set of calendar events that people and agents create, move,
+and edit. Events live only in Happy: there is no external calendar sync, subscription feed, or
+import, and the daemon makes no network request for calendar data. Recurring events are expanded
+by the daemon. Clients and models read expanded occurrences from the range read and never
+compute recurrences themselves.
+
+`POST /v0/surfaces` accepts `{ "type": "calendar", "name": "Team", "id": "...",
+"image": { "data": "..." }, "mutationId": "..." }`. Only `type` and `name` are required. It
+creates an empty calendar. Images, creator attribution, automatic creator membership,
+supplied-ID retries, and `surface.created` follow the catalog rules.
+
+#### Event data
+
+```json
+{
+    "id": "e4k8m2q9w1e5r7y3u6i0o2p4",
+    "surfaceId": "s4k8m2q9w1e5r7y3u6i0o2p4",
+    "authorUserId": "u1x2y3z4a5b6c7d8e9f0g1h2",
+    "title": "Team sync",
+    "notes": "Agenda in the shared doc.",
+    "location": "Room 4",
+    "timing": {
+        "kind": "timed",
+        "start": 1760943600000,
+        "end": 1760947200000,
+        "timeZone": "Europe/Berlin"
+    },
+    "recurrence": {
+        "frequency": "weekly",
+        "interval": 1,
+        "weekdays": ["monday", "thursday"],
+        "until": null,
+        "count": 10
+    },
+    "status": "active",
+    "createdAt": 1755300000000,
+    "updatedAt": 1755400000000,
+    "deletedAt": null,
+    "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e"
+}
+```
+
+`id` is a CUID2. `title` is always a string of 0–1,024 characters with no ASCII control
+characters. It may be empty or contain only whitespace; clients show such a title as their own
+placeholder, such as "(No title)". `notes` is `null` or 1–10,000 characters with no ASCII control
+characters except tab and newline. `location` is `null` or 1–1,024 characters containing a
+non-whitespace character and no ASCII control characters. Text is stored exactly as supplied,
+without trimming. `status` is `active` or `deleted`. An active event has `deletedAt: null`; a
+deleted event is a tombstone with a deletion timestamp that keeps every other field. `createdAt`, `updatedAt`, and `deletedAt` are epoch milliseconds. `version` is a
+UUIDv7 resource version.
+
+`authorUserId` follows the todo author rules exactly. It is the installation-local Happy user ID
+of the event's author, or `null`, set once at creation, never changed by any edit, deletion, or
+application of an earlier state, and repeated unchanged in every revision snapshot.
+
+#### Timing
+
+`timing` is one of two kinds.
+
+- **Timed:** `{ "kind": "timed", "start": 1760943600000, "end": 1760947200000,
+"timeZone": "Europe/Berlin" }`. `start` and `end` are instants in epoch milliseconds, with
+  `start < end` and both in `0` through `253402300799999` (the end of year 9999 UTC). `timeZone`
+  is an IANA time zone name such as `Europe/Berlin`, `America/New_York`, or `UTC`. The daemon
+  accepts any name its time zone database recognizes, including links such as `US/Eastern`, and
+  stores it exactly as supplied. Numeric offsets such as `+02:00` are not time zones. An
+  unrecognized name returns `400 invalid_request`. The time zone gives the event its local
+  wall-clock time: the event's local start is `start` read in `timeZone`.
+- **All-day:** `{ "kind": "allDay", "startDate": "2026-10-20", "endDate": "2026-10-21" }`.
+  Dates are `YYYY-MM-DD` Gregorian calendar dates from `1970-01-01` through `9999-12-31`.
+  `endDate` is exclusive and later than `startDate`, so a one-day event on 20 October has
+  `endDate: "2026-10-21"`. All-day events have no time zone: they cover the same dates wherever
+  they are viewed.
+
+An event lasts at most 366 days: `end - start` is at most 31,622,400,000 ms for timed events, and
+`endDate` is at most 366 days after `startDate` for all-day events. A longer event returns
+`400 invalid_request`.
+
+#### Recurrence
+
+`recurrence` is `null` for a one-off event, or a rule:
+
+```json
+{
+    "frequency": "monthly",
+    "interval": 1,
+    "until": "2027-06-30",
+    "count": null
+}
+```
+
+- `frequency` is `daily`, `weekly`, `monthly`, or `yearly`.
+- `interval` is an integer from 1 through 1,000: every `interval` days, weeks, months, or years.
+- `weekdays` exists only on weekly rules. It is `null` or 1–7 unique values from `monday`,
+  `tuesday`, `wednesday`, `thursday`, `friday`, `saturday`, and `sunday`, stored in that
+  Monday-first order whatever order the request used. `null` means the weekday of the event's
+  start, and follows the start when the timing changes.
+- `until` is `null` or an inclusive `YYYY-MM-DD` date no earlier than the start date.
+- `count` is `null` or an integer from 1 through 10,000: the total number of occurrences,
+  including the first.
+
+At most one of `until` and `count` is non-null; both `null` repeats forever. A weekly rule with
+`weekdays` on a daily, monthly, or yearly frequency, both `until` and `count`, or an `until`
+before the start date returns `400 invalid_request`. Requests may omit `interval` (default 1),
+`weekdays` (default `null`), `until`, and `count` (default `null`). Responses always include
+every field of the rule, so a stored rule can be sent back verbatim.
+
+The **start date** is the event's local start date: `startDate` for all-day events, and the date
+of `start` in `timeZone` for timed events. Its **local start time** is the wall-clock time of
+`start` in `timeZone`, to the millisecond. The event's own timing is always the first
+occurrence, index 0. Later occurrences fall on these local dates after the start date:
+
+- **Daily:** every `interval` days.
+- **Weekly:** every listed weekday (or the start's weekday when `weekdays` is `null`) in every
+  `interval`-th week. Weeks begin on Monday, and week 0 is the week containing the start date.
+  The start is always index 0, even when `weekdays` does not list its weekday.
+- **Monthly:** the start date's day of the month, every `interval` months. A month without that
+  day is skipped, as in RFC 5545: a series starting on 31 January continues on 31 March, not
+  28 February or 3 March.
+- **Yearly:** the start date's month and day, every `interval` years. A series starting on
+  29 February occurs only in leap years among those selected.
+
+Occurrences are numbered 0, 1, 2, … in date order. Skipped months and years produce no
+occurrence and consume no number, and `count` counts produced occurrences only. `until` keeps
+occurrences whose local date is on or before it.
+
+Timed occurrences are expanded in the event's own time zone, so the local start time stays fixed
+across daylight-saving changes: a 09:00 Berlin meeting stays at 09:00 Berlin time in both summer
+and winter, and its instant moves by an hour. Each occurrence's start is its local date at the
+local start time, converted to an instant in `timeZone`. A wall-clock time that does not exist
+because clocks jumped forward is moved forward by the length of the jump: 02:30 on a day that
+skips from 02:00 to 03:00 becomes 03:30. A wall-clock time that occurs twice because clocks went
+back uses the earlier instant. This matches RFC 5545 and JavaScript Temporal's `compatible`
+disambiguation. Every timed occurrence lasts exactly `end - start` milliseconds. Every all-day
+occurrence spans as many days as the event, with `endDate` shifted by the same number of days as
+`startDate`.
+
+There are no per-occurrence exceptions. An occurrence cannot be edited, moved, or deleted on its
+own: editing or deleting an event changes the whole series. To move a whole series, update the
+event's `timing`.
+
+#### Range reads and occurrences
+
+`GET /v0/surfaces/calendar/:surfaceId?from=1759269600000&to=1761951600000&timeZone=Europe%2FBerlin`
+returns every occurrence of the calendar's active events that overlaps the instant range
+`[from, to)`, with the events they belong to:
+
+```json
+{
+    "events": [{ "id": "e4k8m2q9w1e5r7y3u6i0o2p4", "...": "..." }],
+    "occurrences": [
+        {
+            "eventId": "e4k8m2q9w1e5r7y3u6i0o2p4",
+            "index": 3,
+            "timing": {
+                "kind": "timed",
+                "start": 1761552000000,
+                "end": 1761555600000,
+                "timeZone": "Europe/Berlin"
+            }
+        }
+    ],
+    "truncated": false,
+    "cursor": "..."
+}
+```
+
+- `from` and `to` are required epoch milliseconds written as plain decimal integers, with
+  `0 <= from < to <= 253402300800000` and `to - from` at most 100 days (8,640,000,000 ms).
+  One month or one week view, including its leading and trailing days, is one read.
+- `timeZone` is required: the IANA time zone in which the client shows the range. It decides
+  only how all-day occurrences meet the instant range. An all-day occurrence covers
+  `[midnight of startDate, midnight of endDate)` in that zone. A midnight that does not exist
+  there uses the same forward rule as recurrence expansion. Timed occurrences ignore it.
+- A timed occurrence overlaps when its start is before `to` and its end is after `from`. An
+  all-day occurrence overlaps when its covered range does, so an occurrence that started before
+  the range and is still running is included.
+- Each occurrence has `eventId`, its zero-based `index` in the series, and `timing` of the same
+  shape as an event's. A timed occurrence repeats its event's `timeZone`. An occurrence's
+  identity is `eventId` with `index`, and it is valid only for the event version it was read at.
+  A one-off event has exactly one occurrence, index 0, whose timing equals the event's.
+- `occurrences` is sorted by start, then all-day before timed at the same start, then `eventId`,
+  then `index`. An all-day occurrence's start is its zone midnight for this ordering.
+- `events` holds exactly the events referenced by `occurrences`, each once, in ascending ID
+  order, as full event objects. Deleted events and their occurrences never appear in a range
+  read.
+- At most 5,000 occurrences are returned. When more overlap the range, the response holds the
+  first 5,000 in the order above and `truncated: true`; the client reads a narrower range.
+  Otherwise `truncated` is `false`.
+- `cursor` is the shared event cursor captured before the read.
+
+Missing, repeated, or malformed `from`, `to`, or `timeZone`, `from >= to`, or a range over 100
+days return `400 invalid_request`. Other query fields are ignored.
+
+#### Permanent history and restoration
+
+Every creation, edit, timing or recurrence change, deletion, and return to active atomically
+stores the event's complete new snapshot as an immutable revision, alongside the current event
+and its durable notification intent. Publication to the shared event journal follows commit.
+A revision is `{ "event": {...}, "actor": { "userId": null, "agentId": null },
+"source": "api" }`. Its snapshot holds every field of the event: title, notes, location, timing
+kind with its start and end or dates and time zone, the full recurrence rule, status, the
+tombstone timestamp, the author, and the version. `actor` and `source` follow the todo revision
+rules exactly. They come from trusted execution context, never from a request body, and are
+independent of `authorUserId`. A no-op stores neither a revision nor an event. Revisions are
+permanent: deletion, later edits, applying an earlier state, restart, and event-journal retention
+never remove or change one. All operations participate in a caller's transaction and notify only
+after commit.
+
+There is no restore, revert, or undelete route or tool. Any earlier state can be restored exactly
+with the ordinary update. To restore one, read a revision and send its `title`, `notes`,
+`location`, `timing`, `recurrence`, and `status` through `PATCH` with the current version in
+`If-Match`. Every field a revision holds can be set this way. Sending `status: "active"`
+undeletes a deleted event. `title: ""` empties the title, and `notes: null` and
+`location: null` clear them. `recurrence: null` removes a rule, and a full rule replaces one.
+`timing` switches freely between timed and all-day.
+A revision's `recurrence` is accepted verbatim. The result equals that revision in every editable
+field. Server-owned fields stay server-owned: `id`, `surfaceId`, `authorUserId`, and `createdAt`
+never change, `updatedAt` and `version` are new, and a restored deleted state gets a new
+`deletedAt`. Applying an earlier state appends exactly one new revision and never rewrites the
+revision it came from. Applying a state equal to the current one is a no-op.
+
+All mutations of existing events require `If-Match` with the current event version. Missing or
+malformed headers return `400 invalid_request`. A stale one returns `409 conflict` with
+`currentVersion` and the authoritative `event`, including when it is deleted. Unknown event IDs
+return `404 not_found`. Invalid bodies, unsupported fields, and malformed paging parameters return
+`400 invalid_request`. Creation does not use `If-Match`.
+
+#### Routes
+
+The prefix is `/v0/surfaces/calendar/:surfaceId`. Every operation checks that the Surface has
+type `calendar` and scopes event and revision lookups to that instance. Unknown Surfaces, a
+Surface of another type, and events or revisions belonging to a different Surface return
+`404 not_found`. Calendar routes given a todo, document, or reference Surface also return
+`404 not_found`, as todo and document routes do for a calendar.
+
+- `GET` is the range read above.
+- `POST` accepts `{ "title": "Team sync", "notes": null, "location": "Room 4", "timing": {...},
+"recurrence": {...}, "id": "...", "mutationId": "..." }`. Only `timing` is required. `title`
+  defaults to `""`, `notes`, `location`, and `recurrence` default to `null`, and `id` and
+  `mutationId` are optional. Creation records the authenticated caller as `authorUserId`
+  (`null` in standalone mode), stores an active event, and returns `201 { "event": {...} }`,
+  emitting shared
+  `calendar_event.created`. A repeated supplied ID returns the current event unchanged with
+  `201`, even after deletion or restart, and emits no event; the other fields are ignored. This
+  ID is the creation retry key, and `mutationId` is only an echo. HTTP bodies cannot supply
+  `authorUserId`, `status`, or timestamps.
+- `GET /:eventId` returns `200 { "event": {...} }`, including deleted tombstones.
+- `PATCH /:eventId` accepts any non-empty subset of `title`, `notes`, `location`, `timing`,
+  `recurrence`, and `status`, plus optional `mutationId`. It requires at least one of those six
+  fields. `status` is `active` or `deleted`. `timing` and `recurrence` replace the whole value;
+  there is no partial merge inside them. The resulting event must be valid as a whole. For
+  example, moving the timing past a rule's `until` returns `400 invalid_request` unless the same
+  request also changes the rule. Fields may be edited in any status. Moving to `deleted` sets a
+  new `deletedAt`. Moving to `active` clears it. Repeating the current status keeps its
+  timestamp. An identical edit is a no-op. The response is `200 { "event": {...} }`, and a
+  change emits `calendar_event.updated`. Dragging an event or an occurrence to a new time is one
+  `PATCH` of `timing`. Resizing it is the same. Because there are no per-occurrence exceptions,
+  a client moving an occurrence of a series applies the same shift to the event's own timing.
+- `DELETE /:eventId` accepts `{}` or `{ "mutationId": "..." }`, marks the event deleted, and
+  returns `200 { "event": {...} }`. Already deleted is a no-op after checking `If-Match`. A
+  change emits `calendar_event.updated`. Deletion never removes a revision.
+- `GET /:eventId/versions` returns `200` with `versions` (immutable revisions, oldest first) and
+  `nextAfterVersion` (a UUIDv7 or `null`). `afterVersion` is an optional exclusive UUIDv7
+  revision cursor belonging to this event, and unknown cursors return `404 not_found`. `limit`
+  is optional, default 100, from 1 through 200. `nextAfterVersion` names this page's last
+  revision when another page exists, otherwise `null`. Appending revisions never changes prior
+  pages.
+- `GET /:eventId/versions/:version` returns `200 { "revision": {...} }` for that immutable
+  revision. Unknown versions return `404 not_found`.
+
+#### Events
+
+`calendar_event.created` carries the full `event` and optional `mutationId`.
+`calendar_event.updated` carries `surfaceId`, `eventId`, `previousVersion`, `version`, `changes`,
+and optional `mutationId`. `changes` holds the changed fields among `title`, `notes`,
+`location`, `timing`, `recurrence`, `status`, and `deletedAt`, always with `updatedAt`. `timing`
+and `recurrence` appear whole. Both events are shared. Consumers follow normal version-chain
+reconciliation and refetch an event on a gap. Events carry series records, not occurrences: a
+client showing a range reads that range again after a `calendar_event.*` event for its calendar,
+and never derives occurrences from a payload. Calendar events, occurrences, and history are not
+part of desktop bootstrap; opening a calendar reads its visible range with that read's cursor.
+
+#### Agent tools
+
+Every ordinary agent model receives fixed common tools `list_calendar_events`,
+`create_calendar_event`, `update_calendar_event`, `delete_calendar_event`, and
+`list_calendar_event_versions`. They call the same typed operations as the API. Tools state times
+as ISO 8601 text instead of epoch milliseconds, so models never convert instants themselves:
+
+- A tool **timed** timing is `{ "kind": "timed", "start": "2026-10-20T09:00",
+"end": "2026-10-20T10:00", "timeZone": "Europe/Berlin" }`. `start` and `end` are local
+  wall-clock date-times in `timeZone`, written `YYYY-MM-DDTHH:mm`, with optional `:ss` and
+  `.sss`. An optional trailing offset (`+02:00`, `-05:00`, or `Z`) must equal `timeZone`'s
+  offset at that wall-clock time, or the call is invalid. The offset selects between the two
+  instants of a repeated hour. Without an offset, the daemon applies the expansion rule: a
+  skipped time moves forward, and a repeated time uses the earlier instant. **All-day** timing
+  is the API form, with `endDate` exclusive. Recurrence rules are the API form.
+- Tool output writes every timed value as a local date-time with its offset, such as
+  `2026-10-20T09:00:00+02:00`, so any tool output can be passed back as tool input. An event's
+  and a revision's timing is written in the event's own `timeZone`.
+
+The tools are:
+
+- `list_calendar_events` accepts `surfaceId`, `from`, `to`, and `timeZone`. `from` and `to` are
+  local dates (`YYYY-MM-DD`, meaning midnight) or local date-times in `timeZone`, with `from`
+  before `to` and at most 100 days apart. It returns `timeZone`, the occurrences overlapping the
+  range, the active events they belong to (with versions for guarded edits), and `truncated`.
+  Occurrence times are written in the requested `timeZone`, the zone the person thinks in. Each
+  occurrence names its `eventId` and `index`. At most 200 occurrences are returned, in the range
+  read's order. When more exist, `truncated` is `true` and the description tells the model to
+  narrow the range. It is the same daemon expansion as the range read.
+- `create_calendar_event` accepts `surfaceId`, optional `title` (default `""`, which may be
+  blank), optional `notes` and `location`, `timing`, optional `recurrence`, and a required
+  explicit `authorUserId`, with the exact semantics, validation, and replay of `create_todo`'s
+  `authorUserId`.
+- `update_calendar_event` accepts `surfaceId`, `eventId`, the `version` it read, and any of
+  `title`, `notes` (string or `null`), `location` (string or `null`), `timing`, `recurrence`
+  (rule or `null`), and `status` (`active` or `deleted`). Its description tells models that
+  edits change the whole series, and that restoring means reading a revision with
+  `list_calendar_event_versions` and passing its fields here with the current version.
+  `status: "active"` undeletes.
+- `delete_calendar_event` accepts `surfaceId`, `eventId`, and `version`, and tombstones the whole
+  series while keeping every revision.
+- `list_calendar_event_versions` accepts `surfaceId`, `eventId`, optional `afterVersion`, and
+  optional `limit` from 1 through 20, default 10. It returns full revisions oldest first, with
+  their actors and with timing in the tool form, and `nextAfterVersion`. Like todos, there is no
+  separate single-revision tool. Each page entry is the complete snapshot.
+
+Mutation tools supply the version they read and receive an explicit conflict on a stale version.
+Read tools require no review. Mutation tools are durable and transactional, own ordinary
+shared-data Auto review, and run within the current permission boundary without filesystem
+elevation. Durable replay of a creation reuses its call-stable event ID. Every replay returns
+the committed result without appending another revision or event. Reading or modifying events
+never joins anyone to the Surface.
+
+Active admin bots additionally receive `create_calendar_surface`, accepting `name`, required
+explicit `creatorUserId`, and optional absolute `imagePath`. Its authority, attribution, creator
+join rules, image handling, durable replay, and permission boundaries match
+`create_todo_surface`.
+
 ### Reference Surfaces
 
 An `artifact`, `bot`, or `task` Surface points to exactly one existing entity. It does not clone
@@ -7014,7 +7362,8 @@ The reference never joins anyone to the target's own task list or changes its ex
 
 ### Shared Surface chats
 
-The chat-enabled types are `todo`, `document`, `artifact`, `bot`, and `task`. Each may own exactly
+The chat-enabled types are `todo`, `document`, `calendar`, `artifact`, `bot`, and
+`task`. Each may own exactly
 one shared persistent conversation, created lazily when a person explicitly opens its chat.
 Unsupported types have no chat: their ensure operation returns `409 conflict` and leaves
 `chatAgentId` null. A reference Surface's contextual chat is separate from the target
@@ -7081,7 +7430,8 @@ archive, reorder, and child creation; and attaching another root agent all retur
 Surface membership changes never stop the chat, delete its folder, or discard history, even
 when nobody remains joined. Since Surfaces have no deletion route, their chats and folders
 remain for the Surface's lifetime. The agent's context names its Surface ID, type, and stored
-label, and tells it to use ordinary Surface tools, plus document tools for document content.
+label, and tells it to use ordinary Surface tools, plus document tools for document content and
+calendar tools for calendar events. A calendar chat's context calls its Surface a calendar.
 It receives no admin role, no new subtask-creation eligibility, and no implicit join, creation,
 or target permissions. Ensuring or using the chat never joins anyone to a Surface or task list.
 
@@ -9363,6 +9713,8 @@ Response — `200`:
 - `surfaces` — exactly the catalog with nested members from `GET /v0/surfaces`. Additive and
   absent on daemons without Surface support. Follow shared `surface.updated` from the bootstrap cursor.
   Todo data and revision history are loaded on demand through the Todo Surface endpoints.
+  Calendar events, occurrences, and revision history are likewise loaded on demand through the
+  Calendar Surface endpoints.
 - `archivedAgents` — the archived agents that would otherwise belong to the included projects'
   and workspaces' `agents` series, as full agent objects, newest `archivedAt` first with the
   agent ID as the tie-breaker. Each carries the `workspaceId` of its owner, which is the

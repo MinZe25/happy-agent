@@ -25,6 +25,15 @@ restoring command. Todo access never joins the caller.
 Follow shared `todo.created` and `todo.updated` from the list cursor, refetching on a version gap.
 The client exposes these events without adding an automatic Todo store to `HappyReducer`.
 
+Calendar Surfaces are served at `/v0/surfaces/calendar/:surfaceId` when health reports
+`capabilities.calendarSurfaces`. `listCalendarEvents(surfaceId, { from, to, timeZone })` reads at
+most 100 days of daemon-expanded occurrences with the events they belong to; never expand
+recurrence in the client. `createCalendarEvent()`, `updateCalendarEvent()`, and
+`deleteCalendarEvent()` change whole series, and mutations of existing events take `ifMatch`.
+`listCalendarEventVersions()` and `getCalendarEventVersion()` expose permanent full snapshots;
+restore one by sending its fields through ordinary update. After `calendar_event.created` or
+`calendar_event.updated` for a shown calendar, read the visible range again.
+
 `HappyAgentClient` is built from an endpoint and a bearer token. The token may be a function called
 for every request, so refreshed credentials apply without a new client; it may be omitted only to
 call `getAuthentication()` before signing in.

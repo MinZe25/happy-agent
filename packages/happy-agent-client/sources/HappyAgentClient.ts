@@ -79,6 +79,13 @@ import type {
 import type {
     CreateSurfaceRequest,
     CreateTodoRequest,
+    CalendarEventMutationRequest,
+    CalendarEventResponse,
+    CalendarEventVersionListResponse,
+    CalendarEventVersionResponse,
+    CalendarRangeResponse,
+    CreateCalendarEventRequest,
+    UpdateCalendarEventRequest,
     EnsureSurfaceChatRequest,
     ReorderSurfaceRequest,
     ReorderTodoRequest,
@@ -1705,6 +1712,108 @@ export class HappyAgentClient {
         return await this.#json({
             method: "GET",
             path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}/${encodeURIComponent(todoId)}/versions/${encodeURIComponent(version)}`,
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * Every occurrence overlapping `[from, to)` with the events it belongs to, expanded by the
+     * daemon. `timeZone` places all-day dates against the instant range.
+     */
+    async listCalendarEvents(
+        surfaceId: SurfaceId,
+        range: { readonly from: number; readonly to: number; readonly timeZone: string },
+        options: RequestOptions = {},
+    ): Promise<CalendarRangeResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}`,
+            query: { from: range.from, to: range.to, timeZone: range.timeZone },
+            signal: options.signal,
+        });
+    }
+
+    /** A supplied ID safely resolves an uncertain creation outcome. */
+    async createCalendarEvent(
+        surfaceId: SurfaceId,
+        request: CreateCalendarEventRequest,
+        options: RequestOptions = {},
+    ): Promise<CalendarEventResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** Deleted tombstones remain readable by ID. */
+    async getCalendarEvent(
+        surfaceId: SurfaceId,
+        eventId: Cuid2,
+        options: RequestOptions = {},
+    ): Promise<CalendarEventResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}`,
+            signal: options.signal,
+        });
+    }
+
+    /** Changes the whole series; applying a revision's fields restores that state. */
+    async updateCalendarEvent(
+        surfaceId: SurfaceId,
+        eventId: Cuid2,
+        request: UpdateCalendarEventRequest,
+        options: VersionedRequestOptions,
+    ): Promise<CalendarEventResponse> {
+        return await this.#json({
+            method: "PATCH",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}`,
+            json: request,
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Deletion tombstones the whole series and keeps every immutable revision. */
+    async deleteCalendarEvent(
+        surfaceId: SurfaceId,
+        eventId: Cuid2,
+        options: VersionedRequestOptions & CalendarEventMutationRequest,
+    ): Promise<CalendarEventResponse> {
+        return await this.#json({
+            method: "DELETE",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}`,
+            json: bodyOf(options),
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Permanent revisions, oldest first; the cursor belongs to this event's version history. */
+    async listCalendarEventVersions(
+        surfaceId: SurfaceId,
+        eventId: Cuid2,
+        options: RequestOptions & { readonly afterVersion?: string; readonly limit?: number } = {},
+    ): Promise<CalendarEventVersionListResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}/versions`,
+            query: { afterVersion: options.afterVersion, limit: options.limit },
+            signal: options.signal,
+        });
+    }
+
+    async getCalendarEventVersion(
+        surfaceId: SurfaceId,
+        eventId: Cuid2,
+        version: string,
+        options: RequestOptions = {},
+    ): Promise<CalendarEventVersionResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}/versions/${encodeURIComponent(version)}`,
             signal: options.signal,
         });
     }
