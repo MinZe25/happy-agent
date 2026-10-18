@@ -6,6 +6,7 @@ import {
     type IncomingHttpHeaders,
     type IncomingMessage,
     type OutgoingHttpHeaders,
+    type Server,
     type ServerResponse,
 } from "node:http";
 import type { Socket } from "node:net";
@@ -13,6 +14,10 @@ import { pipeline, type Duplex } from "node:stream";
 
 /** How long opening one connection may take. Nothing bounds a connection once it is open. */
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+/** How long one request's headers may take to arrive. Its body and its response are unbounded. */
+const DEFAULT_HEADERS_TIMEOUT_MS = 60_000;
+/** How often the listeners look for requests whose headers are overdue. */
+const HEADERS_CHECK_INTERVAL_MS = 30_000;
 /** How long a route waits for the attachment it was made for before it is forgotten. */
 const ROUTE_TTL_MS = 60_000;
 /** Carries a route from the Bun front door to this listener; never forwarded upstream. */
@@ -43,6 +48,8 @@ export interface WorkspaceProxyTcpHop {
 export interface WorkspaceProxyOptions {
     /** Overrides the 30-second bound on opening one connection. */
     readonly connectTimeoutMs?: number;
+    /** Overrides the 60-second bound on receiving one request's headers. */
+    readonly headersTimeoutMs?: number;
 }
 
 /**
@@ -58,12 +65,12 @@ export interface WorkspaceProxyOptions {
  */
 export class WorkspaceProxy {
     /** Attachments handed over directly, and the private Unix socket. Both are owner-only. */
-    readonly #server = createServer({ requestTimeout: 0 });
+    readonly #server: Server;
     /**
      * Loopback TCP, which any local process can reach, so each connection is admitted by a
      * memory-only credential. Every front door shares this one hop.
      */
-    readonly #tcpServer = createServer({ requestTimeout: 0 });
+    readonly #tcpServer: Server;
     readonly #connectTimeoutMs: number;
     readonly #sockets = new Set<Duplex>();
     #socketPath: string | undefined;
@@ -78,11 +85,21 @@ export class WorkspaceProxy {
 
     constructor(options: WorkspaceProxyOptions = {}) {
         this.#connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+        // Node bounds headers by the request timeout unless told otherwise, and a request here
+        // is never bounded, so a client that never finishes its headers would hold on forever.
+        const headersTimeout = options.headersTimeoutMs ?? DEFAULT_HEADERS_TIMEOUT_MS;
+        const bounds = {
+            requestTimeout: 0,
+            headersTimeout,
+            connectionsCheckingInterval: Math.min(HEADERS_CHECK_INTERVAL_MS, headersTimeout),
+        };
+        this.#server = createServer(bounds);
+        this.#tcpServer = createServer(bounds);
         this.#serve(this.#server, false);
         this.#serve(this.#tcpServer, true);
     }
 
-    #serve(server: ReturnType<typeof createServer>, admitted: boolean): void {
+    #serve(server: Server, admitted: boolean): void {
         server.on("request", (request, response) => {
             if (admitted && !this.#admit(request)) {
                 sendProxyError(response, 407, "Proxy authentication is required.");
@@ -103,8 +120,9 @@ export class WorkspaceProxy {
                 this.#sockets.delete(socket);
             });
         });
-        server.on("clientError", (_error, socket) => {
-            refuse(socket, 400, "Bad Request");
+        server.on("clientError", (error: NodeJS.ErrnoException, socket) => {
+            if (error.code === "ERR_HTTP_REQUEST_TIMEOUT") refuse(socket, 408, "Request Timeout");
+            else refuse(socket, 400, "Bad Request");
         });
     }
 
@@ -463,7 +481,7 @@ function endToEndHeaders(headers: IncomingHttpHeaders): OutgoingHttpHeaders {
     return forwarded;
 }
 
-async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
+async function closeServer(server: Server): Promise<void> {
     if (!server.listening) return;
     await new Promise<void>((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)));

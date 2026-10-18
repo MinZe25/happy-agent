@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
 import {
     createServer,
     request,
@@ -13,6 +14,8 @@ import {
     type Server,
     type Socket,
 } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Duplex } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -260,6 +263,56 @@ describe("workspace proxy transparency", () => {
         expect(Date.now() - started).toBeGreaterThan(bound * 5);
         for (let index = 0; index < 15; index += 1) expect(streamed).toContain(`data: ${index}`);
         expect(await uploadText).toContain(`received ${String(15 * 1024)}`);
+    });
+
+    it("bounds how long headers take on both listeners, but never a body", async () => {
+        const bound = 300;
+        const target = createServer((incoming: IncomingMessage, response: ServerResponse) => {
+            let uploaded = 0;
+            incoming.on("data", (chunk: Buffer) => (uploaded += chunk.byteLength));
+            incoming.once("end", () => response.end(`received ${String(uploaded)}`));
+        });
+        const port = await listening(target);
+        const proxy = new WorkspaceProxy({ headersTimeoutMs: bound });
+        cleanups.push(async () => await proxy.close());
+        const directory = await mkdtemp(join(tmpdir(), "happy-proxy-"));
+        cleanups.push(async () => await rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "p.sock");
+        await proxy.listen(socketPath);
+        const hop = await proxy.listenTcp();
+
+        for (const [listener, admission] of [
+            [{ path: socketPath }, ""],
+            [
+                { host: "127.0.0.1", port: hop.port },
+                `Proxy-Authorization: ${hop.authorization}\r\n`,
+            ],
+        ] as const) {
+            const stalled = connect(listener);
+            cleanups.push(() => void stalled.destroy());
+            await once(stalled, "connect");
+            const refused = readAll(stalled);
+            const started = Date.now();
+            stalled.write(`GET http://127.0.0.1:${String(port)}/ HTTP/1.1\r\nHost: 127.0.0.1\r\n`);
+            expect(await refused).toMatch(/^HTTP\/1\.1 408 /u);
+            expect(Date.now() - started).toBeGreaterThanOrEqual(bound);
+
+            const upload = connect(listener);
+            cleanups.push(() => void upload.destroy());
+            await once(upload, "connect");
+            const received = readAll(upload);
+            upload.write(
+                `POST http://127.0.0.1:${String(port)}/ HTTP/1.1\r\nHost: 127.0.0.1\r\n${admission}` +
+                    `${WORKSPACE_PROXY_ROUTE_HEADER}: ${proxy.route(to(port))}\r\n` +
+                    "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            );
+            for (let index = 0; index < 8; index += 1) {
+                upload.write("400\r\n" + "u".repeat(1024) + "\r\n");
+                await sleep(bound / 2);
+            }
+            upload.write("0\r\n\r\n");
+            expect(await received).toContain(`received ${String(8 * 1024)}`);
+        }
     });
 
     it("answers 504 only while a connection is still being opened", async () => {

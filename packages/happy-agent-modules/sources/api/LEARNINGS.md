@@ -274,8 +274,13 @@ and opens through `ComputeModule.network`, the agent's exact cached machine; nev
 
 The proxy is a plain forwarder. Only opening a connection is bounded (30 seconds, `504`); the
 listeners disable Node's request timeout and nothing caps a body, so server-sent events and slow
-uploads stream for as long as both sides keep them open. Abandoning a request destroys its
-upstream. Hop-by-hop headers, `Proxy-Authorization`, and the route header are dropped; the
+uploads stream for as long as both sides keep them open. Disabling the request timeout also set
+Node's header timeout to zero, which let a client that never finished its headers hold a socket
+open forever, so both listeners set an explicit 60-second header bound, answered `408`. Node
+enforces it only on a server that listens, so the private Unix socket and the TCP hop are bounded.
+Attachments the Node front door hands over directly are not, because that front door has already
+authenticated them. Bun's HTTP server also drops a stalled header on its own after about 12 seconds.
+Abandoning a request destroys its upstream. Hop-by-hop headers, `Proxy-Authorization`, and the route header are dropped; the
 client's own `Authorization` and `Cookie` pass through and nothing is added. Tunnels forward
 end of stream as a half-close and a reset or early close as a close. IPv6 literals reach the
 connector without brackets.
