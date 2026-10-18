@@ -72,7 +72,10 @@ output completely, makes the input side fail on a reset connection, and expects
 the caller's abort to end the helper at once rather than leave its failure report
 waiting for room. `a_connection_started_inside_a_sandbox_keeps_that_sandbox` runs the mode
 inside a restricted command: without egress it cannot reach the caller's
-loopback, and with egress the same invocation can.
+loopback, and with egress the same invocation can. A helper that fails to exit
+in time is described before it is killed: on macOS with a `sample` of every
+thread's stack and its `lsof` and `netstat` state, on Linux with each thread's
+current system call and kernel wait.
 
 `127.0.0.1` appears in those allowed-host lists deliberately. It is the one case
 where an address inside the machine may be reached, because the policy named that

@@ -125,6 +125,7 @@ impl Helper {
                 return status;
             }
             if Instant::now() > deadline {
+                describe_stuck_helper(self.child.id());
                 let _ = self.child.kill();
                 panic!("the helper was still running after {within:?}");
             }
@@ -153,6 +154,69 @@ impl Drop for Helper {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Prints where each thread of a helper that should have exited is waiting, and what its sockets
+/// hold, so a failure on a kernel only CI runs explains itself.
+#[cfg(target_os = "macos")]
+fn describe_stuck_helper(pid: u32) {
+    let pid = pid.to_string();
+    let report = std::env::temp_dir().join(format!("happy-agent-connect-{pid}.sample.txt"));
+    match Command::new("/usr/bin/sample")
+        .args([pid.as_str(), "1", "-mayDie", "-file"])
+        .arg(&report)
+        .output()
+    {
+        Ok(output) => eprintln!(
+            "sample: {}\n{}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(error) => eprintln!("sample could not run: {error}"),
+    }
+    match std::fs::read_to_string(&report) {
+        Ok(stacks) => eprintln!("{stacks}"),
+        Err(error) => eprintln!("no sample report: {error}"),
+    }
+    let _ = std::fs::remove_file(&report);
+    print_command("/usr/sbin/lsof", &["-nP", "-p", &pid]);
+    print_command("/usr/sbin/netstat", &["-anv", "-p", "tcp"]);
+}
+
+/// Prints the system call and kernel wait of each thread of a helper that should have exited.
+#[cfg(target_os = "linux")]
+fn describe_stuck_helper(pid: u32) {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return;
+    };
+    for task in tasks.flatten() {
+        let read = |name: &str| {
+            std::fs::read_to_string(task.path().join(name))
+                .map(|text| text.trim().to_owned())
+                .unwrap_or_else(|error| format!("({error})"))
+        };
+        eprintln!(
+            "thread {:?}: wchan {}, syscall {}",
+            task.file_name(),
+            read("wchan"),
+            read("syscall")
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn print_command(program: &str, arguments: &[&str]) {
+    match Command::new(program).args(arguments).output() {
+        Ok(output) => eprintln!(
+            "{program} {}: {}\n{}{}",
+            arguments.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(error) => eprintln!("{program} could not run: {error}"),
     }
 }
 
