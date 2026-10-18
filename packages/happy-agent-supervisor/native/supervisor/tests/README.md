@@ -61,6 +61,19 @@ is created, in the way Codex clears and relocates the single descriptor it means
 to pass on. Both lists are printed, and `--nocapture` shows the test process's
 own on a passing run too.
 
+`connect.rs` drives `--connect` against real loopback listeners. It moves
+multi-megabyte binary bodies through both half-close orders, checks that the end
+of standard input aborts a connection whose remote ignores the half-close, one
+whose remote stops reading, and one still waiting in `connect` behind a
+saturated accept queue, and refuses frames before readiness, after the caller's
+half-close, or larger than the bound.
+`a_failure_reported_into_a_full_output_still_obeys_the_abort` fills standard
+output completely, makes the input side fail on a reset connection, and expects
+the caller's abort to end the helper at once rather than leave its failure report
+waiting for room. `a_connection_started_inside_a_sandbox_keeps_that_sandbox` runs the mode
+inside a restricted command: without egress it cannot reach the caller's
+loopback, and with egress the same invocation can.
+
 `127.0.0.1` appears in those allowed-host lists deliberately. It is the one case
 where an address inside the machine may be reached, because the policy named that
 literal itself, and it is what lets an origin on loopback stand in for a real

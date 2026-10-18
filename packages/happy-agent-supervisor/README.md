@@ -149,6 +149,47 @@ step that would not apply — exits `125` with a message on stderr, which keeps 
 distinguishable from the workload's own status. Otherwise the workload's exit
 status is reproduced as its own.
 
+## TCP connections from the caller's network
+
+```sh
+happy-agent-supervisor --connect <host> <port>
+```
+
+This mode is not a sandbox. It applies no policy, creates no namespace, and
+changes no privilege: it is an ordinary unprivileged TCP client that keeps every
+namespace, Seatbelt profile, and seccomp filter its caller already had. Started
+by a restricted command, it has exactly that command's network. It exists so a
+product can open a connection from inside a container with `docker exec`, using
+the binary already mounted there, without assuming the image carries any network
+tool. `--connect` stands alone; combining it with a policy or a command exits
+`125`.
+
+The host is resolved by the system resolver in the caller's own namespace —
+inside a container, that container's `/etc/hosts`, DNS servers, and network
+aliases — and is otherwise used exactly as given. IPv6 literals are written
+without brackets. Each resolved address is tried in order.
+
+Standard input and output carry frames: one type byte, a 32-bit big-endian
+payload length, and at most 64 KiB of payload.
+
+| Frame | Direction        | Meaning                                                                 |
+| ----- | ---------------- | ----------------------------------------------------------------------- |
+| `R`   | helper to caller | Connected. Payload `happy-agent-connect/1`. Always the first frame.     |
+| `D`   | both             | Bytes on the connection; never empty.                                   |
+| `F`   | both             | Half-close: the sender sends nothing more. Empty payload.               |
+| `X`   | helper to caller | Failed. Payload is a Node-style code, a space, and a message; exit `1`. |
+
+Nothing is written before the connection is established, and the caller must
+not send a frame before `R`. A remote half-close becomes `F` while the caller
+may keep sending; a caller `F` shuts down the socket's write side while replies
+keep arriving. The helper exits `0` once both directions have finished.
+
+The end of standard input is an abort, not a half-close. Input is watched before
+the name is resolved, so ending the transport stops the helper at once — while
+it is still resolving or connecting, or after a remote end that ignores the
+half-close — and closes the connection. A malformed frame, a frame before `R`,
+or data after the caller's `F` exits `125`.
+
 ## Policy
 
 The policy names match `ComputePermissions`:

@@ -1,4 +1,5 @@
 mod cli;
+mod connect;
 mod exec;
 mod hardening;
 mod platform;
@@ -14,9 +15,12 @@ pub(crate) fn invalid_input(message: impl Into<String>) -> std::io::Error {
 }
 
 pub fn run() {
-    let result = cli::Invocation::parse().and_then(|invocation| {
-        invocation.policy.validate()?;
-        platform::run(invocation.policy, invocation.command)
+    let result = cli::Mode::parse().and_then(|mode| match mode {
+        cli::Mode::Supervise(invocation) => {
+            invocation.policy.validate()?;
+            platform::run(invocation.policy, invocation.command)
+        }
+        cli::Mode::Connect(target) => connect::run(target),
     });
     if let Err(error) = result {
         eprintln!("happy-agent-supervisor: {error}");

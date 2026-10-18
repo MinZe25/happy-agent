@@ -1,3 +1,4 @@
+use crate::connect::ConnectTarget;
 use crate::policy::SupervisorPolicy;
 use crate::{SupervisorResult, invalid_input};
 use std::ffi::OsString;
@@ -7,6 +8,42 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
 const MAX_POLICY_BYTES: u64 = 1024 * 1024;
+
+/// What one run of the binary was asked to do.
+pub(crate) enum Mode {
+    /// Establish the sandbox described by a policy and execute a command inside it.
+    Supervise(Box<Invocation>),
+    /// Relay one TCP connection from the caller's own network; see `connect.rs`.
+    Connect(ConnectTarget),
+}
+
+impl Mode {
+    pub(crate) fn parse() -> SupervisorResult<Self> {
+        let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
+        if arguments
+            .first()
+            .is_some_and(|argument| argument == "--connect")
+        {
+            return parse_connect(&arguments[1..]).map(Mode::Connect);
+        }
+        Invocation::parse(arguments).map(|invocation| Mode::Supervise(Box::new(invocation)))
+    }
+}
+
+/// `--connect <host> <port>` stands alone: it takes no policy and no command, so nothing about a
+/// sandbox can be mistaken for applying to it.
+fn parse_connect(arguments: &[OsString]) -> SupervisorResult<ConnectTarget> {
+    let [host, port] = arguments else {
+        return Err(invalid_input("--connect takes exactly a host and a port").into());
+    };
+    let host = host
+        .to_str()
+        .ok_or_else(|| invalid_input("--connect hosts must be valid UTF-8"))?;
+    let port = port
+        .to_str()
+        .ok_or_else(|| invalid_input("--connect ports must be valid UTF-8"))?;
+    ConnectTarget::parse(host, port).map_err(|message| invalid_input(message).into())
+}
 
 pub(crate) struct Invocation {
     pub(crate) policy: SupervisorPolicy,
@@ -19,9 +56,8 @@ enum PolicySource {
 }
 
 impl Invocation {
-    pub(crate) fn parse() -> SupervisorResult<Self> {
-        let mut arguments = std::env::args_os();
-        let _program = arguments.next();
+    fn parse(arguments: Vec<OsString>) -> SupervisorResult<Self> {
+        let mut arguments = arguments.into_iter();
         let mut policy_source = None;
         let mut command = Vec::new();
 
