@@ -4264,6 +4264,59 @@ This is what makes non-local compute transparent: a client previews a dev server
 whether the workspace runs on the host or in a container. For a host workspace the tunnel
 simply reaches the machine's own network.
 
+This route reaches the network of the machine the folder is on: this computer or the folder's
+runner. A workspace whose agents work in containers, because its `compute` is `"docker"` or its
+bot runs its agents in Docker, has no single network of its own; this route refuses its
+`CONNECT` with `501 unsupported` instead of reaching another machine. Use the agent's proxy below.
+
+Inside either proxy tunnel, the daemon behaves as a plain forwarding proxy:
+
+- Requests and responses stream in both directions, with backpressure, for as long as both sides
+  keep them open: server-sent events, long polls, and slow uploads and downloads are never cut
+  off by a total time limit. Only establishing a connection is bounded, at 30 seconds, answered
+  `504` when it passes.
+- Headers reach the destination as the client sent them, including its own `Authorization` and
+  `Cookie`. `Proxy-Authorization` and `Proxy-Connection` are removed, connection-management
+  headers belong to each hop, and the daemon adds no header that names it, such as `Via` or
+  `Forwarded`.
+- After a nested `CONNECT` is answered `200`, the stream carries only the bytes of each side.
+  Either side's end of stream half-closes the other direction, and a closed or reset connection
+  closes the other side.
+- Closing the outer tunnel, or abandoning a request on it, closes every connection opened for it.
+- A destination that cannot be reached is answered `502`. The daemon never retries a connection
+  from another network.
+
+### `CONNECT /v0/workspaces/:workspaceId/agents/:agentId/proxy`
+
+The same tunnel, opened in one agent's own network: the machine that agent's commands and file
+tools run on. For an agent working in a container, `localhost` is that container's loopback, so a
+dev server the agent started there is reachable exactly as the agent reaches it. For an agent on a
+runner it is the runner, and for an agent on this computer it is this computer.
+
+Every connection on the tunnel is opened from that agent's machine and nowhere else. The daemon
+never falls back to its own network, to the folder's machine, or to another agent's container. A
+connection that agent's machine cannot open is answered `502`.
+
+The `CONNECT` is refused, before the tunnel opens, with:
+
+- `404 not_found` — the workspace or agent is unknown, or the agent's `workspaceId` is not this
+  workspace.
+- `409 conflict` — the agent is archived, or the workspace is not available.
+- `409 not_initialized` — the workspace is still initializing.
+- `501 unsupported` — the agent's machine cannot open network connections.
+- `503 runner_unavailable` or `409 local_execution_disabled` — the agent's machine cannot be
+  started, as for its commands.
+- `503 draining` — as for every new proxy attachment.
+
+Opening the tunnel starts the agent's machine if it is not running yet, as the agent's first
+command would, but never starts an agent turn. The tunnel does not end when an agent turn ends.
+Archiving the agent closes every connection opened through its tunnels and answers later requests
+on them with `502`. A tunnel ends when the client closes it or the daemon stops.
+
+The route is additive and does not increment the protocol version. An older daemon closes such a
+`CONNECT` without a response. A client that needs an agent's network then offers no preview, and
+does not fall back to the workspace proxy.
+
 ### Local bridges
 
 A bridge connects something on the person's own computer — a USB device, a Bluetooth adapter, or a
