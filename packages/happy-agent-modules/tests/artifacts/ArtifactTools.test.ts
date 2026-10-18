@@ -1,5 +1,6 @@
 import type { AnyAgentTool } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
+import { Value } from "@sinclair/typebox/value";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -218,6 +219,46 @@ describe("the artifact tools", () => {
         // The call's own ID keys the version, so repeating it makes no other.
         await expect(call(w.ctx, update, args, { id: "updatecall" })).resolves.toEqual(updated);
         expect((await w.artifacts.get(w.ctx, artifact.id))?.latestVersion).toBe(2);
+    });
+
+    it("sets a background only when asked, keeps it across versions, and clears it with null", async () => {
+        const w = await world("artifact-tools-background");
+        const create = await w.tool(AGENT, "create_artifact");
+        const update = await w.tool(AGENT, "update_artifact");
+        expect(JSON.stringify(create.parameters)).toContain("Usually leave this out");
+        const invalid = { type: "html", title: "X", files: [{ content: "<p>x</p>" }] };
+        expect(Value.Check(create.parameters, { ...invalid, background: "white" })).toBe(false);
+        expect(Value.Check(create.parameters, { ...invalid, background: "#FFF" })).toBe(true);
+        expect(
+            Value.Check(update.parameters, { artifactId: "artifactinvoice", background: null }),
+        ).toBe(true);
+
+        const artifact = (await call(w.ctx, create, {
+            type: "html",
+            title: "Invoice",
+            files: [{ content: "<p>Invoice</p>" }],
+            background: "#FFFFFF",
+        })) as ArtifactRecord;
+        expect(artifact.background).toBe("#ffffff");
+        expect(textOf(create, artifact)).toContain("on a #ffffff background");
+
+        const retitled = (await call(
+            w.ctx,
+            update,
+            { artifactId: artifact.id, title: "Invoice 42" },
+            { id: "retitle" },
+        )) as ArtifactRecord;
+        expect(retitled.background).toBe("#ffffff");
+
+        const cleared = (await call(
+            w.ctx,
+            update,
+            { artifactId: artifact.id, background: null },
+            { id: "clear" },
+        )) as ArtifactRecord;
+        expect(cleared.latestVersion).toBe(3);
+        expect(cleared.background).toBeUndefined();
+        expect(textOf(update, cleared)).not.toContain("background");
     });
 
     it("reads an artifact's manifest and entry, then single files as text, image, or description", async () => {

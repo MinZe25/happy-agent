@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 import {
+    artifactBackgroundInputSchema,
     artifactPathSchema,
     artifactRecordSchema,
     artifactTitleSchema,
@@ -19,6 +20,22 @@ export const ARTIFACT_TOOL_CAPABILITY =
  */
 export const ARTIFACT_REFERENCE_INSTRUCTIONS =
     'When you mention an artifact in a reply, write its reference tag inline, such as <happy-artifact id="…"/> with the artifact\'s ID; add version="N" to point at one version. The artifact tools give you the exact tag. People see the artifact\'s current title as a link in its place, so do not repeat the title beside the tag or link the artifact yourself. A tag inside code stays literal.';
+
+/** How every writing tool describes `background`, which almost every artifact leaves out. */
+const ARTIFACT_BACKGROUND_DESCRIPTION =
+    'Usually leave this out: the artifact then sits on the viewer\'s own surface and follows light and dark. Set a hex colour such as "#ffffff" only when the content needs one fixed canvas, such as a print-like document or a chart drawn for one palette.';
+
+/** The colour behind a new artifact's content. */
+export const artifactToolBackgroundSchema = Type.String({
+    ...artifactBackgroundInputSchema,
+    description: ARTIFACT_BACKGROUND_DESCRIPTION,
+});
+
+/** The colour behind a new version's content, or `null` to go back to a transparent slot. */
+export const artifactToolBackgroundChangeSchema = Type.Union(
+    [Type.String({ ...artifactBackgroundInputSchema }), Type.Null()],
+    { description: `${ARTIFACT_BACKGROUND_DESCRIPTION} null removes it; leaving it out keeps it.` },
+);
 
 /** One file a call writes into an artifact. */
 export const artifactToolFileSchema = Type.Object(

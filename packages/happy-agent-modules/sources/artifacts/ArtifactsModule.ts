@@ -430,6 +430,7 @@ export class ArtifactsModule implements AgentModule {
                 }
             }
             const { files, entry } = await this.#placeFiles(txCtx, input.type, [], input.files);
+            const background = input.background?.toLowerCase();
             const now = Date.now();
             const artifact: ArtifactRecord = {
                 id: input.id ?? createId(),
@@ -440,6 +441,7 @@ export class ArtifactsModule implements AgentModule {
                 entry,
                 fileCount: files.length,
                 size: totalSize(files),
+                ...(background === undefined ? {} : { background }),
                 ...(input.source === undefined ? {} : { source: input.source }),
                 createdBy: input.author,
                 createdAt: now,
@@ -454,6 +456,7 @@ export class ArtifactsModule implements AgentModule {
                 title: input.title,
                 entry,
                 files,
+                ...(background === undefined ? {} : { background }),
                 createdBy: input.author,
                 ...(input.source === undefined ? {} : { source: input.source }),
                 createdAt: now,
@@ -473,8 +476,8 @@ export class ArtifactsModule implements AgentModule {
     /**
      * Make a new version from the latest one's files, or from none with `replaceAll`: `files`
      * adds or replaces paths and `remove` takes paths out, so unchanged files carry over without
-     * being sent again. An omitted title keeps the current title. A version already made under
-     * the same `operationId` is not made again.
+     * being sent again. An omitted title or background keeps the current one, and a `null`
+     * background clears it. A version already made under the same `operationId` is not made again.
      */
     async update(ctx: Context, input: UpdateArtifactInput): Promise<ArtifactRecord> {
         if (!Value.Check(updateArtifactInputSchema, input)) {
@@ -484,11 +487,12 @@ export class ArtifactsModule implements AgentModule {
         }
         if (
             input.title === undefined &&
+            input.background === undefined &&
             input.files === undefined &&
             input.remove === undefined &&
             input.replaceAll === undefined
         ) {
-            throw new ArtifactInputError("Change the title, the files, or both.");
+            throw new ArtifactInputError("Change the title, the background, or the files.");
         }
         return await ctx.inTx(async (txCtx) => {
             const current = await this.#required(txCtx, input.artifactId);
@@ -528,6 +532,10 @@ export class ArtifactsModule implements AgentModule {
             );
             const now = Math.max(Date.now(), current.updatedAt + 1);
             const title = input.title ?? current.title;
+            const background =
+                input.background === undefined
+                    ? current.background
+                    : (input.background?.toLowerCase() ?? undefined);
             const next: ArtifactRecord = {
                 ...current,
                 title,
@@ -541,12 +549,15 @@ export class ArtifactsModule implements AgentModule {
             };
             delete next.updatedSource;
             if (input.source !== undefined) next.updatedSource = input.source;
+            delete next.background;
+            if (background !== undefined) next.background = background;
             const version: ArtifactVersion = {
                 artifactId: current.id,
                 number: next.latestVersion,
                 title,
                 entry,
                 files,
+                ...(background === undefined ? {} : { background }),
                 createdBy: input.author,
                 ...(input.source === undefined ? {} : { source: input.source }),
                 createdAt: now,

@@ -374,6 +374,7 @@ const ARTIFACT_UPDATED_FIELDS = [
     "entry",
     "fileCount",
     "size",
+    "background",
     "updatedBy",
     "updatedSource",
     "updatedAt",
@@ -6433,6 +6434,7 @@ export class ApiModule implements AgentModule {
                             type: body.type,
                             title: body.title,
                             files,
+                            ...(body.background == null ? {} : { background: body.background }),
                             author: this.#artifactUser(ctx),
                             ...(source === undefined ? {} : { source }),
                         }),
@@ -6524,6 +6526,9 @@ export class ApiModule implements AgentModule {
                             artifactId,
                             expectedRevision: current.revision,
                             ...(body.title === undefined ? {} : { title: body.title }),
+                            ...(body.background === undefined
+                                ? {}
+                                : { background: body.background }),
                             ...(files === undefined ? {} : { files }),
                             ...(body.remove === undefined ? {} : { remove: body.remove }),
                             ...(body.replaceAll === undefined

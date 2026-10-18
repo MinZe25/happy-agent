@@ -37,6 +37,7 @@ interface ArtifactRow {
     readonly entry_json: string;
     readonly file_count: number | string;
     readonly size: number | string;
+    readonly background: string | null;
     readonly source_json: string | null;
     readonly created_by_json: string;
     readonly created_at: number | string;
@@ -54,6 +55,7 @@ interface VersionRow {
     readonly number: number | string;
     readonly title: string;
     readonly entry_path: string;
+    readonly background: string | null;
     readonly created_by_json: string;
     readonly source_json: string | null;
     readonly created_at: number | string;
@@ -273,7 +275,7 @@ export async function insertArtifact(
         await agentDatabaseRun(
             txCtx.db,
             sql`INSERT INTO ${sql.raw(ARTIFACTS_TABLE)} (
-                id, type, title, status, latest_version, entry_json, file_count, size,
+                id, type, title, status, latest_version, entry_json, file_count, size, background,
                 source_json, source_kind, source_id, source_agent_id,
                 created_by_json, created_by_kind, created_by_id, created_at,
                 updated_by_json, updated_source_json, updated_at,
@@ -281,7 +283,7 @@ export async function insertArtifact(
             ) VALUES (
                 ${artifact.id}, ${artifact.type}, ${artifact.title}, ${artifact.status},
                 ${artifact.latestVersion}, ${JSON.stringify(artifact.entry)},
-                ${artifact.fileCount}, ${artifact.size},
+                ${artifact.fileCount}, ${artifact.size}, ${artifact.background ?? null},
                 ${json(source)}, ${source?.kind ?? null},
                 ${source === undefined ? null : artifactSourceId(source)},
                 ${source?.agentId ?? null},
@@ -319,7 +321,8 @@ export async function insertArtifactVersion(
             expectedRevision,
             sql`title = ${artifact.title}, latest_version = ${artifact.latestVersion},
                 entry_json = ${JSON.stringify(artifact.entry)},
-                file_count = ${artifact.fileCount}, size = ${artifact.size}`,
+                file_count = ${artifact.fileCount}, size = ${artifact.size},
+                background = ${artifact.background ?? null}`,
         );
         await insertVersion(txCtx, version, operationId);
     });
@@ -407,10 +410,11 @@ async function insertVersion(
     await agentDatabaseRun(
         ctx.db,
         sql`INSERT INTO ${sql.raw(ARTIFACT_VERSIONS_TABLE)}
-            (artifact_id, number, title, entry_path, created_by_json, source_json, created_at,
-                operation_id)
+            (artifact_id, number, title, entry_path, background, created_by_json, source_json,
+                created_at, operation_id)
             VALUES (${version.artifactId}, ${version.number}, ${version.title},
-                ${version.entry.path}, ${JSON.stringify(version.createdBy)},
+                ${version.entry.path}, ${version.background ?? null},
+                ${JSON.stringify(version.createdBy)},
                 ${json(version.source)}, ${version.createdAt}, ${operationId ?? null})`,
     );
     for (const file of version.files) {
@@ -477,6 +481,7 @@ function artifactFromRow(row: ArtifactRow): ArtifactRecord {
         entry: JSON.parse(row.entry_json) as unknown,
         fileCount: Number(row.file_count),
         size: Number(row.size),
+        ...(row.background === null ? {} : { background: row.background }),
         ...(source === undefined ? {} : { source }),
         createdBy: JSON.parse(row.created_by_json) as unknown,
         createdAt: Number(row.created_at),
@@ -502,6 +507,7 @@ function versionFromRow(row: VersionRow, files: readonly ArtifactFile[]): Artifa
         title: row.title,
         entry,
         files: [...files],
+        ...(row.background === null ? {} : { background: row.background }),
         createdBy: JSON.parse(row.created_by_json) as unknown,
         ...(source === undefined ? {} : { source }),
         createdAt: Number(row.created_at),

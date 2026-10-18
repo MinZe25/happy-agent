@@ -90,3 +90,10 @@ paints nothing, so the surface around it shows through, and the writing tools te
 `html` and `body` transparent with `color-scheme: light dark` and to keep pages flat — no card
 inside a card, no coloured stripe down a card's left edge. Those two patterns read as generated
 filler; the full rules live in `docs/DESIGN.md`.
+
+Kirill also wanted a way to customize the slot, used sparingly. A version may name a
+`background`, a hex colour and nothing else, so no CSS reaches a client through it and native
+clients can parse it. It belongs to the version rather than the artifact because it describes the
+content: an older version keeps the canvas it was made for, and like unchanged files it carries
+over to the next version until a change clears it with `null`. The tools describe it as something
+to leave out unless the content needs one fixed canvas.

@@ -14,6 +14,7 @@ import { ARTIFACT_TYPE_RULES, formatBytes } from "../ArtifactTypes.js";
 import { decodeArtifactText } from "../impl/decodeArtifactText.js";
 import {
     formatArtifactAuthor,
+    formatArtifactBackground,
     formatArtifactFile,
     formatArtifactSource,
     formatFileCount,
@@ -105,7 +106,7 @@ function formatArtifactRead({
     lines.push(
         `Version ${String(version.number)} of ${String(artifact.latestVersion)}, made ${new Date(version.createdAt).toISOString()} by ${formatArtifactAuthor(version.createdBy)}${version.source === undefined ? "" : ` in ${formatArtifactSource(version.source)}`}: ${JSON.stringify(version.title)}.`,
         `Reference it in chat as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id })}${version.number === artifact.latestVersion ? "" : `, or this version as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id, version: version.number })}`}.`,
-        `${formatFileCount(version.files.length)}, opening ${JSON.stringify(version.entry.path)}:`,
+        `${formatFileCount(version.files.length)}, opening ${JSON.stringify(version.entry.path)}${formatArtifactBackground(version.background)}:`,
         ...version.files.map(formatArtifactFile),
     );
     if (entryText !== undefined) {

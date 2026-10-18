@@ -45,6 +45,14 @@ are kept in path order by Unicode code point. Paths are `/`-joined segments of 1
 none empty, `.`, or `..`, with no `\` or control characters, so no path can name anything outside
 the artifact; a version never holds a file at a path another of its files uses as a folder.
 
+## Backgrounds
+
+Clients show an artifact on a transparent slot, so the surface around it shows through. A version
+may name a `background` instead, a hex colour (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`) stored in
+lowercase and nothing else, for content that needs one fixed canvas. It is part of the version, so
+an older version keeps the canvas it was made for, and a new version keeps the latest one's unless
+the change names another or clears it. The catalog row mirrors the latest version's.
+
 ## Tools
 
 Every agent gets six tools. The author and source of a change are always the calling agent and
@@ -80,10 +88,11 @@ accepts before it is read.
 - `stageUpload(ctx, bytes)` and `stageText(ctx, text)` receive one file's bytes as an upload.
   `stageFiles(ctx, files)` turns `{ path, text }` and `{ path, uploadId }` descriptions into
   placements, staging each text. Each commits on its own, so call them outside a transaction.
-- `create(ctx, { id?, type, title, files, author, source? })` places uploads at paths and makes
-  the first version. Repeating `id` returns the existing artifact unchanged.
-- `update(ctx, { artifactId, expectedRevision?, operationId?, title?, files?, remove?, replaceAll?, author, source? })`
-  makes the next version from the latest one's files. Unchanged files carry over by digest. A
+- `create(ctx, { id?, type, title, files, background?, author, source? })` places uploads at
+  paths and makes the first version. Repeating `id` returns the existing artifact unchanged.
+- `update(ctx, { artifactId, expectedRevision?, operationId?, title?, background?, files?, remove?, replaceAll?, author, source? })`
+  makes the next version from the latest one's files and background; a `null` background clears
+  it. Unchanged files carry over by digest. A
   repeated `operationId` returns the artifact without making another version.
 - `delete(ctx, { artifactId, expectedRevision?, author, source? })` leaves a tombstone; repeating
   it changes nothing.
@@ -108,8 +117,8 @@ Content lives under the daemon's private `artifacts/` folder, which Config owns:
 project or workspace.
 
 Four tables hold the catalog: one row per artifact with its latest entry, file count, size,
-indexed source and creator, and revision; one row per version with its title, entry path, author,
-source, and the operation ID that made it; one row per version file keyed by path, indexed by
+indexed source and creator, and revision; one row per version with its title, entry path, background,
+author, source, and the operation ID that made it; one row per version file keyed by path, indexed by
 digest; and one row per upload, whose size, digest, and UTF-8 flag stay empty until its bytes
 arrive.
 

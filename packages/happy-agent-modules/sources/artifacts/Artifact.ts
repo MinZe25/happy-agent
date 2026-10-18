@@ -38,6 +38,17 @@ export const artifactMimeTypeSchema = Type.String({
     pattern: "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$",
 });
 export const artifactSha256Schema = Type.String({ pattern: "^[0-9a-f]{64}$" });
+/**
+ * The colour a client paints behind a version's content instead of a transparent slot: a
+ * lowercase hexadecimal `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`, and never other CSS.
+ */
+export const artifactBackgroundSchema = Type.String({
+    pattern: "^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$",
+});
+/** A background as someone names it: the same colours, in either case. */
+export const artifactBackgroundInputSchema = Type.String({
+    pattern: "^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+});
 
 /** One file of one version, stored once by the digest of its bytes. */
 export const artifactFileSchema = Type.Object(
@@ -140,6 +151,8 @@ export const artifactRecordSchema = Type.Object(
         entry: artifactFileSchema,
         fileCount: Type.Integer({ minimum: 1, maximum: MAX_ARTIFACT_FILES }),
         size: artifactCounterSchema,
+        /** The latest version's background; absent for a transparent slot. */
+        background: Type.Optional(artifactBackgroundSchema),
         source: Type.Optional(artifactSourceSchema),
         createdBy: artifactAuthorSchema,
         createdAt: artifactTimestampSchema,
@@ -165,6 +178,8 @@ export const artifactVersionSchema = Type.Object(
         title: artifactTitleSchema,
         entry: artifactFileSchema,
         files: Type.Array(artifactFileSchema, { minItems: 1, maxItems: MAX_ARTIFACT_FILES }),
+        /** The colour behind this version's content; absent for a transparent slot. */
+        background: Type.Optional(artifactBackgroundSchema),
         createdBy: artifactAuthorSchema,
         source: Type.Optional(artifactSourceSchema),
         createdAt: artifactTimestampSchema,
@@ -212,6 +227,8 @@ export const createArtifactInputSchema = Type.Object(
         title: artifactTitleSchema,
         /** Every file of the first version; each upload is used up by the creation. */
         files: Type.Array(artifactPlacementSchema, { minItems: 1, maxItems: MAX_ARTIFACT_FILES }),
+        /** The first version's background; absent for a transparent slot. */
+        background: Type.Optional(artifactBackgroundInputSchema),
         author: artifactAuthorSchema,
         source: Type.Optional(artifactSourceSchema),
     },
@@ -232,6 +249,8 @@ export const updateArtifactInputSchema = Type.Object(
         remove: Type.Optional(Type.Array(artifactPathSchema, { maxItems: MAX_ARTIFACT_FILES })),
         /** Start from no files instead of the latest version's. */
         replaceAll: Type.Optional(Type.Boolean()),
+        /** A colour sets the new version's background, `null` clears it, and absent keeps it. */
+        background: Type.Optional(Type.Union([artifactBackgroundInputSchema, Type.Null()])),
         author: artifactAuthorSchema,
         source: Type.Optional(artifactSourceSchema),
     },

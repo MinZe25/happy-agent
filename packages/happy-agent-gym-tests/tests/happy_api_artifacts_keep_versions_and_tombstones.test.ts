@@ -153,6 +153,7 @@ describe("artifact versions and tombstones over the API", () => {
                 entry: second.entry,
                 fileCount: 2,
                 size: second.size,
+                background: null,
                 updatedBy: second.updatedBy,
                 updatedSource: null,
                 updatedAt: second.updatedAt,

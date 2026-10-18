@@ -18,7 +18,8 @@ export const ARTIFACT_UPLOADS_TABLE = "happy_agent_module_artifact_uploads";
  * per artifact, and splits the source and creator into indexed columns for filtering beside their
  * full JSON. Every version's manifest is rows of its own, keyed by path, so serving one file is one
  * keyed lookup and whether stored content is still used is one indexed lookup by digest. An upload
- * without a digest is still receiving its bytes.
+ * without a digest is still receiving its bytes. A version's background, mirrored on the catalog
+ * row for its latest version, is `NULL` for a transparent slot.
  */
 export const artifactMigrations = [
     [
@@ -124,6 +125,19 @@ export const artifactMigrations = [
                 database,
                 sql`CREATE INDEX ${sql.raw(`${ARTIFACT_UPLOADS_TABLE}_sha256`)}
                     ON ${sql.raw(ARTIFACT_UPLOADS_TABLE)} (sha256)`,
+            );
+        },
+    ],
+    [
+        "002-artifact-background",
+        async (_ctx: Context, database: AgentDatabaseFacade<AgentDatabase>): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE ${sql.raw(ARTIFACTS_TABLE)} ADD COLUMN background TEXT`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE ${sql.raw(ARTIFACT_VERSIONS_TABLE)} ADD COLUMN background TEXT`,
             );
         },
     ],

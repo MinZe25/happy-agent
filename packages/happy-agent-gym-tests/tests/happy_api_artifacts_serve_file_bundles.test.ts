@@ -103,6 +103,7 @@ describe("artifact file bundles over the API", () => {
             entry,
             fileCount: 3,
             size: Buffer.byteLength(ENTRY) + Buffer.byteLength(STYLE) + CHART.byteLength,
+            background: null,
             source: null,
             createdBy: { kind: "user", userId: null },
             createdAt: expect.any(Number),

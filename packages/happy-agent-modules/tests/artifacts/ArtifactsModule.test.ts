@@ -346,6 +346,67 @@ describe("ArtifactsModule", () => {
         expect(w.events).toHaveLength(1);
     });
 
+    it("keeps a version's background with the version, carrying it over until a change clears it", async () => {
+        const w = await world("artifacts-background");
+        const created = (
+            await w.artifacts.create(w.ctx, {
+                type: "html",
+                title: "Printable invoice",
+                files: [await text(w, "index.html", "<p>Invoice</p>")],
+                background: "#FFFFFF",
+                author: WRITER,
+            })
+        ).artifact;
+        expect(created.background).toBe("#ffffff");
+
+        const restyled = await w.artifacts.update(w.ctx, {
+            artifactId: created.id,
+            background: "#Fdf6E3",
+            author: WRITER,
+        });
+        expect(restyled).toMatchObject({ latestVersion: 2, background: "#fdf6e3" });
+        expect((await w.artifacts.getVersion(w.ctx, created.id, 2)).files).toEqual(
+            (await w.artifacts.getVersion(w.ctx, created.id, 1)).files,
+        );
+
+        const retitled = await w.artifacts.update(w.ctx, {
+            artifactId: created.id,
+            title: "Invoice",
+            author: WRITER,
+        });
+        expect(retitled.background).toBe("#fdf6e3");
+
+        const cleared = await w.artifacts.update(w.ctx, {
+            artifactId: created.id,
+            background: null,
+            author: WRITER,
+        });
+        expect(cleared.latestVersion).toBe(4);
+        expect(cleared).not.toHaveProperty("background");
+        expect(await w.artifacts.get(w.ctx, created.id)).not.toHaveProperty("background");
+
+        const versions = (await w.artifacts.listVersions(w.ctx, created.id, {})).versions;
+        expect(versions.map((version) => [version.number, version.background])).toEqual([
+            [4, undefined],
+            [3, "#fdf6e3"],
+            [2, "#fdf6e3"],
+            [1, "#ffffff"],
+        ]);
+        for (const version of versions)
+            expect(Value.Check(artifactVersionSchema, version)).toBe(true);
+
+        for (const background of ["white", "#ffff0", "rgb(0 0 0)", "#fff;color:red", "var(--x)"]) {
+            await expect(
+                w.artifacts.update(w.ctx, {
+                    artifactId: created.id,
+                    background,
+                    author: WRITER,
+                }),
+            ).rejects.toBeInstanceOf(ArtifactInputError);
+        }
+        expect((await w.artifacts.get(w.ctx, created.id))?.latestVersion).toBe(4);
+    });
+
     it("makes one version per operation, and refuses a change from a stale revision", async () => {
         const w = await world("artifacts-update-retry");
         const created = await create(w, "markdown", [await text(w, "index.md", "One")]);

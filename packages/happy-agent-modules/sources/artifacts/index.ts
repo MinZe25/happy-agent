@@ -1,5 +1,7 @@
 export {
     artifactAuthorSchema,
+    artifactBackgroundInputSchema,
+    artifactBackgroundSchema,
     artifactCounterSchema,
     artifactFileInputSchema,
     artifactFileSchema,

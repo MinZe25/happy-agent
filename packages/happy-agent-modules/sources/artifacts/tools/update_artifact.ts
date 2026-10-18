@@ -11,6 +11,7 @@ import {
     MAX_ARTIFACT_FILES,
 } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
+import { formatArtifactBackground } from "../impl/formatArtifact.js";
 import {
     describeArtifactSources,
     shouldReviewArtifactSources,
@@ -20,6 +21,7 @@ import {
     ARTIFACT_FILES_GUIDANCE,
     ARTIFACT_PRESENTED_NOTICE,
     ARTIFACT_TOOL_CAPABILITY,
+    artifactToolBackgroundChangeSchema,
     artifactToolResultSchema,
     presentedArtifact,
     artifactToolFilesSchema,
@@ -32,6 +34,7 @@ const updateArtifactToolInputSchema = Type.Object(
         files: Type.Optional(artifactToolFilesSchema),
         remove: Type.Optional(Type.Array(artifactPathSchema, { maxItems: MAX_ARTIFACT_FILES })),
         replaceAll: Type.Optional(Type.Boolean()),
+        background: Type.Optional(artifactToolBackgroundChangeSchema),
     },
     { additionalProperties: false },
 );
@@ -55,7 +58,7 @@ export function updateArtifactTool(
         ],
         description: [
             "Make a new version of an artifact. Every earlier version is kept, and the change is recorded as made by you, where you are working.",
-            'The new version starts from the latest version\'s files. files adds a file at a new path or replaces the one already there — for example { "path": "images/chart.png", "fromPath": "/workspace/out/chart.png" } to place an image you generated, beside a new index.md that shows it — and remove takes paths out. Files you leave alone carry over unchanged. Pass replaceAll: true to start from no files instead. title renames it. The type cannot change, and a deleted artifact cannot change.',
+            'The new version starts from the latest version\'s files. files adds a file at a new path or replaces the one already there — for example { "path": "images/chart.png", "fromPath": "/workspace/out/chart.png" } to place an image you generated, beside a new index.md that shows it — and remove takes paths out. Files you leave alone carry over unchanged. Pass replaceAll: true to start from no files instead. title renames it, and background changes the colour behind it, which almost every artifact leaves unset. The type cannot change, and a deleted artifact cannot change.',
             ARTIFACT_FILES_GUIDANCE,
         ].join("\n\n"),
         parameters: updateArtifactToolInputSchema,
@@ -91,6 +94,7 @@ export function updateArtifactTool(
                 artifactId: input.artifactId,
                 operationId: call.id,
                 ...(input.title === undefined ? {} : { title: input.title }),
+                ...(input.background === undefined ? {} : { background: input.background }),
                 ...(files === undefined ? {} : { files }),
                 ...(input.remove === undefined ? {} : { remove: input.remove }),
                 ...(input.replaceAll === undefined ? {} : { replaceAll: input.replaceAll }),
@@ -103,7 +107,7 @@ export function updateArtifactTool(
             {
                 type: "text",
                 text: [
-                    `Artifact ${artifact.id} is now at version ${String(artifact.latestVersion)}: ${JSON.stringify(artifact.title)}, ${String(artifact.fileCount)} ${artifact.fileCount === 1 ? "file" : "files"}, opening ${JSON.stringify(artifact.entry.path)}.`,
+                    `Artifact ${artifact.id} is now at version ${String(artifact.latestVersion)}: ${JSON.stringify(artifact.title)}, ${String(artifact.fileCount)} ${artifact.fileCount === 1 ? "file" : "files"}, opening ${JSON.stringify(artifact.entry.path)}${formatArtifactBackground(artifact.background)}.`,
                     ARTIFACT_PRESENTED_NOTICE,
                     `Reference it in chat as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id })}, or as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id, version: artifact.latestVersion })} for this version only.`,
                 ].join(" "),

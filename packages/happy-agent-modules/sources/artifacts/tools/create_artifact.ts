@@ -7,7 +7,7 @@ import type { ComputeModule } from "../../compute/index.js";
 import { quoteVisibleExact } from "../../impl/quoteVisibleExact.js";
 import { artifactTitleSchema, artifactTypeSchema, MAX_ARTIFACT_FILES } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
-import { formatArtifactSource } from "../impl/formatArtifact.js";
+import { formatArtifactBackground, formatArtifactSource } from "../impl/formatArtifact.js";
 import {
     describeArtifactSources,
     shouldReviewArtifactSources,
@@ -17,6 +17,7 @@ import {
     ARTIFACT_FILES_GUIDANCE,
     ARTIFACT_PRESENTED_NOTICE,
     ARTIFACT_TOOL_CAPABILITY,
+    artifactToolBackgroundSchema,
     artifactToolResultSchema,
     presentedArtifact,
     artifactToolFileSchema,
@@ -27,6 +28,7 @@ const createArtifactToolInputSchema = Type.Object(
         type: artifactTypeSchema,
         title: artifactTitleSchema,
         files: Type.Array(artifactToolFileSchema, { minItems: 1, maxItems: MAX_ARTIFACT_FILES }),
+        background: Type.Optional(artifactToolBackgroundSchema),
     },
     { additionalProperties: false },
 );
@@ -85,6 +87,7 @@ export function createArtifactTool(
                 type: input.type,
                 title: input.title,
                 files,
+                ...(input.background === undefined ? {} : { background: input.background }),
                 author: actor.author,
                 source: actor.source,
             });
@@ -94,7 +97,7 @@ export function createArtifactTool(
             {
                 type: "text",
                 text: [
-                    `Artifact created: ${JSON.stringify(artifact.title)} — id ${artifact.id}, ${artifact.type}, version ${String(artifact.latestVersion)}, ${String(artifact.fileCount)} ${artifact.fileCount === 1 ? "file" : "files"}, opening ${JSON.stringify(artifact.entry.path)}.`,
+                    `Artifact created: ${JSON.stringify(artifact.title)} — id ${artifact.id}, ${artifact.type}, version ${String(artifact.latestVersion)}, ${String(artifact.fileCount)} ${artifact.fileCount === 1 ? "file" : "files"}, opening ${JSON.stringify(artifact.entry.path)}${formatArtifactBackground(artifact.background)}.`,
                     ...(artifact.source === undefined
                         ? []
                         : [`Made in ${formatArtifactSource(artifact.source)}.`]),

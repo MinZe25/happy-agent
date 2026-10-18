@@ -8,12 +8,17 @@ export function formatArtifactLine(artifact: ArtifactRecord): string {
         ARTIFACT_TYPE_RULES[artifact.type].label,
         JSON.stringify(artifact.title),
         `version ${String(artifact.latestVersion)}`,
-        `${formatFileCount(artifact.fileCount)} (${formatBytes(artifact.size)}) opening ${JSON.stringify(artifact.entry.path)}`,
+        `${formatFileCount(artifact.fileCount)} (${formatBytes(artifact.size)}) opening ${JSON.stringify(artifact.entry.path)}${formatArtifactBackground(artifact.background)}`,
         `${artifact.status === "deleted" ? "deleted" : "updated"} ${new Date(artifact.updatedAt).toISOString()} by ${formatArtifactAuthor(artifact.updatedBy)}`,
     ];
     if (artifact.source !== undefined)
         parts.push(`made in ${formatArtifactSource(artifact.source)}`);
     return `- ${parts.join(" · ")}`;
+}
+
+/** The background a model is told about, as a clause; nothing for a transparent slot. */
+export function formatArtifactBackground(background: string | undefined): string {
+    return background === undefined ? "" : ` on a ${background} background`;
 }
 
 export function formatArtifactAuthor(author: ArtifactAuthor): string {
