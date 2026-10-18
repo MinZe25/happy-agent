@@ -86,6 +86,13 @@ relay, and supervision code as the default exposure, which stays exactly as it w
 at most once, `default` is refused, and module shutdown closes every named exposure. Callers use
 only this method, never the internal exposure code.
 
-A named exposure's address carries its pre-shared key, so its log lines omit the address, and any
-Tailcat address in captured output or errors is replaced with `[address]`. The default exposure
-still logs its address exactly as before; changing that is a separate decision.
+## Tailcat addresses never reach a log
+
+An address carries its identity's WireGuard key and pre-shared key, so whoever reads it can reach
+the socket. The default exposure used to log `tailcat:open address=… port=… pid=…`; Steve asked
+for the address to be hidden everywhere. Every exposure, default and named, now logs only that it
+opened or reopened, with its port and pid, and any Tailcat address in Tailcat's own output or in a
+restart error is replaced with `[address]`. Outbound connections already report only "The remote
+Tailcat transport is unavailable.", and the runner's endpoint error no longer echoes what was
+typed. The `address` files and the admin status tool still show the address: they are where a
+person goes to read it.

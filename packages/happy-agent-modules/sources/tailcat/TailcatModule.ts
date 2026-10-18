@@ -92,8 +92,6 @@ export class TailcatModule implements AgentModule {
             target,
             paths,
             port,
-            // The address carries the pre-shared key, so a named exposure never logs it.
-            { redactAddress: true },
         );
         this.#named.set(name, opening);
         let exposure: TailcatExposure;

@@ -98,7 +98,8 @@ function tailcatEndpoint(endpoint: string): { address: string; port: number } {
     const match = /^tailcat:(tc[A-Za-z0-9_-]+)(?::(\d{1,5}))?$/u.exec(endpoint);
     const port = match?.[2] === undefined ? TAILCAT_DEFAULT_PORT : Number(match[2]);
     if (match === null || port < 1 || port > 65_535) {
-        throw new AgentDaemonError(`The endpoint ${endpoint} is not a Tailcat address.`, {
+        // Never echo the endpoint: a Tailcat address carries the socket's keys.
+        throw new AgentDaemonError("The endpoint is not a Tailcat address.", {
             hint: "Use tailcat:<address>:<port> with the address and port from the daemon's .happy/agent/tailcat files.",
         });
     }
