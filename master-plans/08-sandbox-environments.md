@@ -34,14 +34,13 @@ read-only. When it does not exist, it must remain absent before, during, and
 after every restricted command. Rig must never create an empty placeholder or
 any other synthetic file at a protected path in order to enforce the sandbox.
 
-Workspace services use a separate tool and a stricter native-supervisor boundary,
-without changing ordinary shell commands. Only selected read-only workspace
-inputs and required runtime files are exposed. Writable storage is private and
-disposable; ambient credentials and control sockets are absent. Network access
-is constrained, memory and process limits cover the whole tree, and teardown
-must be confirmed before workspace files can be removed. These restrictions
-remain mandatory in Full access. A platform that cannot enforce them refuses
-service startup rather than falling back to an ordinary shell.
+Remove the separate workspace service runtime and its start, stop, discovery,
+and I/O tools. Agents start servers through their ordinary command tools.
+The desktop browser uses a transparent proxy through the selected agent's own
+compute, including localhost and outside internet traffic. HTTP, HTTPS, and
+WebSockets all use that route, with no fallback to the desktop's network.
+Established uploads, downloads, and streams have no overall proxy timeout.
+Continue using Happy's native supervisor for restricted command execution.
 
 This plan is complete when:
 
