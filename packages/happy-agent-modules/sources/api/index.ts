@@ -29,6 +29,7 @@ export {
     socketRejectionBody,
 } from "./ApiModule.js";
 export { ApiArtifactData } from "./ApiArtifactData.js";
+export { withMobileTransport } from "./impl/apiMobileTransport.js";
 export { messageResource } from "./ApiMessageProjection.js";
 export { type MessageResourceOptions } from "./ApiToolPresentation.js";
 export {
@@ -43,4 +44,8 @@ export {
     workspaceResource,
 } from "./ApiResourceProjection.js";
 export * from "./ApiSchemas.js";
-export { WORKSPACE_PROXY_ROUTE_HEADER, WorkspaceProxy } from "./WorkspaceProxy.js";
+export {
+    WORKSPACE_PROXY_ROUTE_HEADER,
+    WorkspaceProxy,
+    type WorkspaceProxyTcpHop,
+} from "./WorkspaceProxy.js";

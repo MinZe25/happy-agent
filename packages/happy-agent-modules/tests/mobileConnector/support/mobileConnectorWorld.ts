@@ -40,13 +40,20 @@ export interface MobileConnectorWorldOptions {
     readonly team?: boolean;
     /** Restart over an earlier world's database and Happy home. */
     readonly after?: MobileConnectorWorld;
+    /** Leave the API's transport unattached, as before the daemon listens. */
+    readonly detached?: boolean;
 }
 
 /**
+ * Where the exposure forwards. The relay dials it only for a connection, and these tests reach
+ * the module directly instead, so nothing listens there.
+ */
+export const UNUSED_TRANSPORT = { host: "127.0.0.1", port: 9 } as const;
+
+/**
  * A real config, Durable Functions, Tailcat, and mobile connector over one in-memory database. The
- * only fake is the Tailcat executable, which publishes a fixed address and keeps running; the
- * module's loopback relay is real, so a phone dials `127.0.0.1:<port>` where it would dial
- * `server.tailcat:<port>`.
+ * only fake is the Tailcat executable, which publishes a fixed address and keeps running. The API
+ * is not here: phones reach the module through `moduleTransport`, and the gym covers HTTP.
  */
 export async function mobileConnectorWorld(
     options: MobileConnectorWorldOptions,
@@ -120,6 +127,7 @@ setInterval(() => undefined, 1_000);
     });
     await durable.start();
     await hooks.afterStart?.(database.context, {} as never);
+    if (options.detached !== true) mobile.attachTransport(database.context, UNUSED_TRANSPORT);
 
     let stopped = false;
     const stop = async () => {

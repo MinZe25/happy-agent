@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import type { PreparedHappyAgentRuntime } from "@slopus/happy-agent-modules";
 
 import { bindNodeAgentHttpServer, type BoundAgentHttpServer } from "./AgentSocket.js";
@@ -28,8 +27,8 @@ export async function bindBunAgentHttpServer(
         }
     };
     try {
-        const proxyToken = randomBytes(32).toString("base64url");
-        const proxyPort = await prepared.api.listenWorkspaceProxyTcp(proxyToken);
+        // One hop serves every front door, so a second listener beside this one shares it.
+        const proxy = await prepared.api.listenWorkspaceProxyTcp();
         nativeHttp = startBunHttpServer(
             bun,
             prepared,
@@ -39,8 +38,8 @@ export async function bindBunAgentHttpServer(
         bridge = startBunSocketBridge(bun, {
             publicAddress: { hostname: host, port },
             httpAddress: { hostname: "127.0.0.1", port: nativeHttp.port },
-            proxyHttpAddress: { hostname: "127.0.0.1", port: proxyPort },
-            proxyHttpAuthorization: `Bearer ${proxyToken}`,
+            proxyHttpAddress: { hostname: "127.0.0.1", port: proxy.port },
+            proxyHttpAuthorization: proxy.authorization,
             prepareWorkspaceProxy: (pathname, authorization) =>
                 prepared.api.prepareWorkspaceProxySocket(
                     prepared.context("bun-http-connect"),

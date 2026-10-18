@@ -194,6 +194,37 @@ the conflicting Tailcat override from the daemon-owned `runtime.toml`, and resta
 Normally the admin tool should own runtime changes; do not edit `runtime.toml` while the daemon is
 running.
 
+## Direct phone connections
+
+The mobile connector uses a second Tailcat exposure of its own so a phone can reach this daemon
+directly. It is separate from `[feature.tailcat]`: it has its own identity key,
+`~/.happy/agent/tailcat/mobile.private.json`, its own fixed port, and it is open only while it is
+needed, whether or not the main exposure is enabled.
+
+```toml
+[feature.mobile_connector]
+enabled = true
+port = 24781
+```
+
+Both settings are machine configuration only, and these are the defaults. With the connector
+enabled, starting a pairing from the desktop opens the socket and shows a `happy://direct?…` QR
+code. The phone scans it, runs a key exchange over the socket, and both screens show the same four
+emoji. The phone is paired only after the person at the desktop and the person on the phone both
+confirm that the emoji match. The socket stays open while a pairing is in progress, for three
+seconds after it ends, and while any phone is paired; a restart reopens it for paired phones.
+
+Behind the socket is the ordinary Happy Agent API, including event streams, terminals, bridges, and
+workspace tunnels. It accepts only phone credentials: a paired phone's own token, or the one-time
+credentials of a pairing in progress. The local token, WorkOS or JWT access tokens, runner tokens,
+and bridge tokens all receive `401` there, and the main API accepts no phone credential. A phone
+acts as the person who paired it, but it cannot drain, stop, or debug the daemon, or pair and
+remove phones; those return `403`. Removing a phone from the desktop closes everything it has open
+at once.
+
+The QR code holds a one-time secret and the socket's secret address; Happy Agent never logs either.
+See the Mobile connector section of `API.md` for the complete protocol.
+
 ## Troubleshooting
 
 - If the status is `starting`, the local API transport may not have finished binding yet. Check it
@@ -208,6 +239,8 @@ running.
   resolution such as curl's `--socks5-hostname` option.
 - A Tailcat connection followed by `401 Unauthorized` means the transport works but the Happy
   Agent credential is absent, expired, or invalid for that deployment.
+- The daemon log records that an exposure opened, with its port and process, but never its
+  address. Read the address from the `address` file or an admin bot's status.
 - Tailcat requires outbound internet access from both machines. Check local firewalls and the
   daemon log when the connection cannot be established.
 

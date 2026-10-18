@@ -15,10 +15,10 @@ import {
 const filled = (value: number) => Buffer.alloc(32, value);
 
 /**
- * The test phone is a second implementation of API_MOBILE.md. Pinning it to the specification's
+ * The test phone is a second implementation of the API.md mobile connector. Pinning it to the specification's
  * table and vectors is what makes its agreement with the daemon a real cross-check.
  */
-describe("the test phone follows API_MOBILE.md", () => {
+describe("the test phone follows the API.md mobile connector", () => {
     it("reads the exact Telegram table from the specification", () => {
         const table = specEmojiTable();
         expect(table).toHaveLength(333);

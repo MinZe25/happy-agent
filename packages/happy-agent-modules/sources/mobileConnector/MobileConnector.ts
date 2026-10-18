@@ -1,6 +1,5 @@
 import { cuid2Schema } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
-import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Context } from "@steve.kite/stdlib";
 
 /** Whose pairing and devices: a team user's installation-local ID, or the standalone person. */
@@ -107,19 +106,38 @@ export type MobileConnectorListener = (
     event: MobileConnectorEvent,
 ) => void | Promise<void>;
 
-/** A request a paired device made with its token. The device acts with its owner's authority. */
-export interface MobileDeviceRequest {
-    readonly deviceId: string;
-    readonly owner: MobileOwner;
+/**
+ * What a bearer credential on the connector's socket proved. A device acts as its owner until
+ * `revoked` aborts; a pairing token may only start a handshake, and a handshake credential may
+ * only drive its own handshake.
+ */
+export type MobileCredential =
+    | {
+          readonly kind: "device";
+          readonly deviceId: string;
+          readonly owner: MobileOwner;
+          readonly revoked: AbortSignal;
+      }
+    | { readonly kind: "pairing"; readonly token: string }
+    | { readonly kind: "handshake"; readonly handshakeId: string };
+
+/** Where the API serves the connector's socket; the exposure forwards here. */
+export interface MobileConnectorTransport {
+    readonly host: string;
+    readonly port: number;
 }
 
-/**
- * Serves requests that carried a valid device token. The context is the request's own, the
- * request and response are the raw HTTP pair, and revoking the device destroys their socket.
- */
-export type MobileDeviceRequestHandler = (
-    ctx: Context,
-    device: MobileDeviceRequest,
-    request: IncomingMessage,
-    response: ServerResponse,
-) => Promise<void>;
+/** The daemon's answer to a phone that started a handshake. */
+export interface MobileHandshakeStart {
+    readonly handshakeId: string;
+    readonly publicKey: string;
+    readonly nonce: string;
+    readonly expiresAt: number;
+}
+
+/** What the phone learns about its handshake: cancelled and failed read as `rejected`. */
+export type MobileHandshakeStatus =
+    | { readonly status: "verifying" }
+    | { readonly status: "completed"; readonly deviceId: string; readonly mac: string }
+    | { readonly status: "rejected" }
+    | { readonly status: "expired" };

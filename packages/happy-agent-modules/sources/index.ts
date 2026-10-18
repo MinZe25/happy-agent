@@ -49,6 +49,9 @@ export * from "./userSettings/index.js";
 
 // Tailcat: stable account-free internet exposure, controlled only by active admin bots.
 export * from "./tailcat/index.js";
+
+// Mobile connector: phones pair by QR code and reach the daemon directly over their own Tailcat.
+export * from "./mobileConnector/index.js";
 export * from "./connections/index.js";
 export * from "./peerMessaging/index.js";
 export * from "./runners/index.js";

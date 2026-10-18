@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
  * https://github.com/TelegramMessenger/Telegram-iOS), byte for byte with its U+FE0F selectors.
  * The SHA-256 of the entries joined by `\n` is
  * `c22c3a00d5a68df075fecc8cb8b730a45817a246a5ca70fa3b75d248ac5b54e9`, matching the table in
- * `API_MOBILE.md`, which phones implement from.
+ * the Mobile connector section of `API.md`, which phones implement from.
  */
 const CALLS_EMOJI: readonly string[] = Object.freeze([
     "😉",

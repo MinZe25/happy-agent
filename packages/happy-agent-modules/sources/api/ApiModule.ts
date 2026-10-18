@@ -9,6 +9,7 @@ import {
     BridgeError,
     BridgesModule,
     type BridgeAdmission,
+    type BridgeWebSocket,
     type BridgeWebSocketBinding,
 } from "../bridges/index.js";
 import { ConnectionsModule, RemoteConnectionError } from "../connections/index.js";
@@ -238,6 +239,14 @@ import {
     type TeamUser,
 } from "../team/index.js";
 import {
+    MobileConnectorError,
+    MobileConnectorModule,
+    STANDALONE_MOBILE_OWNER,
+    type MobileConnectorSnapshot,
+    type MobileCredential,
+} from "../mobileConnector/index.js";
+import { isMobileTransport, mobileDevice, withMobileDevice } from "./impl/apiMobileTransport.js";
+import {
     createNodeBinaryWebSocket,
     createSseWriter,
     type BinaryWebSocket,
@@ -318,9 +327,10 @@ import {
     terminalCreateBodySchema,
     terminalResizeBodySchema,
     userSettingBodySchema,
+    mobilePairingBodySchema,
     workspaceCreateBodySchema,
 } from "./ApiSchemas.js";
-import { WorkspaceProxy } from "./WorkspaceProxy.js";
+import { WorkspaceProxy, type WorkspaceProxyTcpHop } from "./WorkspaceProxy.js";
 import { requestedAgentMode } from "./requestedAgentMode.js";
 import {
     projectEventDiagnostics,
@@ -328,7 +338,7 @@ import {
 } from "./projectCredentialDiagnostics.js";
 import { SubtaskInputError, SubtasksModule } from "../subtasks/index.js";
 
-const API_PROTOCOL_VERSION = 26;
+const API_PROTOCOL_VERSION = 27;
 
 /**
  * How many archived agents the desktop bootstrap carries. Recent history is what the desktop
@@ -448,6 +458,11 @@ export type PreparedWorkspaceProxySocket =
            * proxy so connections are made from the runner's network. Absent for this machine.
            */
           readonly route?: string;
+          /**
+           * Aborts when the credential that opened this attachment is withdrawn, such as a
+           * removed phone's. A transport that keeps the tunnel itself closes it then.
+           */
+          readonly revoked?: AbortSignal;
       };
 
 export interface ApiDrainAgentProgress {
@@ -506,6 +521,10 @@ export class ApiModule implements AgentModule {
     readonly #exportedBots: ExportedBotsModule | undefined;
     readonly #userSettings: UserSettingsModule | undefined;
     readonly #surfaces: SurfacesModule | undefined;
+    readonly #mobileConnector: MobileConnectorModule | undefined;
+    /** The revocation signals each mobile connection already closes on. */
+    readonly #mobileConnections = new WeakMap<MobileConnection, Set<AbortSignal>>();
+    readonly #mobileClosers = new WeakMap<MobileConnection, () => void>();
     readonly #live: LiveModule | undefined;
     readonly #runners: RunnersModule | undefined;
     readonly #projects: ProjectsModule;
@@ -651,6 +670,7 @@ export class ApiModule implements AgentModule {
         scheduling?: SchedulingModule,
         userSettings?: UserSettingsModule,
         surfaces?: SurfacesModule,
+        mobileConnector?: MobileConnectorModule,
     ) {
         this.#abort = abort;
         this.#config = config;
@@ -694,6 +714,7 @@ export class ApiModule implements AgentModule {
         this.#exportedBots = exportedBots;
         this.#userSettings = userSettings;
         this.#surfaces = surfaces;
+        this.#mobileConnector = mobileConnector;
     }
 
     readonly beforeStart = async (
@@ -833,6 +854,22 @@ export class ApiModule implements AgentModule {
         setCommonHeaders(response);
         let finishMutation: (() => void) | undefined;
         try {
+            if (isMobileTransport(ctx)) {
+                // Before anything else: only a phone's own credentials reach anything here.
+                const admitted = await this.#admitMobile(
+                    ctx,
+                    request.headers.authorization,
+                    request.socket,
+                );
+                if (admitted.kind !== "device") {
+                    await this.#handleMobileHandshake(ctx, admitted, request, response);
+                    return;
+                }
+                if (isDeviceForbiddenPath(requestUrl(request).pathname)) {
+                    throw new ApiError(403, "forbidden", "Phones cannot use this endpoint.");
+                }
+                ctx = admitted.ctx;
+            }
             if (request.method === "GET" && requestUrl(request).pathname === "/v0/authentication") {
                 sendJson(
                     response,
@@ -1438,6 +1475,20 @@ export class ApiModule implements AgentModule {
                 return;
             }
             if (
+                this.#mobileConnector !== undefined &&
+                (url.pathname === "/v0/mobile-connector" ||
+                    url.pathname.startsWith("/v0/mobile-connector/")) &&
+                (await this.#handleMobileConnectorRoute(
+                    ctx,
+                    request,
+                    response,
+                    url,
+                    this.#mobileConnector,
+                ))
+            ) {
+                return;
+            }
+            if (
                 this.#userSettings !== undefined &&
                 request.method === "GET" &&
                 url.pathname === "/v0/user-settings"
@@ -1713,7 +1764,16 @@ export class ApiModule implements AgentModule {
         socket: Socket,
         head: Buffer,
     ): Promise<boolean> {
+        if (isMobileTransport(ctx)) {
+            try {
+                ctx = await this.#admitMobileDevice(ctx, request.headers.authorization, socket);
+            } catch (error: unknown) {
+                writeSocketError(socket, this.#socketRejection(ctx, error, "Not found."));
+                return true;
+            }
+        }
         const runner = this.prepareRunnerSocket(
+            ctx,
             requestUrl(request).pathname,
             request.headers.authorization,
         );
@@ -1852,6 +1912,12 @@ export class ApiModule implements AgentModule {
         authorization: string | string[] | undefined,
     ): Promise<PreparedExportedBotSocket> {
         if (this.#exportedBots === undefined) return { handled: false };
+        if (isMobileTransport(ctx) && url.pathname === "/v0/exported-bots/connect") {
+            return {
+                handled: true,
+                rejection: { code: "unauthorized", message: "Unauthorized", status: 401 },
+            };
+        }
         return await this.#exportedBots.prepareSocket(ctx, url, authorization);
     }
 
@@ -1899,6 +1965,14 @@ export class ApiModule implements AgentModule {
         socket: Socket,
         head: Buffer,
     ): Promise<boolean> {
+        if (isMobileTransport(ctx)) {
+            try {
+                ctx = await this.#admitMobileDevice(ctx, request.headers.authorization, socket);
+            } catch (error: unknown) {
+                writeSocketError(socket, this.#socketRejection(ctx, error, "Not found."));
+                return true;
+            }
+        }
         if (await this.handleRemoteAttachment(ctx, request, socket, head)) return true;
         if (await this.handleServiceAttachment(ctx, request, socket, head)) return true;
         const prepared = await this.prepareWorkspaceProxySocket(
@@ -1940,6 +2014,7 @@ export class ApiModule implements AgentModule {
                 withLifetime(ctx, signal),
                 request.headers.authorization,
             );
+            this.#closeWithMobileDevice(ctx, socket);
             this.#assertTeamUser(ctx);
             if (!this.#ready || this.#closed)
                 throw new ApiError(
@@ -2040,14 +2115,29 @@ export class ApiModule implements AgentModule {
                 [...url.searchParams.keys()].some((key) => key !== "windowId")
             )
                 throw invalidRequest("The voice window identity is invalid.");
+            const control = await this.#live.prepareControl(
+                ctx,
+                teamUser(ctx)?.id ?? "standalone",
+                match[1]!,
+                windowId,
+            );
+            const attachedCtx = ctx;
             return {
                 handled: true,
-                ...(await this.#live.prepareControl(
-                    ctx,
-                    teamUser(ctx)?.id ?? "standalone",
-                    match[1]!,
-                    windowId,
-                )),
+                failed: () => control.failed(),
+                attach: (socket) => {
+                    const binding = control.attach(socket);
+                    const stop = this.#onMobileRevoke(attachedCtx, () =>
+                        socket.close(MOBILE_REVOKED_CLOSE, "This phone was removed."),
+                    );
+                    return {
+                        message: (text) => binding.message(text),
+                        closed: () => {
+                            stop();
+                            binding.closed();
+                        },
+                    };
+                },
             };
         } catch (error) {
             const failure =
@@ -2104,7 +2194,8 @@ export class ApiModule implements AgentModule {
                 );
                 return {
                     handled: true,
-                    attach: (webSocket) => connection.attach(webSocket),
+                    attach: (webSocket) =>
+                        this.#closeBridgeOnRevoke(ctx, webSocket, connection.attach(webSocket)),
                     failed: () => {
                         connection.failed();
                     },
@@ -2122,9 +2213,11 @@ export class ApiModule implements AgentModule {
                           ...query,
                           port: portParameter(url.searchParams.get("port")),
                       });
+            const attachedCtx = ctx;
             return {
                 handled: true,
-                attach: (webSocket) => admission.attach(webSocket),
+                attach: (webSocket) =>
+                    this.#closeBridgeOnRevoke(attachedCtx, webSocket, admission.attach(webSocket)),
                 failed: () => {
                     admission.failed();
                 },
@@ -2143,12 +2236,14 @@ export class ApiModule implements AgentModule {
      * neither team sign-in nor the local API token applies.
      */
     prepareRunnerSocket(
+        ctx: Context,
         pathname: string,
         authorization: string | string[] | undefined,
     ): PreparedRunnerSocket {
         if (pathname !== "/v0/runners/connect" || this.#runners === undefined) {
             return { handled: false };
         }
+        if (isMobileTransport(ctx)) return { handled: true, rejection: MOBILE_UNAUTHORIZED };
         const runnerId = this.#runners.authenticate(authorization);
         if (runnerId === undefined) {
             return {
@@ -2191,11 +2286,13 @@ export class ApiModule implements AgentModule {
             const terminalId = match[2] as string;
             const { scope } = await this.#resolveWorkspaceScope(ctx, workspaceId);
             const session = await this.#terminals.session(ctx, scope, terminalId);
+            const attachedCtx = ctx;
             return {
                 handled: true,
-                attach(stream) {
+                attach: (stream) => {
                     const detach = session.attach(stream);
                     stream.once("close", detach);
+                    this.#closeWithMobileDevice(attachedCtx, stream);
                 },
             };
         } catch (error: unknown) {
@@ -2216,6 +2313,7 @@ export class ApiModule implements AgentModule {
         if (remote === undefined) return false;
         try {
             ctx = await this.#authenticate(ctx, request.headers.authorization);
+            this.#closeWithMobileDevice(ctx, socket);
             this.#assertTeamUser(ctx);
             if (!this.#ready)
                 throw new ApiError(503, "not_initialized", "Happy Agent is still starting.");
@@ -2254,9 +2352,10 @@ export class ApiModule implements AgentModule {
             const runners = this.#runners;
             // The native fast path connects from this process; a workload user's previews are
             // reached through that user's runner, like a runner's are.
+            const revoked = mobileDevice(ctx)?.revoked;
             if (runners === undefined || runners.native(runnerId)) {
                 runners?.assertLocalExecution();
-                return { handled: true };
+                return { handled: true, ...(revoked === undefined ? {} : { revoked }) };
             }
             // Refuse a runner that is not there now, rather than every request on the tunnel.
             await runners.machine(runnerId);
@@ -2267,7 +2366,7 @@ export class ApiModule implements AgentModule {
                 if (network === undefined) throw new Error("The runner cannot open connections.");
                 return await network.connect(connectCtx, { host, port });
             });
-            return { handled: true, route };
+            return { handled: true, route, ...(revoked === undefined ? {} : { revoked }) };
         } catch (error: unknown) {
             return {
                 handled: true,
@@ -2280,8 +2379,9 @@ export class ApiModule implements AgentModule {
         await this.#workspaceProxy.listen(path);
     }
 
-    async listenWorkspaceProxyTcp(token: string): Promise<number> {
-        return await this.#workspaceProxy.listenTcp(token);
+    /** The one loopback TCP workspace-proxy hop; every Bun front door shares it. */
+    async listenWorkspaceProxyTcp(): Promise<WorkspaceProxyTcpHop> {
+        return await this.#workspaceProxy.listenTcp();
     }
 
     #subscribeToModules(ctx: Context): void {
@@ -2580,6 +2680,17 @@ export class ApiModule implements AgentModule {
                         ?.writer.write(
                             `event: ${frame.type}\ndata: ${JSON.stringify(frame.data)}\n\n`,
                         );
+                }),
+            );
+        if (this.#mobileConnector !== undefined)
+            this.#unsubscribe.push(
+                this.#mobileConnector.onEvent((_eventCtx, event) => {
+                    this.#journal.append(
+                        "mobile_connector.updated",
+                        { mobileConnector: event.mobileConnector },
+                        event.mobileConnector.updatedAt,
+                        event.owner === STANDALONE_MOBILE_OWNER ? undefined : event.owner,
+                    );
                 }),
             );
         if (this.#userSettings !== undefined)
@@ -7590,6 +7701,197 @@ export class ApiModule implements AgentModule {
         }
     }
 
+    /** The desktop's side of the mobile connector: its snapshot, pairing, and paired phones. */
+    async #handleMobileConnectorRoute(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        url: URL,
+        mobileConnector: MobileConnectorModule,
+    ): Promise<boolean> {
+        const route = url.pathname.slice("/v0/mobile-connector".length);
+        const device = /^\/devices\/([^/]+)$/.exec(route);
+        let snapshot: MobileConnectorSnapshot;
+        if (request.method === "GET" && route === "") {
+            snapshot = await mobileConnector.snapshot(ctx);
+        } else if (request.method === "POST" && route === "/pairing") {
+            snapshot = await mobileConnector.startPairing(ctx);
+        } else if (request.method === "POST" && route === "/pairing/confirm") {
+            const body = await bodyAs(request, mobilePairingBodySchema, "pairing confirmation");
+            snapshot = await mobileConnector.confirmPairing(ctx, body.pairingId);
+        } else if (request.method === "POST" && route === "/pairing/cancel") {
+            const body = await bodyAs(request, mobilePairingBodySchema, "pairing cancellation");
+            snapshot = await mobileConnector.cancelPairing(ctx, body.pairingId);
+        } else if (request.method === "DELETE" && device !== null) {
+            snapshot = await mobileConnector.revokeDevice(ctx, decodeURIComponent(device[1]!));
+        } else {
+            return false;
+        }
+        sendJson(response, 200, { mobileConnector: snapshot });
+        return true;
+    }
+
+    /**
+     * Identify the credential of work on the mobile connector's socket, or refuse it. A phone's
+     * `connection`, when the transport has one, is closed if that phone is removed.
+     */
+    async #admitMobile(
+        ctx: Context,
+        authorization: string | string[] | undefined,
+        connection: MobileConnection | undefined,
+    ): Promise<
+        | { readonly kind: "device"; readonly ctx: Context }
+        | Exclude<MobileCredential, { readonly kind: "device" }>
+    > {
+        const credential = await this.#mobileConnector?.authenticate(ctx, authorization);
+        if (credential === undefined) throw mobileUnauthorized();
+        if (credential.kind !== "device") return credential;
+        if (credential.revoked.aborted) throw mobileUnauthorized();
+        // A phone paired in one mode does not carry over to the other.
+        if (this.#team.enabled === (credential.owner === STANDALONE_MOBILE_OWNER)) {
+            throw mobileUnauthorized();
+        }
+        let deviceCtx = withMobileDevice(ctx, credential);
+        if (this.#team.enabled) {
+            const user = await this.#team.getUser(ctx, credential.owner);
+            if (user === undefined || isTeamGuest(user)) throw mobileUnauthorized();
+            deviceCtx = this.#team.connectionContext(deviceCtx, user);
+        }
+        if (connection !== undefined) this.#closeOnRevoke(credential.revoked, connection);
+        return { kind: "device", ctx: deviceCtx };
+    }
+
+    /** Upgrades and tunnels on the mobile connector's socket belong to paired phones only. */
+    async #admitMobileDevice(
+        ctx: Context,
+        authorization: string | string[] | undefined,
+        connection: MobileConnection | undefined,
+    ): Promise<Context> {
+        const admitted = await this.#admitMobile(ctx, authorization, connection);
+        if (admitted.kind !== "device") throw mobileUnauthorized();
+        return admitted.ctx;
+    }
+
+    /** Run `close` if the phone this work authenticated as is removed; returns the release. */
+    #onMobileRevoke(ctx: Context, close: () => void): () => void {
+        const revoked = mobileDevice(ctx)?.revoked;
+        if (revoked === undefined) return () => undefined;
+        if (revoked.aborted) {
+            close();
+            return () => undefined;
+        }
+        revoked.addEventListener("abort", close, { once: true });
+        return () => revoked.removeEventListener("abort", close);
+    }
+
+    #closeBridgeOnRevoke(
+        ctx: Context,
+        webSocket: BridgeWebSocket,
+        binding: BridgeWebSocketBinding,
+    ): BridgeWebSocketBinding {
+        const stop = this.#onMobileRevoke(ctx, () =>
+            webSocket.close(MOBILE_REVOKED_CLOSE, "This phone was removed."),
+        );
+        return {
+            message: (data) => binding.message(data),
+            closed: () => {
+                stop();
+                binding.closed();
+            },
+        };
+    }
+
+    /** Close a connection a paired phone opened when that phone is removed. */
+    #closeWithMobileDevice(ctx: Context, connection: MobileConnection): void {
+        const device = mobileDevice(ctx);
+        if (device !== undefined) this.#closeOnRevoke(device.revoked, connection);
+    }
+
+    /**
+     * One listener per connection serves every phone that used it, and leaves each revocation
+     * signal when the connection closes, so a long-paired phone accumulates nothing.
+     */
+    #closeOnRevoke(revoked: AbortSignal, connection: MobileConnection): void {
+        if (revoked.aborted) {
+            connection.destroy();
+            return;
+        }
+        let signals = this.#mobileConnections.get(connection);
+        let destroy = this.#mobileClosers.get(connection);
+        if (signals === undefined || destroy === undefined) {
+            const tracked = new Set<AbortSignal>();
+            const close = () => connection.destroy();
+            signals = tracked;
+            destroy = close;
+            this.#mobileConnections.set(connection, tracked);
+            this.#mobileClosers.set(connection, close);
+            connection.once("close", () => {
+                for (const signal of tracked) signal.removeEventListener("abort", close);
+                tracked.clear();
+            });
+        }
+        if (signals.has(revoked)) return;
+        signals.add(revoked);
+        revoked.addEventListener("abort", destroy, { once: true });
+    }
+
+    /**
+     * A phone pairing over the connector's socket. Each credential reaches only its own routes;
+     * anything else is refused exactly as an unknown credential is.
+     */
+    async #handleMobileHandshake(
+        ctx: Context,
+        credential: Exclude<MobileCredential, { readonly kind: "device" }>,
+        request: IncomingMessage,
+        response: ServerResponse,
+    ): Promise<void> {
+        const mobileConnector = this.#mobileConnector;
+        if (mobileConnector === undefined) throw mobileUnauthorized();
+        const url = requestUrl(request);
+        const route = url.pathname;
+        if (credential.kind === "pairing") {
+            if (request.method !== "POST" || route !== MOBILE_HANDSHAKE_ROUTE) {
+                throw mobileUnauthorized();
+            }
+            const body = await readJson(request, MAX_MOBILE_HANDSHAKE_BODY_BYTES);
+            sendJson(
+                response,
+                200,
+                await mobileConnector.startHandshake(ctx, credential.token, body),
+            );
+            return;
+        }
+        const handshakeId = credential.handshakeId;
+        if (request.method === "GET" && route === MOBILE_HANDSHAKE_ROUTE) {
+            const closed = new AbortController();
+            response.once("close", () => closed.abort());
+            const wait = Number(url.searchParams.get("wait") ?? "0");
+            sendJson(
+                response,
+                200,
+                await mobileConnector.handshakeStatus(handshakeId, wait, closed.signal),
+            );
+            return;
+        }
+        if (request.method !== "POST") throw mobileUnauthorized();
+        if (route === `${MOBILE_HANDSHAKE_ROUTE}/reveal`) {
+            const body = await readJson(request, MAX_MOBILE_HANDSHAKE_BODY_BYTES);
+            sendJson(response, 200, await mobileConnector.revealHandshake(ctx, handshakeId, body));
+            return;
+        }
+        if (route === `${MOBILE_HANDSHAKE_ROUTE}/confirm`) {
+            const body = await readJson(request, MAX_MOBILE_HANDSHAKE_BODY_BYTES);
+            sendJson(response, 200, await mobileConnector.confirmHandshake(ctx, handshakeId, body));
+            return;
+        }
+        if (route === `${MOBILE_HANDSHAKE_ROUTE}/reject`) {
+            await readJson(request, MAX_MOBILE_HANDSHAKE_BODY_BYTES, true);
+            sendJson(response, 200, await mobileConnector.rejectHandshake(ctx, handshakeId));
+            return;
+        }
+        throw mobileUnauthorized();
+    }
+
     /** Read one of the caller's settings, or set or clear it last-write-wins. */
     async #handleUserSettingRoute(
         ctx: Context,
@@ -8365,7 +8667,9 @@ export class ApiModule implements AgentModule {
     }
 
     /** The additive `401` field telling a client how to sign in, when there is a way. */
-    #authenticationChallenge(): { readonly authentication?: AuthenticationChallenge } {
+    #authenticationChallenge(ctx: Context): { readonly authentication?: AuthenticationChallenge } {
+        // A phone's socket has no sign-in method; advertising one would only mislead it.
+        if (isMobileTransport(ctx)) return {};
         const methods = this.#team.authenticationMethods();
         return methods.length === 0 ? {} : { authentication: { methods: [...methods] } };
     }
@@ -8374,6 +8678,12 @@ export class ApiModule implements AgentModule {
         ctx: Context,
         authorization: string | string[] | undefined,
     ): Promise<Context> {
+        if (isMobileTransport(ctx)) {
+            // Usually admitted at the transport's entry; Bun's native upgrades arrive here first.
+            return mobileDevice(ctx) === undefined
+                ? await this.#admitMobileDevice(ctx, authorization, undefined)
+                : ctx;
+        }
         if (this.#team.enabled) {
             try {
                 return this.#ready
@@ -8436,7 +8746,7 @@ export class ApiModule implements AgentModule {
         if (error instanceof ApiError) {
             sendJson(response, error.status, {
                 ...error.body(),
-                ...(error.status === 401 ? this.#authenticationChallenge() : {}),
+                ...(error.status === 401 ? this.#authenticationChallenge(ctx) : {}),
             });
             return;
         }
@@ -8455,6 +8765,14 @@ export class ApiModule implements AgentModule {
         }
         if (error instanceof SecretApiInputError) {
             sendJson(response, 400, { code: "invalid_request", error: error.message });
+            return;
+        }
+        if (error instanceof MobileConnectorError) {
+            sendJson(response, error.status, {
+                error: error.message,
+                code: error.code,
+                ...(error.status === 401 ? this.#authenticationChallenge(ctx) : {}),
+            });
             return;
         }
         if (error instanceof RunnerUnavailableError) {
@@ -8566,7 +8884,7 @@ export class ApiModule implements AgentModule {
             sendJson(response, 401, {
                 error: "Unauthorized",
                 code: "unauthorized",
-                ...this.#authenticationChallenge(),
+                ...this.#authenticationChallenge(ctx),
             });
             return;
         }
@@ -8622,7 +8940,7 @@ export class ApiModule implements AgentModule {
                 message: error.message,
                 status: error.status,
                 ...(Object.keys(error.details).length === 0 ? {} : { details: error.details }),
-                ...(error.status === 401 ? this.#authenticationChallenge() : {}),
+                ...(error.status === 401 ? this.#authenticationChallenge(ctx) : {}),
             };
         }
         if (error instanceof TerminalError && error.code === "not_found") {
@@ -8778,6 +9096,32 @@ function documentQuery<const Key extends "seq" | "afterSeq" | "limit" | "stateVe
         }
     }
     return query;
+}
+
+/** Anything on the mobile connector's socket that closes when its phone is removed. */
+type MobileConnection = import("node:stream").Duplex;
+
+/** Every phone pairing route; only the mobile connector's socket serves it. */
+const MOBILE_HANDSHAKE_ROUTE = "/v0/mobile-connector/handshake";
+/** The WebSocket close a removed phone's upgraded connections receive. */
+const MOBILE_REVOKED_CLOSE = 1008;
+const MAX_MOBILE_HANDSHAKE_BODY_BYTES = 4 * 1024;
+
+const MOBILE_UNAUTHORIZED: ApiSocketRejection = {
+    code: "unauthorized",
+    message: "Unauthorized",
+    status: 401,
+};
+
+function mobileUnauthorized(): ApiError {
+    return new ApiError(401, "unauthorized", "Unauthorized");
+}
+
+/** Daemon lifecycle, debugging, and mobile connector management stay with the desktop. */
+function isDeviceForbiddenPath(pathname: string): boolean {
+    return ["/v0/drain", "/v0/shutdown", "/v0/debug", "/v0/mobile-connector"].some(
+        (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+    );
 }
 
 async function bodyAs<Schema extends TSchema>(

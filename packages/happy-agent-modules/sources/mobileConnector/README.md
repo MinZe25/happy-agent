@@ -2,21 +2,26 @@
 
 Phones pair with this daemon by scanning a QR code and then reach it directly over a dedicated,
 private Tailcat socket. `MobileConnectorModule` depends on Config, Team, Node, Tailcat, and
-Durable Functions.
+Durable Functions. The API module takes it to authenticate phone credentials and serve the
+desktop and handshake routes; this module owns the pairing state machine, the device store, and
+the exposure.
 
 ```text
 phone ── Tailcat (own identity, mobile.private.json) ── relay 127.0.0.1:24781
                                                             │
                                                             ▼
-                                      mobile listener (127.0.0.1:ephemeral)
-                                        ├── /mobile/v1/pairing/*   unauthenticated
-                                        └── everything else        device token only
-                                                                   → serveDeviceRequests handler
+                         the API's mobile listener (127.0.0.1:ephemeral, flagged as mobile)
+                           every request, upgrade, and CONNECT: authenticate() first
+                             ├── device token        → the ordinary API as its owner, minus
+                             │                         drain, shutdown, debug, mobile-connector
+                             ├── pairing token       → POST /v0/mobile-connector/handshake
+                             ├── handshake credential → /v0/mobile-connector/handshake[/…]
+                             └── anything else       → 401
 ```
 
-The listener never sees the main API socket and never accepts the local standalone token, WorkOS
-or JWT tokens, runner tokens, or bridge tokens. Only `TailcatModule.openExposure` is used to reach
-Tailcat.
+There is one API. The daemon binds the extra listener with the same HTTP stack as its main
+transport and gives it to `attachTransport`; nothing opens before that. The main transports
+accept no phone credential. Only `TailcatModule.openExposure` is used to reach Tailcat.
 
 ## The socket opens on demand
 
@@ -24,8 +29,8 @@ Tailcat.
 device is paired, or a pairing ended less than three seconds ago, and closes it otherwise. The
 linger lets the answer to the request that ended a pairing, and the phone's woken status read,
 reach the phone. Device inserts and deletes schedule the same reconciliation through Durable
-Functions in their own transaction, and `afterStart` reconciles in the background, so a restart
-reopens the socket when devices exist without holding up startup. Its status is `disabled`,
+Functions in their own transaction, and `attachTransport` reconciles in the background, so a
+restart reopens the socket when devices exist without holding up startup. Its status is `disabled`,
 `closed`, `starting`, `open`, or `failed`.
 
 ## Pairing
@@ -39,8 +44,9 @@ waiting ──start──▶ committed ──reveal──▶ verifying ──bot
 
 - `startPairing` replaces the caller's previous pairing, opens the socket, and shows
   `happy://direct?<base64url JSON>` with the address, port, one-time token, node name, and expiry.
-- The token lives only in memory, expires after five minutes, and is consumed by the phone's
-  `start`, whatever happens next. Each owner has one pairing at a time.
+- The token lives only in memory, expires after five minutes, and is consumed by
+  `startHandshake`, whatever happens next, a malformed body included. Each owner has one pairing
+  at a time. The handshake ID that start returns is the phone's credential for the rest.
 - The phone commits to `SHA256(label ‖ A ‖ Nm)` before it learns the daemon's key. A wrong
   commitment, an unusable key, or a wrong confirmation MAC fails the pairing.
 - The desktop's `confirmPairing` and the phone's confirmation arrive in either order. When both
@@ -51,16 +57,19 @@ waiting ──start──▶ committed ──reveal──▶ verifying ──bot
   it; anything else changes nothing.
 
 `impl/mobilePairingCrypto.ts` implements the daemon's half of
-[`API_MOBILE.md`](../../../happy-agent/API_MOBILE.md) on Node's crypto, and `impl/callsEmoji.ts`
-carries Telegram iOS's emoji table. They are the only implementation in this repository; phones
-implement the same document natively. The tests' fake phone, in `tests/mobileConnector/support`,
-is written from the document independently of `impl/`.
+the Mobile connector section of [`API.md`](../../../happy-agent/API.md) on Node's crypto, and
+`impl/callsEmoji.ts` carries Telegram iOS's emoji table. They are the only implementation in this
+repository; phones implement the same document natively. The tests' fake phone, in
+`tests/mobileConnector/support`, is written from the document independently of `impl/`; the
+module tests drive it through `moduleTransport`, and the gym and Bun transport tests drive it over
+real HTTP.
 
 ## Owners, devices, and events
 
 The owner comes from the caller's context: the team member's installation-local ID, or
-`standalone`. No operation takes an owner as an argument. `revokeDevice` deletes the row and, after
-commit, destroys every socket that device's requests are using. A device's `lastSeenAt` moves at
+`standalone`. No operation takes an owner as an argument. `authenticate` hands a device credential
+an AbortSignal; `revokeDevice` deletes the row and, after commit, aborts it, and the API closes
+every request, stream, WebSocket, and tunnel opened with it. A device's `lastSeenAt` moves at
 most once a minute. `onEvent` delivers `{ owner, mobileConnector }` after each change commits,
 with a UUIDv7 `version` per owner.
 

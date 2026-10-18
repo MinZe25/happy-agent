@@ -16,7 +16,7 @@ async function fixture() {
     const prepared = {
         context: () => ({}),
         api: {
-            listenWorkspaceProxyTcp: (token) => proxy.listenTcp(token),
+            listenWorkspaceProxyTcp: () => proxy.listenTcp(),
             handleRequest: async (_ctx, _request, response) => response.end("healthy"),
             prepareTerminalSocket: async () => ({ handled: false }),
             prepareRunnerSocket: () => ({ handled: false }),

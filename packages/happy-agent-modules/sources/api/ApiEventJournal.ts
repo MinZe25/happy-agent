@@ -93,7 +93,8 @@ export class ApiEventJournal {
         return (
             (event.type !== "happy.integration.updated" &&
                 event.type !== "agent.draft.updated" &&
-                event.type !== "user_settings.updated") ||
+                event.type !== "user_settings.updated" &&
+                event.type !== "mobile_connector.updated") ||
             userId === undefined
         );
     }

@@ -1,4 +1,6 @@
-import { randomBytes } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { once } from "node:events";
 import { Agent, createServer, request } from "node:http";
 import { connect } from "node:net";
@@ -7,8 +9,7 @@ import { WORKSPACE_PROXY_ROUTE_HEADER, WorkspaceProxy } from "../../sources/api/
 
 it("protects loopback proxy admission and never forwards its private credential", async () => {
     const proxy = new WorkspaceProxy();
-    const token = randomBytes(32).toString("base64url");
-    const port = await proxy.listenTcp(token);
+    const { port, authorization: admission } = await proxy.listenTcp();
     const received: Array<string | string[] | undefined> = [];
     const target = createServer((incoming, response) => {
         received.push(incoming.headers["proxy-authorization"]);
@@ -43,7 +44,7 @@ it("protects loopback proxy admission and never forwards its private credential"
         expect(await call()).toBe(407);
         expect(await call("Bearer wrong")).toBe(407);
         expect(received).toEqual([]);
-        expect(await call(`Bearer ${token}`, true)).toBe(200);
+        expect(await call(admission, true)).toBe(200);
         expect(await call(undefined, true)).toBe(200);
         expect(await call()).toBe(407);
         expect(received).toEqual([undefined, undefined]);
@@ -57,8 +58,7 @@ it("protects loopback proxy admission and never forwards its private credential"
 
 it("opens a routed attachment's requests and tunnels from the route's network", async () => {
     const proxy = new WorkspaceProxy();
-    const token = randomBytes(32).toString("base64url");
-    const port = await proxy.listenTcp(token);
+    const { port, authorization: admission } = await proxy.listenTcp();
     const received: Array<string | string[] | undefined> = [];
     const target = createServer((incoming, response) => {
         received.push(incoming.headers[WORKSPACE_PROXY_ROUTE_HEADER]);
@@ -76,7 +76,7 @@ it("opens a routed attachment's requests and tunnels from the route's network", 
             return connect(address.port, "127.0.0.1");
         });
     const routed = (key: string) => ({
-        "proxy-authorization": `Bearer ${token}`,
+        "proxy-authorization": admission,
         [WORKSPACE_PROXY_ROUTE_HEADER]: key,
     });
     try {
@@ -154,3 +154,46 @@ async function statusOf(port: number, headers: Record<string, string>): Promise<
         outgoing.end();
     });
 }
+
+it("shares one admitted TCP hop with every front door, beside its private Unix socket", async () => {
+    const proxy = new WorkspaceProxy();
+    const directory = await mkdtemp(join(tmpdir(), "happy-proxy-"));
+    const socketPath = join(directory, "p.sock");
+    const target = createServer((_incoming, response) => response.end("ok"));
+    target.listen(0, "127.0.0.1");
+    await once(target, "listening");
+    const address = target.address();
+    if (address === null || typeof address === "string") throw new Error("Missing fixture port.");
+    const call = async (via: { socketPath: string } | { port: number }, authorization?: string) =>
+        await new Promise<number>((resolve, reject) => {
+            const outgoing = request(
+                {
+                    agent: false,
+                    ...("socketPath" in via ? via : { hostname: "127.0.0.1", port: via.port }),
+                    path: `http://127.0.0.1:${address.port}/`,
+                    headers:
+                        authorization === undefined ? {} : { "proxy-authorization": authorization },
+                },
+                (response) => {
+                    response.resume();
+                    response.on("end", () => resolve(response.statusCode!));
+                },
+            );
+            outgoing.on("error", reject);
+            outgoing.end();
+        });
+    try {
+        await proxy.listen(socketPath);
+        const first = await proxy.listenTcp();
+        await expect(proxy.listenTcp()).resolves.toEqual(first);
+        // The owner-only Unix socket needs no credential; loopback TCP always does.
+        expect(await call({ socketPath })).toBe(200);
+        expect(await call({ port: first.port })).toBe(407);
+        expect(await call({ port: first.port }, first.authorization)).toBe(200);
+    } finally {
+        await proxy.close();
+        target.closeAllConnections();
+        await new Promise<void>((resolve) => target.close(() => resolve()));
+        await rm(directory, { force: true, recursive: true });
+    }
+});

@@ -1,6 +1,8 @@
 import {
     startHappyAgentRuntime,
+    withMobileTransport,
     type HappyAgentRuntime,
+    type PreparedHappyAgentRuntime,
     type StartHappyAgentRuntimeOptions,
 } from "@slopus/happy-agent-modules";
 import { withLogContext, type Context } from "@steve.kite/stdlib";
@@ -47,6 +49,7 @@ export async function startHappyAgentDaemon(
 ): Promise<HappyAgentDaemon> {
     const { persistPid = false, ...runtimeOptions } = options;
     let bound: BoundAgentSocket | BoundAgentHttpServer | undefined;
+    let mobileBound: BoundAgentHttpServer | undefined;
     let preparedRuntime: Parameters<typeof bindAgentSocket>[0] | undefined;
     let unsubscribeShutdown: (() => void) | undefined;
     let closeDaemon: ((reason?: HappyAgentShutdownReason) => Promise<void>) | undefined;
@@ -108,8 +111,16 @@ export async function startHappyAgentDaemon(
                 ? { host: bound.host, port: bound.port }
                 : { socketPath: bound.socketPath },
         );
+        // Phones are optional: a computer that cannot serve them still serves everything else.
+        mobileBound = await bindMobileTransport(runtime, preparedRuntime).catch(
+            (error: unknown) => {
+                runtime?.ctx.log.warn("The mobile connector transport could not start.", {}, error);
+                return undefined;
+            },
+        );
     } catch (error) {
         unsubscribeShutdown?.();
+        await mobileBound?.close().catch(() => undefined);
         await bound?.close().catch(() => undefined);
         await runtime?.close().catch(() => undefined);
         if (pidWritten && pidPath !== undefined) {
@@ -126,7 +137,13 @@ export async function startHappyAgentDaemon(
     let closing: Promise<void> | undefined;
     closeDaemon = (reason = "requested") => {
         if (closing === undefined) {
-            closing = closeHappyAgentDaemon(runtime, bound, unsubscribeShutdown, reason);
+            closing = closeHappyAgentDaemon(
+                runtime,
+                bound,
+                mobileBound,
+                unsubscribeShutdown,
+                reason,
+            );
             void closing.then(resolveClosed, rejectClosed);
         }
         return closing;
@@ -159,6 +176,7 @@ export async function startHappyAgentDaemon(
 async function closeHappyAgentDaemon(
     runtime: HappyAgentRuntime,
     bound: BoundAgentSocket | BoundAgentHttpServer | undefined,
+    mobileBound: BoundAgentHttpServer | undefined,
     unsubscribeShutdown: (() => void) | undefined,
     reason: HappyAgentShutdownReason,
 ): Promise<void> {
@@ -178,6 +196,14 @@ async function closeHappyAgentDaemon(
         },
         failures,
     );
+    if (mobileBound !== undefined) {
+        await runShutdownStep(
+            ctx,
+            "mobile-transport",
+            async () => await mobileBound.close(),
+            failures,
+        );
+    }
     if (bound !== undefined) {
         await runShutdownStep(ctx, "transport", async () => await bound.close(), failures);
     }
@@ -188,6 +214,36 @@ async function closeHappyAgentDaemon(
     ctx.log.info(
         `daemon:shutdown:finish pid=${String(process.pid)} durationMs=${String(Math.round(performance.now() - startedAt))}`,
     );
+}
+
+/**
+ * Serve the same API on a loopback listener for the mobile connector's socket. Everything arriving
+ * there is marked as mobile, so the API authenticates it with phone credentials only; the
+ * connector exposes it over its own Tailcat identity only while phones need it.
+ */
+async function bindMobileTransport(
+    runtime: HappyAgentRuntime,
+    prepared: PreparedHappyAgentRuntime | undefined,
+): Promise<BoundAgentHttpServer> {
+    if (prepared === undefined) {
+        throw new Error("The Happy Agent runtime did not prepare its mobile transport.");
+    }
+    const mobile: PreparedHappyAgentRuntime = {
+        api: prepared.api,
+        configuration: prepared.configuration,
+        context: (name) => withMobileTransport(prepared.context(`mobile-${name}`)),
+    };
+    const bound = await bindAgentHttpServer(mobile, "127.0.0.1", 0);
+    try {
+        runtime.modules.mobileConnector.attachTransport(
+            runtime.ctx.named("mobile-connector-transport"),
+            { host: bound.host, port: bound.port },
+        );
+    } catch (error) {
+        await bound.close().catch(() => undefined);
+        throw error;
+    }
+    return bound;
 }
 
 async function runShutdownStep(

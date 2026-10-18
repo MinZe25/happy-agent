@@ -2,6 +2,8 @@ import { createHash, randomBytes } from "node:crypto";
 
 import type {
     MobileDeviceDescription,
+    MobileHandshakeStart,
+    MobileHandshakeStatus,
     MobileOwner,
     MobilePairingSnapshot,
 } from "../MobileConnector.js";
@@ -23,13 +25,6 @@ export const MOBILE_PAIRING_TTL_MS = 5 * 60 * 1_000;
 
 /** Every way a pairing can end. Each leaves no device behind except `completed`. */
 export type MobilePairingEnding = "rejected" | "expired" | "cancelled" | "failed";
-
-/** What the phone learns: cancelled and failed read as `rejected`. */
-export type MobilePairingPhoneStatus =
-    | { readonly status: "verifying" }
-    | { readonly status: "completed"; readonly deviceId: string; readonly mac: string }
-    | { readonly status: "rejected" }
-    | { readonly status: "expired" };
 
 /** The values the module persists once both people have confirmed. */
 export interface MobilePairingCompletion {
@@ -147,7 +142,7 @@ export class MobilePairing {
         device: MobileDeviceDescription,
         daemonKey: DaemonPairingKey = createDaemonPairingKey(),
         daemonNonce: Buffer = randomBytes(32),
-    ): { handshakeId: string; publicKey: string; nonce: string; expiresAt: number } {
+    ): MobileHandshakeStart {
         if (this.#phase.kind !== "waiting" || this.#token === undefined) {
             throw new Error("This pairing code has already been used.");
         }
@@ -277,7 +272,7 @@ export class MobilePairing {
         this.#end(ending, error);
     }
 
-    phoneStatus(): MobilePairingPhoneStatus {
+    phoneStatus(): MobileHandshakeStatus {
         const phase = this.#phase;
         switch (phase.kind) {
             case "waiting":

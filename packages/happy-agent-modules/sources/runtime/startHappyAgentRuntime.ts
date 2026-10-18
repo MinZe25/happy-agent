@@ -80,6 +80,7 @@ import { SlashCommandsModule } from "../slashCommands/index.js";
 import { SkillsModule, GlobalSkillsModule, SkillFoldersModule } from "../skills/index.js";
 import { SystemPromptModule } from "../systemPrompt/index.js";
 import { TailcatModule } from "../tailcat/index.js";
+import { MobileConnectorModule } from "../mobileConnector/index.js";
 import { TasksModule } from "../tasks/index.js";
 import { TeamModule } from "../team/index.js";
 import { TerminalsModule } from "../terminals/index.js";
@@ -191,6 +192,7 @@ export interface HappyAgentRuntimeModules {
     readonly skillFolders: SkillFoldersModule;
     readonly systemPrompt: SystemPromptModule;
     readonly tailcat: TailcatModule;
+    readonly mobileConnector: MobileConnectorModule;
     readonly tasks: TasksModule;
     readonly team: TeamModule<LibSQLDatabase>;
     readonly terminals: TerminalsModule;
@@ -544,6 +546,17 @@ export async function startHappyAgentRuntime(
         const skillFolders = new SkillFoldersModule(config, bots);
         const tailcat = new TailcatModule(config, bots, durableFunctions);
         registerShutdown("tailcat", async (shutdownCtx) => await tailcat.close(shutdownCtx));
+        const mobileConnector = new MobileConnectorModule(
+            config,
+            team,
+            node,
+            tailcat,
+            durableFunctions,
+        );
+        registerShutdown(
+            "mobile-connector",
+            async (shutdownCtx) => await mobileConnector.close(shutdownCtx),
+        );
         const terminals = new TerminalsModule(projects, workspaces, runners, bots, tasks, surfaces);
         registerShutdown("terminals", async () => await terminals.close());
         const bridges = new BridgesModule(projects, workspaces, runners, bots, tasks, surfaces);
@@ -701,6 +714,7 @@ export async function startHappyAgentRuntime(
             scheduling,
             userSettings,
             surfaces,
+            mobileConnector,
         );
         api = apiModule;
 
@@ -758,6 +772,7 @@ export async function startHappyAgentRuntime(
             skillFolders,
             systemPrompt,
             tailcat,
+            mobileConnector,
             tasks,
             team,
             terminals,
@@ -811,6 +826,7 @@ export async function startHappyAgentRuntime(
             node,
             skillFolders,
             tailcat,
+            mobileConnector,
             ...(team.enabled ? [] : [happyTeams]),
             connections,
             projects,

@@ -13,11 +13,13 @@ import {
 import { readFileSync } from "node:fs";
 
 /**
- * A test-only phone written from `packages/happy-agent/API_MOBILE.md`, independently of the
- * daemon's `impl/` code. Its emoji table is read out of that document, so the specification, not
- * either implementation, decides the strings. The fixed vectors keep both honest.
+ * A test-only phone written from the "Mobile connector" section of `packages/happy-agent/API.md`,
+ * independently of the daemon's `impl/` code. Its emoji table is read out of that document, so the
+ * specification, not either implementation, decides the strings. The fixed vectors keep both
+ * honest.
  */
-const SPEC_PATH = new URL("../../../../happy-agent/API_MOBILE.md", import.meta.url);
+const SPEC_PATH = new URL("../../../../happy-agent/API.md", import.meta.url);
+const HANDSHAKE = "/v0/mobile-connector/handshake";
 const LABEL = "happy-mobile-pair-v1";
 const X25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b656e04220420", "hex");
 const QR_PREFIX = "happy://direct?";
@@ -29,16 +31,16 @@ export function specEmojiTable(): readonly string[] {
     if (specTable !== undefined) return specTable;
     const source = readFileSync(SPEC_PATH, "utf8");
     const match = /<!-- emoji-table-begin -->\s*```json\n([\s\S]*?)\n```/u.exec(source);
-    if (match?.[1] === undefined) throw new Error("API_MOBILE.md has no emoji table.");
+    if (match?.[1] === undefined) throw new Error("API.md has no emoji table.");
     const parsed: unknown = JSON.parse(match[1]);
     if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
-        throw new Error("The API_MOBILE.md emoji table is not a string array.");
+        throw new Error("The API.md emoji table is not a string array.");
     }
     specTable = parsed;
     return parsed;
 }
 
-/** `stringForEmojiHashOfData(data, count)` as API_MOBILE.md describes it. */
+/** `stringForEmojiHashOfData(data, count)` as API.md describes it. */
 export function specEmoji(data: Buffer, count = 4): readonly string[] {
     const table = specEmojiTable();
     const result: string[] = [];
@@ -105,7 +107,7 @@ export interface PhoneSecrets {
     readonly emoji: readonly string[];
 }
 
-/** Every derived value of API_MOBILE.md's "Derivation", from the phone's point of view. */
+/** Every derived value of API.md's "Derivation", from the phone's point of view. */
 export function derive(input: {
     readonly own: PhoneKey;
     readonly daemonPublicKey: Buffer;
@@ -176,6 +178,17 @@ export class PhoneRequestError extends Error {
     }
 }
 
+/**
+ * How the phone reaches `server.tailcat:<port>`: one request with a bearer credential. The gym
+ * uses real HTTP; module tests call the module the way the API would.
+ */
+export type PhoneTransport = (request: {
+    readonly method: "GET" | "POST";
+    readonly path: string;
+    readonly credential: string;
+    readonly body?: unknown;
+}) => Promise<{ readonly status: number; readonly body: unknown }>;
+
 export interface PairedPhone {
     readonly deviceId: string;
     readonly deviceToken: string;
@@ -192,10 +205,10 @@ export interface PhonePairing {
     reject(): Promise<PhoneStatus>;
 }
 
-/** Drive start and reveal against `baseUrl`, which stands in for `server.tailcat:<port>`. */
+/** Drive start and reveal over `transport`. */
 export async function startPhonePairing(
     qrText: string,
-    baseUrl: string,
+    transport: PhoneTransport,
     device: { readonly name: string; readonly platform: string } = {
         name: "Test iPhone",
         platform: "ios",
@@ -210,11 +223,11 @@ export async function startPhonePairing(
         handshakeId: string;
         publicKey: string;
         nonce: string;
-    }>(baseUrl, "POST", "/mobile/v1/pairing/start", {
-        token: qr.t,
+    }>(transport, "POST", HANDSHAKE, qr.t, {
         commitment: committed.toString("base64url"),
         device,
     });
+    const handshakeId = started.handshakeId;
     const secrets = derive({
         own,
         daemonPublicKey: Buffer.from(started.publicKey, "base64url"),
@@ -225,31 +238,35 @@ export async function startPhonePairing(
         address: qr.a,
         port: qr.p,
     });
-    const revealed = await phoneRequest<PhoneStatus>(baseUrl, "POST", "/mobile/v1/pairing/reveal", {
-        handshakeId: started.handshakeId,
-        publicKey: own.publicKey.toString("base64url"),
-        nonce: phoneNonce.toString("base64url"),
-    });
+    const revealed = await phoneRequest<PhoneStatus>(
+        transport,
+        "POST",
+        `${HANDSHAKE}/reveal`,
+        handshakeId,
+        { publicKey: own.publicKey.toString("base64url"), nonce: phoneNonce.toString("base64url") },
+    );
     if (revealed.status !== "verifying") throw new Error(`Reveal answered ${revealed.status}.`);
-    const handshakeId = started.handshakeId;
     return {
         handshakeId,
         emoji: secrets.emoji,
         secrets,
         confirm: async () => {
             let status = await phoneRequest<PhoneStatus>(
-                baseUrl,
+                transport,
                 "POST",
-                "/mobile/v1/pairing/confirm",
-                { handshakeId, mac: mac(secrets, "mobile").toString("base64url") },
+                `${HANDSHAKE}/confirm`,
+                handshakeId,
+                { mac: mac(secrets, "mobile").toString("base64url") },
             );
             while (status.status === "verifying") {
                 status = await phoneRequest<PhoneStatus>(
-                    baseUrl,
+                    transport,
                     "GET",
-                    `/mobile/v1/pairing/${handshakeId}?wait=25`,
+                    `${HANDSHAKE}?wait=25`,
+                    handshakeId,
                 ).catch((error: unknown) => {
-                    if (error instanceof PhoneRequestError && error.status === 404) {
+                    // A handshake the daemon no longer knows reads as expired.
+                    if (error instanceof PhoneRequestError && error.status === 401) {
                         return { status: "expired" } as const;
                     }
                     throw error;
@@ -271,32 +288,46 @@ export async function startPhonePairing(
             };
         },
         reject: async () =>
-            await phoneRequest<PhoneStatus>(baseUrl, "POST", "/mobile/v1/pairing/reject", {
-                handshakeId,
-            }),
+            await phoneRequest<PhoneStatus>(transport, "POST", `${HANDSHAKE}/reject`, handshakeId),
     };
 }
 
+/** One request; anything but `200` throws with the error body's code. */
 export async function phoneRequest<Body>(
-    baseUrl: string,
+    transport: PhoneTransport,
     method: "GET" | "POST",
     path: string,
+    credential: string,
     body?: unknown,
 ): Promise<Body> {
-    const response = await fetch(`${baseUrl}${path}`, {
+    const response = await transport({
         method,
-        headers: body === undefined ? {} : { "content-type": "application/json" },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        path,
+        credential,
+        ...(body === undefined ? {} : { body }),
     });
-    const payload = (await response.json().catch(() => null)) as
-        | (Body & { error?: string; code?: string })
-        | null;
-    if (!response.ok) {
+    if (response.status !== 200) {
+        const payload = response.body as { error?: string; code?: string } | null;
         throw new PhoneRequestError(
             response.status,
             payload?.code ?? "unknown",
             payload?.error ?? `HTTP ${String(response.status)}`,
         );
     }
-    return payload as Body;
+    return response.body as Body;
+}
+
+/** The phone's HTTP, against `baseUrl` standing in for `server.tailcat:<port>`. */
+export function httpPhoneTransport(baseUrl: string): PhoneTransport {
+    return async ({ method, path, credential, body }) => {
+        const response = await fetch(`${baseUrl}${path}`, {
+            method,
+            headers: {
+                authorization: `Bearer ${credential}`,
+                ...(body === undefined ? {} : { "content-type": "application/json" }),
+            },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        return { status: response.status, body: await response.json().catch(() => null) };
+    };
 }

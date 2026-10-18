@@ -324,3 +324,9 @@ export const userSettingBodySchema = Type.Object(
     },
     { additionalProperties: false },
 );
+
+/** `POST /v0/mobile-connector/pairing/confirm` and `/cancel`. */
+export const mobilePairingBodySchema = Type.Object(
+    { pairingId: cuid2Schema },
+    { additionalProperties: false },
+);

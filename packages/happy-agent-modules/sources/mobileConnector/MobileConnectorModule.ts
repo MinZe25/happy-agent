@@ -1,6 +1,4 @@
 import { createHash } from "node:crypto";
-import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Socket } from "node:net";
 
 import { createId } from "@paralleldrive/cuid2";
 import {
@@ -25,28 +23,23 @@ import { NodeModule } from "../node/index.js";
 import { TailcatModule, type TailcatNamedExposure } from "../tailcat/index.js";
 import { TeamAuthenticationError, TeamModule, teamUser } from "../team/index.js";
 import { createUuidV7Factory } from "../utils/createUuidV7.js";
-import { MobilePairing, type MobilePairingPhoneStatus } from "./impl/MobilePairing.js";
+import { MobilePairing } from "./impl/MobilePairing.js";
 import {
-    DEVICE_TOKEN_PATTERN,
-    handshakeIdSchema,
-    pairingConfirmRequestSchema,
-    pairingRejectRequestSchema,
-    pairingRevealRequestSchema,
-    pairingStartRequestSchema,
+    handshakeConfirmRequestSchema,
+    handshakeRevealRequestSchema,
+    handshakeStartRequestSchema,
+    MOBILE_BEARER_PATTERN,
 } from "./impl/mobilePairingRequests.js";
-import {
-    readMobileJsonBody,
-    sendMobileJson,
-    startMobileListener,
-    type MobileListener,
-} from "./impl/startMobileListener.js";
 import {
     mobileConnectorSnapshotSchema,
     STANDALONE_MOBILE_OWNER,
     type MobileConnectorListener,
     type MobileConnectorSnapshot,
     type MobileConnectorStatus,
-    type MobileDeviceRequestHandler,
+    type MobileConnectorTransport,
+    type MobileCredential,
+    type MobileHandshakeStart,
+    type MobileHandshakeStatus,
     type MobileOwner,
 } from "./MobileConnector.js";
 import { MobileConnectorError } from "./MobileConnectorError.js";
@@ -64,7 +57,6 @@ const RECONCILE_LOCK = "mobile-connector-socket";
 const TAILCAT_EXPOSURE = "mobile";
 const LAST_SEEN_INTERVAL_MS = 60_000;
 const MAX_WAIT_SECONDS = 25;
-const PAIRING_PREFIX = "/mobile/v1/pairing/";
 /**
  * How long the socket stays open after a pairing ends, so the answer to the request that ended it
  * and the phone's woken status read can still be delivered before an unused socket closes.
@@ -74,12 +66,13 @@ const LINGER_MS = 3_000;
 /**
  * Phones pair with this daemon and then reach it directly over a dedicated Tailcat socket.
  *
- * The socket has its own Tailcat identity and forwards to this module's own loopback listener,
- * never to the main API. It is open only while a pairing is active or a device is paired, and a
- * restart reopens it when devices exist. Pairing is memory-only and single-use: a QR code holds a
- * five-minute token, the phone commits to its key before seeing the daemon's, and a device is
- * persisted, by the SHA-256 of its derived token, only after both people confirm the emoji. The
- * listener accepts the unauthenticated pairing routes and device tokens, nothing else.
+ * The socket has its own Tailcat identity and forwards to the API's mobile transport, attached
+ * by the daemon once it is listening. It is open only while a pairing is active or a device is
+ * paired, and a restart reopens it when devices exist. Pairing is memory-only and single-use: a QR
+ * code holds a five-minute token, the phone commits to its key before seeing the daemon's, and a
+ * device is persisted, by the SHA-256 of its derived token, only after both people confirm the
+ * emoji. The API asks `authenticate` about every credential on that transport before anything
+ * else, and serves the handshake through this module.
  */
 export class MobileConnectorModule implements AgentModule {
     readonly name = "mobileConnector";
@@ -100,15 +93,17 @@ export class MobileConnectorModule implements AgentModule {
     readonly #byHandshake = new Map<string, MobilePairing>();
     readonly #expiries = new Map<MobilePairing, NodeJS.Timeout>();
     readonly #versions = new Map<MobileOwner, { version: string; updatedAt: number }>();
-    readonly #deviceSockets = new Map<string, Set<Socket>>();
+    /** Aborted when a device is removed, closing every connection that authenticated as it. */
+    readonly #revocations = new Map<string, AbortController>();
+    /** Removed devices; IDs are never reused, so a lookup that raced a removal still fails. */
+    readonly #revoked = new Set<string>();
     readonly #lastTouched = new Map<string, number>();
     #ctx: Context | undefined;
     #closed = false;
     #status: MobileConnectorStatus;
     #error: string | null = null;
-    #listener: MobileListener | undefined;
+    #transport: MobileConnectorTransport | undefined;
     #exposure: TailcatNamedExposure | undefined;
-    #deviceHandler: MobileDeviceRequestHandler | undefined;
     #linger: NodeJS.Timeout | undefined;
 
     constructor(
@@ -138,17 +133,182 @@ export class MobileConnectorModule implements AgentModule {
     readonly beforeStart = (ctx: Context): AgentModuleHooks => {
         const root = withAgentDatabase(detach(ctx).named("mobile-connector"), ctx.db);
         this.#ctx = ctx.lifetime === undefined ? root : withLifetime(root, ctx.lifetime);
-        return {
-            afterStart: async () => {
-                // Reopening for existing devices must not hold up startup: Tailcat can take a
-                // while, and a failure is reported in the snapshot rather than failing the daemon.
-                const moduleCtx = this.#moduleContext();
-                void this.#reconcile(moduleCtx).catch((error: unknown) => {
-                    moduleCtx.log.warn("The mobile connector could not reopen.", {}, error);
-                });
-            },
-        };
+        return {};
     };
+
+    /**
+     * The API is listening for the connector's socket at `transport`. The exposure forwards there,
+     * so nothing opens before this; reopening for existing devices then runs in the background,
+     * because Tailcat can take a while and a failure belongs in the snapshot, not in startup.
+     */
+    attachTransport(ctx: Context, transport: MobileConnectorTransport): void {
+        if (this.#transport !== undefined) {
+            throw new Error("The mobile connector transport is already attached.");
+        }
+        this.#transport = { host: transport.host, port: transport.port };
+        const moduleCtx = this.#moduleContext(ctx);
+        void this.#reconcile(moduleCtx).catch((error: unknown) => {
+            moduleCtx.log.warn("The mobile connector could not reopen.", {}, error);
+        });
+    }
+
+    /**
+     * Identify a bearer credential presented on the connector's socket, or `undefined` when it is
+     * none this socket accepts. A device's `lastSeenAt` moves forward as a side effect.
+     */
+    async authenticate(
+        ctx: Context,
+        authorization: string | readonly string[] | undefined,
+    ): Promise<MobileCredential | undefined> {
+        if (this.#closed || !this.#config.mobileConnectorEnabled) return undefined;
+        const match =
+            typeof authorization === "string" ? MOBILE_BEARER_PATTERN.exec(authorization) : null;
+        const credential = match?.[1];
+        if (credential === undefined) return undefined;
+        const pairing = this.#byHandshake.get(credential);
+        if (pairing !== undefined) return { kind: "handshake", handshakeId: credential };
+        const hash = sha256Hex(credential);
+        const waiting = this.#byToken.get(hash);
+        if (waiting !== undefined && waiting.active && !waiting.isExpired(Date.now())) {
+            return { kind: "pairing", token: credential };
+        }
+        const stored = await queryMobileDeviceByTokenHash(ctx, hash);
+        if (stored === undefined || this.#revoked.has(stored.device.id)) return undefined;
+        const deviceId = stored.device.id;
+        let revocation = this.#revocations.get(deviceId);
+        if (revocation === undefined) {
+            revocation = new AbortController();
+            this.#revocations.set(deviceId, revocation);
+        }
+        await this.#touch(ctx, stored.owner, deviceId);
+        return { kind: "device", deviceId, owner: stored.owner, revoked: revocation.signal };
+    }
+
+    /**
+     * A phone used the QR code's token. It is consumed here, whatever happens next, so a leaked
+     * code gets one attempt; the phone learns the daemon's key and the handshake credential.
+     */
+    async startHandshake(
+        ctx: Context,
+        token: string,
+        body: unknown,
+    ): Promise<MobileHandshakeStart> {
+        const tokenHash = sha256Hex(token);
+        const started = await this.#pairingLock.runInLock(ctx, async () => {
+            const pairing = this.#byToken.get(tokenHash);
+            this.#byToken.delete(tokenHash);
+            if (pairing === undefined || this.#expireIfDue(pairing) || !pairing.active) {
+                throw unauthorized();
+            }
+            if (!Value.Check(handshakeStartRequestSchema, body)) {
+                pairing.end("failed", "The phone sent a malformed pairing request.");
+                this.#release(pairing);
+                return { pairing, answer: undefined };
+            }
+            const answer = pairing.start(Buffer.from(body.commitment, "base64url"), {
+                name: body.device.name,
+                platform: body.device.platform,
+            });
+            this.#byHandshake.set(answer.handshakeId, pairing);
+            return { pairing, answer };
+        });
+        this.#announce(ctx, [started.pairing.owner]);
+        if (started.answer === undefined) throw invalidRequest();
+        return started.answer;
+    }
+
+    /** The phone revealed the key it committed to; a mismatch ends the pairing. */
+    async revealHandshake(
+        ctx: Context,
+        handshakeId: string,
+        body: unknown,
+    ): Promise<MobileHandshakeStatus> {
+        if (!Value.Check(handshakeRevealRequestSchema, body)) throw invalidRequest();
+        const pairing = await this.#pairingLock.runInLock(ctx, async () => {
+            const current = this.#handshake(handshakeId);
+            if (!current.active) return current;
+            if (current.snapshot().status !== "waiting") {
+                throw new MobileConnectorError("conflict", "This pairing already has the key.");
+            }
+            const exposure = this.#exposure;
+            if (exposure === undefined) {
+                current.end("failed", "The phone connection socket closed.");
+            } else {
+                current.reveal(
+                    Buffer.from(body.publicKey, "base64url"),
+                    Buffer.from(body.nonce, "base64url"),
+                    exposure.address,
+                    exposure.port,
+                );
+            }
+            if (!current.active) this.#release(current);
+            return current;
+        });
+        this.#announce(ctx, [pairing.owner]);
+        return pairing.phoneStatus();
+    }
+
+    /** The person on the phone says the emoji match; the MAC proves the phone's keys. */
+    async confirmHandshake(
+        ctx: Context,
+        handshakeId: string,
+        body: unknown,
+    ): Promise<MobileHandshakeStatus> {
+        if (!Value.Check(handshakeConfirmRequestSchema, body)) throw invalidRequest();
+        const pairing = await this.#pairingLock.runInLock(ctx, async () => {
+            const current = this.#handshake(handshakeId);
+            if (!current.active) return current;
+            if (current.snapshot().status !== "verifying") {
+                throw new MobileConnectorError(
+                    "conflict",
+                    "This pairing is not waiting for emoji confirmation.",
+                );
+            }
+            current.confirmMobile(Buffer.from(body.mac, "base64url"));
+            if (!current.active) {
+                this.#release(current);
+                return current;
+            }
+            await this.#completeIfReady(ctx, current);
+            return current;
+        });
+        this.#announce(ctx, [pairing.owner]);
+        return pairing.phoneStatus();
+    }
+
+    /** The person on the phone says the emoji do not match. */
+    async rejectHandshake(ctx: Context, handshakeId: string): Promise<MobileHandshakeStatus> {
+        const pairing = await this.#pairingLock.runInLock(ctx, async () => {
+            const current = this.#handshake(handshakeId);
+            if (!current.active) return current;
+            current.end("rejected");
+            this.#release(current);
+            return current;
+        });
+        this.#announce(ctx, [pairing.owner]);
+        return pairing.phoneStatus();
+    }
+
+    /**
+     * Long-poll: answer once the handshake changes, after `waitSeconds` (at most 25), or when
+     * `signal` aborts, whichever is first. A finished handshake answers at once.
+     */
+    async handshakeStatus(
+        handshakeId: string,
+        waitSeconds: number,
+        signal: AbortSignal,
+    ): Promise<MobileHandshakeStatus> {
+        const pairing = this.#byHandshake.get(handshakeId);
+        if (pairing === undefined) throw unauthorized();
+        const seconds = Number.isInteger(waitSeconds)
+            ? Math.min(Math.max(waitSeconds, 0), MAX_WAIT_SECONDS)
+            : 0;
+        if (pairing.phoneStatus().status === "verifying") {
+            await pairing.waitForChange(seconds * 1_000, signal);
+        }
+        this.#expireIfDue(pairing);
+        return pairing.phoneStatus();
+    }
 
     /** The caller's view: the socket, their pairing, and their paired devices. */
     async snapshot(ctx: Context): Promise<MobileConnectorSnapshot> {
@@ -251,7 +411,7 @@ export class MobileConnectorModule implements AgentModule {
         return await this.#snapshotFor(ctx, owner);
     }
 
-    /** Forget one of the caller's phones and close every request it has open. */
+    /** Forget one of the caller's phones and close every connection it has open. */
     async revokeDevice(ctx: Context, deviceId: string): Promise<MobileConnectorSnapshot> {
         const owner = this.#owner(ctx);
         await ctx.inTx(async (txCtx) => {
@@ -260,8 +420,9 @@ export class MobileConnectorModule implements AgentModule {
             }
             await this.#scheduleReconcile(txCtx);
             afterCommit(txCtx, async () => {
-                for (const socket of this.#deviceSockets.get(deviceId) ?? []) socket.destroy();
-                this.#deviceSockets.delete(deviceId);
+                this.#revoked.add(deviceId);
+                this.#revocations.get(deviceId)?.abort();
+                this.#revocations.delete(deviceId);
                 this.#lastTouched.delete(deviceId);
             });
             this.#announce(txCtx, [owner]);
@@ -274,20 +435,6 @@ export class MobileConnectorModule implements AgentModule {
         this.#listeners.add(listener);
         return () => {
             this.#listeners.delete(listener);
-        };
-    }
-
-    /**
-     * Serve requests that carried a valid device token, with the device's owner as authority.
-     * Until something is registered, such requests are answered as unavailable.
-     */
-    serveDeviceRequests(handler: MobileDeviceRequestHandler): () => void {
-        if (this.#deviceHandler !== undefined) {
-            throw new Error("Mobile device requests already have a handler.");
-        }
-        this.#deviceHandler = handler;
-        return () => {
-            if (this.#deviceHandler === handler) this.#deviceHandler = undefined;
         };
     }
 
@@ -358,239 +505,24 @@ export class MobileConnectorModule implements AgentModule {
     }
 
     async #openSocket(ctx: Context): Promise<void> {
-        const listener = await startMobileListener(
-            async (request, response) => await this.#handle(request, response),
-        );
-        this.#listener = listener;
+        const transport = this.#transport;
+        if (transport === undefined) {
+            throw new Error("The phone connection socket is not ready yet.");
+        }
         this.#exposure = await this.#tailcat.openExposure(ctx, {
             name: TAILCAT_EXPOSURE,
             port: this.#config.mobileConnectorPort,
-            target: { host: "127.0.0.1", port: listener.port },
+            target: transport,
         });
     }
 
     async #closeSocket(): Promise<void> {
         const exposure = this.#exposure;
-        const listener = this.#listener;
         this.#exposure = undefined;
-        this.#listener = undefined;
         await exposure?.close();
-        await listener?.close();
-        this.#deviceSockets.clear();
     }
 
-    // Phone-facing HTTP.
-
-    async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
-        const url = new URL(request.url ?? "/", "http://mobile.invalid");
-        try {
-            if (this.#closed) throw new MobileConnectorError("unsupported", "Shutting down.");
-            if (url.pathname.startsWith(PAIRING_PREFIX)) {
-                await this.#handlePairing(request, response, url);
-                return;
-            }
-            await this.#handleDevice(request, response);
-        } catch (error: unknown) {
-            if (response.headersSent) {
-                response.destroy();
-                return;
-            }
-            if (error instanceof MobileConnectorError) {
-                sendMobileJson(response, error.status, { error: error.message, code: error.code });
-                return;
-            }
-            this.#moduleContext().log.warn("A mobile request failed.", {}, error);
-            sendMobileJson(response, 500, { error: "Internal error.", code: "internal" });
-        }
-    }
-
-    async #handlePairing(request: IncomingMessage, response: ServerResponse, url: URL) {
-        const ctx = this.#requestContext();
-        const route = url.pathname.slice(PAIRING_PREFIX.length);
-        if (request.method === "GET" && Value.Check(handshakeIdSchema, route)) {
-            sendMobileJson(response, 200, await this.#phoneStatus(request, route, url));
-            return;
-        }
-        if (request.method !== "POST") {
-            throw new MobileConnectorError("not_found", "Not found.");
-        }
-        const body = await readMobileJsonBody(request);
-        if (route === "start") {
-            if (!Value.Check(pairingStartRequestSchema, body)) throw invalidRequest();
-            sendMobileJson(response, 200, await this.#phoneStart(ctx, body));
-            return;
-        }
-        if (route === "reveal") {
-            if (!Value.Check(pairingRevealRequestSchema, body)) throw invalidRequest();
-            sendMobileJson(response, 200, await this.#phoneReveal(ctx, body));
-            return;
-        }
-        if (route === "confirm") {
-            if (!Value.Check(pairingConfirmRequestSchema, body)) throw invalidRequest();
-            sendMobileJson(response, 200, await this.#phoneConfirm(ctx, body));
-            return;
-        }
-        if (route === "reject") {
-            if (!Value.Check(pairingRejectRequestSchema, body)) throw invalidRequest();
-            sendMobileJson(response, 200, await this.#phoneReject(ctx, body.handshakeId));
-            return;
-        }
-        throw new MobileConnectorError("not_found", "Not found.");
-    }
-
-    async #phoneStart(
-        ctx: Context,
-        body: {
-            readonly token: string;
-            readonly commitment: string;
-            readonly device: {
-                readonly name: string;
-                readonly platform: "ios" | "android" | "other";
-            };
-        },
-    ) {
-        const tokenHash = createHash("sha256")
-            .update(Buffer.from(body.token, "base64url"))
-            .digest("hex");
-        const started = await this.#pairingLock.runInLock(ctx, async () => {
-            const pairing = this.#byToken.get(tokenHash);
-            // Consumed at first use, whatever happens next: a leaked code gets one attempt.
-            this.#byToken.delete(tokenHash);
-            if (pairing === undefined || this.#expireIfDue(pairing) || !pairing.active) {
-                return undefined;
-            }
-            const answer = pairing.start(Buffer.from(body.commitment, "base64url"), {
-                name: body.device.name,
-                platform: body.device.platform,
-            });
-            this.#byHandshake.set(answer.handshakeId, pairing);
-            return { pairing, answer };
-        });
-        if (started === undefined) {
-            throw new MobileConnectorError("not_found", "This pairing code is no longer valid.");
-        }
-        this.#announce(ctx, [started.pairing.owner]);
-        return started.answer;
-    }
-
-    async #phoneReveal(
-        ctx: Context,
-        body: { readonly handshakeId: string; readonly publicKey: string; readonly nonce: string },
-    ): Promise<MobilePairingPhoneStatus> {
-        const pairing = await this.#pairingLock.runInLock(ctx, async () => {
-            const current = this.#handshake(body.handshakeId);
-            if (!current.active) return current;
-            if (current.snapshot().status !== "waiting") {
-                throw new MobileConnectorError("conflict", "This pairing already has the key.");
-            }
-            const exposure = this.#exposure;
-            if (exposure === undefined) {
-                current.end("failed", "The phone connection socket closed.");
-            } else {
-                current.reveal(
-                    Buffer.from(body.publicKey, "base64url"),
-                    Buffer.from(body.nonce, "base64url"),
-                    exposure.address,
-                    exposure.port,
-                );
-            }
-            if (!current.active) this.#release(current);
-            return current;
-        });
-        this.#announce(ctx, [pairing.owner]);
-        return pairing.phoneStatus();
-    }
-
-    async #phoneConfirm(
-        ctx: Context,
-        body: { readonly handshakeId: string; readonly mac: string },
-    ): Promise<MobilePairingPhoneStatus> {
-        const pairing = await this.#pairingLock.runInLock(ctx, async () => {
-            const current = this.#handshake(body.handshakeId);
-            if (!current.active) return current;
-            if (current.snapshot().status !== "verifying") {
-                throw new MobileConnectorError(
-                    "conflict",
-                    "This pairing is not waiting for emoji confirmation.",
-                );
-            }
-            current.confirmMobile(Buffer.from(body.mac, "base64url"));
-            if (!current.active) {
-                this.#release(current);
-                return current;
-            }
-            await this.#completeIfReady(ctx, current);
-            return current;
-        });
-        this.#announce(ctx, [pairing.owner]);
-        return pairing.phoneStatus();
-    }
-
-    async #phoneReject(ctx: Context, handshakeId: string): Promise<MobilePairingPhoneStatus> {
-        const pairing = await this.#pairingLock.runInLock(ctx, async () => {
-            const current = this.#handshake(handshakeId);
-            if (!current.active) return current;
-            current.end("rejected");
-            this.#release(current);
-            return current;
-        });
-        this.#announce(ctx, [pairing.owner]);
-        return pairing.phoneStatus();
-    }
-
-    /** Long-poll: answer once the pairing changes, or after `wait` seconds at most. */
-    async #phoneStatus(
-        request: IncomingMessage,
-        handshakeId: string,
-        url: URL,
-    ): Promise<MobilePairingPhoneStatus> {
-        const pairing = this.#byHandshake.get(handshakeId);
-        if (pairing === undefined) {
-            throw new MobileConnectorError("not_found", "This pairing is no longer known.");
-        }
-        const wait = Number(url.searchParams.get("wait") ?? "0");
-        const seconds = Number.isInteger(wait) ? Math.min(Math.max(wait, 0), MAX_WAIT_SECONDS) : 0;
-        if (pairing.phoneStatus().status === "verifying") {
-            const aborted = new AbortController();
-            request.once("close", () => aborted.abort());
-            await pairing.waitForChange(seconds * 1_000, aborted.signal);
-        }
-        this.#expireIfDue(pairing);
-        return pairing.phoneStatus();
-    }
-
-    async #handleDevice(request: IncomingMessage, response: ServerResponse): Promise<void> {
-        const authorization = request.headers.authorization;
-        const match =
-            typeof authorization === "string" ? DEVICE_TOKEN_PATTERN.exec(authorization) : null;
-        const token = match?.[1];
-        if (token === undefined) throw unauthorized();
-        const ctx = this.#requestContext();
-        const tokenHash = createHash("sha256")
-            .update(Buffer.from(token, "base64url"))
-            .digest("hex");
-        const stored = await queryMobileDeviceByTokenHash(ctx, tokenHash);
-        if (stored === undefined) throw unauthorized();
-        const deviceId = stored.device.id;
-        let sockets = this.#deviceSockets.get(deviceId);
-        if (sockets === undefined) {
-            sockets = new Set();
-            this.#deviceSockets.set(deviceId, sockets);
-        }
-        const socket = request.socket;
-        const tracked = sockets;
-        tracked.add(socket);
-        socket.once("close", () => tracked.delete(socket));
-        await this.#touch(ctx, stored.owner, deviceId);
-        const handler = this.#deviceHandler;
-        if (handler === undefined) {
-            throw new MobileConnectorError(
-                "unsupported",
-                "This computer does not serve phone requests yet.",
-            );
-        }
-        await handler(ctx, { deviceId, owner: stored.owner }, request, response);
-    }
+    // Phone-facing bookkeeping.
 
     /** Record that a device was seen, at most once a minute. */
     async #touch(ctx: Context, owner: MobileOwner, deviceId: string): Promise<void> {
@@ -605,12 +537,10 @@ export class MobileConnectorModule implements AgentModule {
 
     // Pairing bookkeeping. Every caller holds the pairing lock.
 
-    /** The pairing a phone is talking about, expired first if its time is up; 404 if unknown. */
+    /** The pairing a phone is talking about, expired first if its time is up; 401 if unknown. */
     #handshake(handshakeId: string): MobilePairing {
         const pairing = this.#byHandshake.get(handshakeId);
-        if (pairing === undefined) {
-            throw new MobileConnectorError("not_found", "This pairing is no longer known.");
-        }
+        if (pairing === undefined) throw unauthorized();
         this.#expireIfDue(pairing);
         return pairing;
     }
@@ -748,8 +678,15 @@ export class MobileConnectorModule implements AgentModule {
             const eventCtx = this.#moduleContext(ctx);
             for (const owner of affected) {
                 this.#bump(owner);
-                if (this.#listeners.size === 0) continue;
-                const mobileConnector = await this.#snapshotFor(eventCtx, owner);
+                // Nobody is left to tell once the module stops, and its database may be gone.
+                if (this.#listeners.size === 0 || this.#closed) continue;
+                let mobileConnector: MobileConnectorSnapshot;
+                try {
+                    mobileConnector = await this.#snapshotFor(eventCtx, owner);
+                } catch (error: unknown) {
+                    eventCtx.log.warn("A mobile connector snapshot could not be read.", {}, error);
+                    continue;
+                }
                 for (const listener of Array.from(this.#listeners)) {
                     try {
                         await listener(eventCtx, { owner, mobileConnector });
@@ -765,12 +702,6 @@ export class MobileConnectorModule implements AgentModule {
         if (this.#closed) {
             throw new MobileConnectorError("unsupported", "The mobile connector has stopped.");
         }
-    }
-
-    #requestContext(): Context {
-        const root = this.#moduleContext();
-        const request = withAgentDatabase(detach(root).named("mobile-request"), root.db);
-        return root.lifetime === undefined ? request : withLifetime(request, root.lifetime);
     }
 
     #moduleContext(fallback?: Context): Context {
@@ -789,6 +720,10 @@ function encodeQr(bundle: {
     readonly e: number;
 }): string {
     return `happy://direct?${Buffer.from(JSON.stringify(bundle), "utf8").toString("base64url")}`;
+}
+
+function sha256Hex(base64url: string): string {
+    return createHash("sha256").update(Buffer.from(base64url, "base64url")).digest("hex");
 }
 
 function invalidRequest(): MobileConnectorError {

@@ -4,8 +4,16 @@ import { agentDatabaseRows } from "@slopus/happy-agent-base";
 import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// The phone is a test-only implementation written from API_MOBILE.md, independent of `impl/`.
-import { commitment, parseQr, phoneKey, startPhonePairing } from "./support/fakePhone.js";
+// The phone is a test-only implementation written from API.md, independent of `impl/`.
+import {
+    commitment,
+    parseQr,
+    phoneKey,
+    phoneRequest,
+    startPhonePairing,
+    type PhoneTransport,
+} from "./support/fakePhone.js";
+import { moduleTransport } from "./support/moduleTransport.js";
 import {
     MobileConnectorError,
     type MobileConnectorSnapshot,
@@ -15,6 +23,7 @@ import { pendingCallCount } from "../durableFunctions/support/durableFunctionsHa
 import {
     FAKE_TAILCAT_ADDRESS,
     mobileConnectorWorld,
+    UNUSED_TRANSPORT,
     type MobileConnectorWorld,
 } from "./support/mobileConnectorWorld.js";
 
@@ -34,21 +43,10 @@ async function world(options: Partial<Parameters<typeof mobileConnectorWorld>[0]
     return created;
 }
 
-const baseUrl = `http://127.0.0.1:${String(PORT)}`;
+const HANDSHAKE = "/v0/mobile-connector/handshake";
 
-async function request(
-    path: string,
-    init: { method?: string; body?: unknown; token?: string } = {},
-): Promise<{ status: number; body: unknown }> {
-    const response = await fetch(`${baseUrl}${path}`, {
-        method: init.method ?? (init.body === undefined ? "GET" : "POST"),
-        headers: {
-            ...(init.body === undefined ? {} : { "content-type": "application/json" }),
-            ...(init.token === undefined ? {} : { authorization: `Bearer ${init.token}` }),
-        },
-        ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
-    });
-    return { status: response.status, body: await response.json().catch(() => null) };
+function phone(target: MobileConnectorWorld): PhoneTransport {
+    return moduleTransport(target.mobile, target.ctx);
 }
 
 async function storedDevices(target: MobileConnectorWorld) {
@@ -72,7 +70,7 @@ async function waitForStatus(
 
 async function pairedPhone(target: MobileConnectorWorld) {
     const started = await target.mobile.startPairing(target.ctx);
-    const session = await startPhonePairing(started.pairing!.qr!, baseUrl);
+    const session = await startPhonePairing(started.pairing!.qr!, phone(target));
     await target.mobile.confirmPairing(target.ctx, started.pairing!.id);
     return await session.confirm();
 }
@@ -95,7 +93,7 @@ describe("MobileConnectorModule", () => {
         expect(qr).toMatchObject({ v: 1, a: FAKE_TAILCAT_ADDRESS, p: PORT, n: "Test Mac" });
         expect(qr.e).toBe(started.pairing!.expiresAt);
 
-        const session = await startPhonePairing(started.pairing!.qr!, baseUrl);
+        const session = await startPhonePairing(started.pairing!.qr!, phone(target));
         const verifying = await target.mobile.snapshot(target.ctx);
         expect(verifying.pairing).toMatchObject({
             status: "verifying",
@@ -146,54 +144,60 @@ describe("MobileConnectorModule", () => {
     it("completes in either order of confirmation", async () => {
         const target = await world();
         const started = await target.mobile.startPairing(target.ctx);
-        const session = await startPhonePairing(started.pairing!.qr!, baseUrl);
+        const session = await startPhonePairing(started.pairing!.qr!, phone(target));
         await target.mobile.confirmPairing(target.ctx, started.pairing!.id);
         expect((await target.mobile.snapshot(target.ctx)).pairing?.desktopConfirmed).toBe(true);
         await expect(session.confirm()).resolves.toMatchObject({ address: FAKE_TAILCAT_ADDRESS });
         expect(await storedDevices(target)).toHaveLength(1);
     });
 
-    it("accepts only device tokens on the mobile listener and serves them as their owner", async () => {
+    it("knows each credential only while it can be used", async () => {
         const target = await world();
-        const paired = await pairedPhone(target);
-
-        await expect(request("/v0/health")).resolves.toEqual({
-            status: 401,
-            body: { error: "Unauthorized", code: "unauthorized" },
+        const started = await target.mobile.startPairing(target.ctx);
+        const token = parseQr(started.pairing!.qr!).t;
+        await expect(target.mobile.authenticate(target.ctx, `Bearer ${token}`)).resolves.toEqual({
+            kind: "pairing",
+            token,
         });
+        const session = await startPhonePairing(started.pairing!.qr!, phone(target));
+        // The token was consumed by the start, and the handshake credential replaced it.
+        await expect(target.mobile.authenticate(target.ctx, `Bearer ${token}`)).resolves.toBe(
+            undefined,
+        );
         await expect(
-            request("/v0/health", { token: randomBytes(32).toString("base64url") }),
-        ).resolves.toMatchObject({ status: 401 });
-        await expect(request("/v0/health", { token: "local-api-token" })).resolves.toMatchObject({
-            status: 401,
-        });
-        await expect(request("/v0/health", { token: paired.deviceToken })).resolves.toMatchObject({
-            status: 503,
-            body: { code: "unsupported" },
-        });
+            target.mobile.authenticate(target.ctx, `Bearer ${session.handshakeId}`),
+        ).resolves.toEqual({ kind: "handshake", handshakeId: session.handshakeId });
+        await target.mobile.confirmPairing(target.ctx, started.pairing!.id);
+        const paired = await session.confirm();
 
-        const seen: unknown[] = [];
-        target.mobile.serveDeviceRequests(async (_ctx, caller, incoming, response) => {
-            seen.push({ ...caller, url: incoming.url });
-            response.writeHead(200, { "content-type": "application/json" });
-            response.end(JSON.stringify({ ok: true }));
+        const device = await target.mobile.authenticate(target.ctx, `Bearer ${paired.deviceToken}`);
+        expect(device).toMatchObject({
+            kind: "device",
+            deviceId: paired.deviceId,
+            owner: "standalone",
         });
-        await expect(request("/v0/health", { token: paired.deviceToken })).resolves.toEqual({
-            status: 200,
-            body: { ok: true },
-        });
-        expect(seen).toEqual([
-            { deviceId: paired.deviceId, owner: "standalone", url: "/v0/health" },
-        ]);
+        for (const authorization of [
+            undefined,
+            "",
+            paired.deviceToken,
+            `Basic ${paired.deviceToken}`,
+            `Bearer ${randomBytes(32).toString("base64url")}`,
+            "Bearer local-api-token",
+            ["Bearer x", `Bearer ${paired.deviceToken}`],
+        ]) {
+            await expect(target.mobile.authenticate(target.ctx, authorization)).resolves.toBe(
+                undefined,
+            );
+        }
     });
 
     it("lets a leaked code start once and never pair without the desktop person", async () => {
         const target = await world();
         const started = await target.mobile.startPairing(target.ctx);
-        const attacker = await startPhonePairing(started.pairing!.qr!, baseUrl);
-        await expect(startPhonePairing(started.pairing!.qr!, baseUrl)).rejects.toMatchObject({
-            code: "not_found",
-            status: 404,
+        const attacker = await startPhonePairing(started.pairing!.qr!, phone(target));
+        await expect(startPhonePairing(started.pairing!.qr!, phone(target))).rejects.toMatchObject({
+            code: "unauthorized",
+            status: 401,
         });
 
         const confirming = attacker.confirm();
@@ -218,7 +222,7 @@ describe("MobileConnectorModule", () => {
     it("leaves nothing behind when the phone says the emoji differ", async () => {
         const target = await world();
         const started = await target.mobile.startPairing(target.ctx);
-        const session = await startPhonePairing(started.pairing!.qr!, baseUrl);
+        const session = await startPhonePairing(started.pairing!.qr!, phone(target));
         await session.reject();
         expect((await target.mobile.snapshot(target.ctx)).pairing?.status).toBe("rejected");
         await expect(
@@ -234,32 +238,39 @@ describe("MobileConnectorModule", () => {
         const qr = parseQr(started.pairing!.qr!);
         const committed = phoneKey();
         const nonce = randomBytes(32);
-        const start = await request("/mobile/v1/pairing/start", {
-            body: {
-                token: qr.t,
-                commitment: commitment(committed.publicKey, nonce).toString("base64url"),
-                device,
-            },
-        });
-        expect(start.status).toBe(200);
-        const handshakeId = (start.body as { handshakeId: string }).handshakeId;
+        const { handshakeId } = await phoneRequest<{ handshakeId: string }>(
+            phone(target),
+            "POST",
+            HANDSHAKE,
+            qr.t,
+            { commitment: commitment(committed.publicKey, nonce).toString("base64url"), device },
+        );
         const other = phoneKey();
         await expect(
-            request("/mobile/v1/pairing/reveal", {
-                body: {
-                    handshakeId,
-                    publicKey: other.publicKey.toString("base64url"),
-                    nonce: nonce.toString("base64url"),
-                },
+            phoneRequest(phone(target), "POST", `${HANDSHAKE}/reveal`, handshakeId, {
+                publicKey: other.publicKey.toString("base64url"),
+                nonce: nonce.toString("base64url"),
             }),
-        ).resolves.toEqual({ status: 200, body: { status: "rejected" } });
+        ).resolves.toEqual({ status: "rejected" });
         expect((await target.mobile.snapshot(target.ctx)).pairing).toMatchObject({
             status: "failed",
             error: "The phone's key did not match the one it committed to.",
         });
-        await expect(request(`/mobile/v1/pairing/${handshakeId}`)).resolves.toEqual({
-            status: 200,
-            body: { status: "rejected" },
+        await expect(phoneRequest(phone(target), "GET", HANDSHAKE, handshakeId)).resolves.toEqual({
+            status: "rejected",
+        });
+    });
+
+    it("spends the code on a malformed start", async () => {
+        const target = await world();
+        const started = await target.mobile.startPairing(target.ctx);
+        const qr = parseQr(started.pairing!.qr!);
+        await expect(
+            phoneRequest(phone(target), "POST", HANDSHAKE, qr.t, { commitment: "short", device }),
+        ).rejects.toMatchObject({ status: 400, code: "invalid_request" });
+        expect((await target.mobile.snapshot(target.ctx)).pairing?.status).toBe("failed");
+        await expect(startPhonePairing(started.pairing!.qr!, phone(target))).rejects.toMatchObject({
+            status: 401,
         });
     });
 
@@ -269,27 +280,23 @@ describe("MobileConnectorModule", () => {
         const qr = parseQr(started.pairing!.qr!);
         const keys = phoneKey();
         const nonce = randomBytes(32);
-        const start = await request("/mobile/v1/pairing/start", {
-            body: {
-                token: qr.t,
-                commitment: commitment(keys.publicKey, nonce).toString("base64url"),
-                device,
-            },
-        });
-        const handshakeId = (start.body as { handshakeId: string }).handshakeId;
-        await request("/mobile/v1/pairing/reveal", {
-            body: {
-                handshakeId,
-                publicKey: keys.publicKey.toString("base64url"),
-                nonce: nonce.toString("base64url"),
-            },
+        const { handshakeId } = await phoneRequest<{ handshakeId: string }>(
+            phone(target),
+            "POST",
+            HANDSHAKE,
+            qr.t,
+            { commitment: commitment(keys.publicKey, nonce).toString("base64url"), device },
+        );
+        await phoneRequest(phone(target), "POST", `${HANDSHAKE}/reveal`, handshakeId, {
+            publicKey: keys.publicKey.toString("base64url"),
+            nonce: nonce.toString("base64url"),
         });
         await target.mobile.confirmPairing(target.ctx, started.pairing!.id);
         await expect(
-            request("/mobile/v1/pairing/confirm", {
-                body: { handshakeId, mac: randomBytes(32).toString("base64url") },
+            phoneRequest(phone(target), "POST", `${HANDSHAKE}/confirm`, handshakeId, {
+                mac: randomBytes(32).toString("base64url"),
             }),
-        ).resolves.toEqual({ status: 200, body: { status: "rejected" } });
+        ).resolves.toEqual({ status: "rejected" });
         expect((await target.mobile.snapshot(target.ctx)).pairing?.status).toBe("failed");
         expect(await storedDevices(target)).toEqual([]);
     });
@@ -297,7 +304,7 @@ describe("MobileConnectorModule", () => {
     it("expires a pairing that is not finished within five minutes", async () => {
         const target = await world();
         const started = await target.mobile.startPairing(target.ctx);
-        const session = await startPhonePairing(started.pairing!.qr!, baseUrl);
+        const session = await startPhonePairing(started.pairing!.qr!, phone(target));
         const now = Date.now();
         vi.spyOn(Date, "now").mockReturnValue(now + 5 * 60 * 1_000);
         await expect(
@@ -311,7 +318,7 @@ describe("MobileConnectorModule", () => {
     it("completes only when the device row commits with the caller's transaction", async () => {
         const target = await world();
         const started = await target.mobile.startPairing(target.ctx);
-        const session = await startPhonePairing(started.pairing!.qr!, baseUrl);
+        const session = await startPhonePairing(started.pairing!.qr!, phone(target));
         const confirming = session.confirm();
         confirming.catch(() => undefined);
         await vi.waitFor(async () => {
@@ -346,7 +353,7 @@ describe("MobileConnectorModule", () => {
     it("removes the device again when the pairing ended before its commit was seen", async () => {
         const target = await world();
         const started = await target.mobile.startPairing(target.ctx);
-        const session = await startPhonePairing(started.pairing!.qr!, baseUrl);
+        const session = await startPhonePairing(started.pairing!.qr!, phone(target));
         const confirming = session.confirm();
         confirming.catch(() => undefined);
         await vi.waitFor(async () => {
@@ -368,41 +375,27 @@ describe("MobileConnectorModule", () => {
         const first = await target.mobile.startPairing(target.ctx);
         const second = await target.mobile.startPairing(target.ctx);
         expect(second.pairing?.id).not.toBe(first.pairing?.id);
-        await expect(startPhonePairing(first.pairing!.qr!, baseUrl)).rejects.toMatchObject({
-            code: "not_found",
+        await expect(startPhonePairing(first.pairing!.qr!, phone(target))).rejects.toMatchObject({
+            code: "unauthorized",
         });
         await expect(
             target.mobile.confirmPairing(target.ctx, first.pairing!.id),
         ).rejects.toMatchObject({ code: "not_found" });
     });
 
-    it("revokes a device, closing its live requests and then the unused socket", async () => {
+    it("revokes a device, signalling its connections to close, then closes the unused socket", async () => {
         const target = await world();
         const paired = await pairedPhone(target);
-        let entered!: () => void;
-        const inside = new Promise<void>((resolve) => {
-            entered = resolve;
-        });
-        target.mobile.serveDeviceRequests(async (_ctx, _caller, _incoming, response) => {
-            response.writeHead(200, { "content-type": "text/event-stream" });
-            response.write(": open\n\n");
-            entered();
-            await new Promise(() => undefined);
-        });
-        const stream = await fetch(`${baseUrl}/v0/events`, {
-            headers: { authorization: `Bearer ${paired.deviceToken}` },
-        });
-        const reader = stream.body!.getReader();
-        await reader.read();
-        await inside;
+        const device = await target.mobile.authenticate(target.ctx, `Bearer ${paired.deviceToken}`);
+        if (device?.kind !== "device") throw new Error("The device token was not accepted.");
+        expect(device.revoked.aborted).toBe(false);
 
         const revoked = await target.mobile.revokeDevice(target.ctx, paired.deviceId);
         expect(revoked.devices).toEqual([]);
+        expect(device.revoked.aborted).toBe(true);
         await expect(
-            (async () => {
-                while (!(await reader.read()).done);
-            })(),
-        ).rejects.toThrow();
+            target.mobile.authenticate(target.ctx, `Bearer ${paired.deviceToken}`),
+        ).resolves.toBe(undefined);
         await waitForStatus(target, "closed");
         await expect(target.mobile.revokeDevice(target.ctx, paired.deviceId)).rejects.toThrow(
             MobileConnectorError,
@@ -412,6 +405,11 @@ describe("MobileConnectorModule", () => {
     it("joins its caller's transaction when revoking, so a rollback keeps the device", async () => {
         const target = await world();
         const paired = await pairedPhone(target);
+        const device = await target.mobile.authenticate(target.ctx, `Bearer ${paired.deviceToken}`);
+        // The pairing's own reconciliation must have run, so only the revoke's is counted.
+        await vi.waitFor(async () => {
+            expect(await pendingCallCount(target.ctx)).toBe(0);
+        });
         const announced = target.events.length;
         await expect(
             target.ctx.inTx(async (txCtx) => {
@@ -427,34 +425,42 @@ describe("MobileConnectorModule", () => {
                 .slice(announced)
                 .some((event) => event.mobileConnector.devices.length === 0),
         ).toBe(false);
-        target.mobile.serveDeviceRequests(async (_ctx, _caller, _incoming, response) => {
-            response.writeHead(204);
-            response.end();
-        });
-        const response = await fetch(`${baseUrl}/v0/health`, {
-            headers: { authorization: `Bearer ${paired.deviceToken}` },
-        });
-        expect(response.status).toBe(204);
+        expect(device?.kind === "device" && device.revoked.aborted).toBe(false);
+        await expect(
+            target.mobile.authenticate(target.ctx, `Bearer ${paired.deviceToken}`),
+        ).resolves.toMatchObject({ kind: "device", deviceId: paired.deviceId });
     });
 
-    it("reopens the socket at startup when devices exist and keeps their tokens working", async () => {
+    it("reopens the socket once the transport is attached when devices exist", async () => {
         const first = await world();
         const paired = await pairedPhone(first);
         await first.stop();
-        await expect(request("/v0/health", { token: paired.deviceToken })).rejects.toThrow();
 
-        const restarted = await mobileConnectorWorld({ port: PORT, after: first });
+        const restarted = await mobileConnectorWorld({
+            port: PORT,
+            after: first,
+            detached: true,
+        });
         worlds.push({ ...restarted, close: restarted.stop });
+        // Nothing can be exposed before the API listens for it.
+        expect((await restarted.mobile.snapshot(restarted.ctx)).status).toBe("closed");
+        restarted.mobile.attachTransport(restarted.ctx, UNUSED_TRANSPORT);
         await waitForStatus(restarted, "open");
-        restarted.mobile.serveDeviceRequests(async (_ctx, _caller, _incoming, response) => {
-            response.writeHead(204);
-            response.end();
-        });
-        const response = await fetch(`${baseUrl}/v0/health`, {
-            headers: { authorization: `Bearer ${paired.deviceToken}` },
-        });
-        expect(response.status).toBe(204);
+        await expect(
+            restarted.mobile.authenticate(restarted.ctx, `Bearer ${paired.deviceToken}`),
+        ).resolves.toMatchObject({ kind: "device", deviceId: paired.deviceId });
         expect((await restarted.mobile.snapshot(restarted.ctx)).pairing).toBeNull();
+    });
+
+    it("fails a pairing started before the transport is attached", async () => {
+        const target = await world({ detached: true });
+        const started = await target.mobile.startPairing(target.ctx);
+        expect(started.status).toBe("failed");
+        expect(started.pairing).toMatchObject({
+            status: "failed",
+            qr: null,
+            error: "The phone connection socket is not ready yet.",
+        });
     });
 
     it("announces each owner's snapshots with increasing versions", async () => {
@@ -487,7 +493,7 @@ describe("MobileConnectorModule", () => {
         const bob = member(target.ctx, "bob00000000000000000000002");
         await expect(target.mobile.snapshot(target.ctx)).rejects.toThrow();
         const started = await target.mobile.startPairing(alice);
-        const session = await startPhonePairing(started.pairing!.qr!, baseUrl);
+        const session = await startPhonePairing(started.pairing!.qr!, phone(target));
         await expect(target.mobile.confirmPairing(bob, started.pairing!.id)).rejects.toMatchObject({
             code: "not_found",
         });

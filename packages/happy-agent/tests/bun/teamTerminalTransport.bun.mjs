@@ -32,7 +32,7 @@ test("team terminal upgrades survive asynchronous authentication and carry binar
     const prepared = {
         context: () => ({}),
         api: {
-            listenWorkspaceProxyTcp: (token) => proxy.listenTcp(token),
+            listenWorkspaceProxyTcp: () => proxy.listenTcp(),
             handleRequest: (_ctx, _request, response) => {
                 response.end("healthy");
                 return Promise.resolve();

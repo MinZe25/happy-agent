@@ -56,6 +56,8 @@ interface ClientState extends OutboundState {
     phase: "connecting" | "headers" | "proxy_headers" | "raw" | "routing";
     /** The workspace proxy route of a folder on a runner, whose connections are made there. */
     proxyRoute: string | undefined;
+    /** Stops watching the credential that admitted this tunnel, once the tunnel closes. */
+    release?: (() => void) | undefined;
     upstream: BunSocket | undefined;
 }
 
@@ -244,6 +246,17 @@ function routeInitialRequest(
                 if ("rejection" in prepared) {
                     rejectSocket(socket, prepared.rejection);
                     return;
+                }
+                const revoked = prepared.revoked;
+                if (revoked?.aborted === true) {
+                    closeBridge(socket);
+                    return;
+                }
+                if (revoked !== undefined) {
+                    // A withdrawn credential, such as a removed phone's, ends its tunnel at once.
+                    const close = () => closeBridge(socket);
+                    revoked.addEventListener("abort", close, { once: true });
+                    state.release = () => revoked.removeEventListener("abort", close);
                 }
                 state.buffer = state.buffer.subarray(parsed.bytes);
                 state.phase = "proxy_headers";
@@ -540,6 +553,7 @@ function closeBridge(socket: BunSocket): void {
     if (state.kind === "client") {
         if (state.closed) return;
         state.closed = true;
+        releaseClientState(state);
         state.remote?.destroy();
         clearConnectTimer(state);
         const upstream = state.upstream;
@@ -562,11 +576,18 @@ function closeClientState(socket: BunSocket): void {
     const state = clientStateOf(socket);
     if (state.closed) return;
     state.closed = true;
+    releaseClientState(state);
     state.remote?.destroy();
     clearConnectTimer(state);
     const upstream = state.upstream;
     state.upstream = undefined;
     upstream?.close();
+}
+
+function releaseClientState(state: ClientState): void {
+    const release = state.release;
+    state.release = undefined;
+    release?.();
 }
 
 function clearConnectTimer(state: ClientState): void {

@@ -11,16 +11,30 @@ reconciliation, so the socket never stays open longer than that without a reason
 
 ## The specification is the phone's only reference
 
-Happy Agent ships no phone code: the native app implements pairing from `API_MOBILE.md` alone. A
-TypeScript phone SDK was built first and then dropped for that reason, so the daemon's `impl/`
-crypto and emoji table are the one implementation in this repository. `API_MOBILE.md` therefore
-carries everything a phone needs, including the full emoji table, its checksum, and fixed
-vectors. The tests' fake phone is written from that document, reads the emoji table out of it,
-and never imports `impl/`, so its agreement with the daemon checks both against the spec.
+Happy Agent ships no phone code: the native app implements pairing from the Mobile connector
+section of `API.md` alone. A TypeScript phone SDK was built first and then dropped for that
+reason, so the daemon's `impl/` crypto and emoji table are the one implementation in this
+repository. The section therefore carries everything a phone needs, including the full emoji
+table, its checksum, and fixed vectors. The tests' fake phone is written from it, reads the emoji
+table out of it, and never imports `impl/`, so its agreement with the daemon checks both against
+the spec.
 
-## Phones use the ordinary API, minus administration
+## One API, with mobile authentication first
 
-A paired phone acts as the user who paired it on every `/v0` route, served by the API module's
-handler through `serveDeviceRequests`, except daemon lifecycle and debugging and mobile connector
-management, which answer `403`. The phone can therefore neither stop the daemon nor pair or remove
-other phones. WebSocket upgrades and `CONNECT` are not served on the phone socket in version 1.
+The first design gave the connector its own listener and router, which served the pairing routes
+and handed device requests to the API through a registered handler, without WebSockets or
+`CONNECT`. Steve rejected that as a branch of the API. Phones now reach the one API: the daemon
+binds an extra loopback listener with the same HTTP stack, flagged as mobile, and the exposure
+forwards there. On that transport the API asks `authenticate` about the bearer before routing,
+for every request, upgrade, and `CONNECT`, and accepts nothing else. A device acts as its owner
+everywhere except a short denylist (drain, shutdown, debug, mobile connector management), which
+answers `403`; the pairing and handshake credentials reach only their own `/v0` handshake routes,
+which exist only there. Revocation is an AbortSignal on the device credential, so the API closes
+connections on every transport path, Bun's native WebSockets and tunnels included.
+
+## The exposure waits for its transport
+
+The module used to start its own listener and reconcile in `afterStart`. With the API owning the
+listener, the exposure can only open once the daemon has bound it, so `attachTransport` triggers
+the first reconciliation and a pairing started earlier fails with "not ready yet" instead of
+showing a code nothing can answer.

@@ -196,6 +196,7 @@ export function startBunHttpServer(
             }
             const url = new URL(request.url);
             const runner = prepared.api.prepareRunnerSocket(
+                prepared.context("bun-runner-websocket-upgrade"),
                 url.pathname,
                 request.headers.get("authorization") ?? undefined,
             );

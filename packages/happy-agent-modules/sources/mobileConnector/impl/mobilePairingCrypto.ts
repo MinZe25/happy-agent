@@ -13,7 +13,8 @@ import {
 import { callsEmojiForRawKey } from "./callsEmoji.js";
 
 /**
- * The daemon's half of mobile pairing v1, as `API_MOBILE.md` specifies it, on Node's crypto:
+ * The daemon's half of mobile pairing v1, as the Mobile connector section of `API.md`
+ * specifies it, on Node's crypto:
  *
  * ```text
  * C   = SHA256("happy-mobile-pair-v1/commit" ‖ A ‖ Nm)

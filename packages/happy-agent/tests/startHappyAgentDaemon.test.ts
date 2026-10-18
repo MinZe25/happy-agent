@@ -24,20 +24,27 @@ vi.mock("../sources/socket/AgentSocket.js", () => ({
 }));
 import { startHappyAgentDaemon } from "../sources/main.js";
 
+const closeMobile = vi.fn();
+
 beforeEach(() => {
     vi.clearAllMocks();
 });
+
+/** Bind the main HTTP listener to `closeHttp`, and the mobile connector's loopback listener apart from it. */
+function arrangeHttp(closeHttp: ReturnType<typeof vi.fn>): void {
+    mocks.bindAgentHttpServer.mockImplementation(
+        async (_prepared: unknown, host: string, port: number) =>
+            port === 0
+                ? { close: closeMobile, host, port: 45_678, url: "http://127.0.0.1:45678" }
+                : { close: closeHttp, host, port, url: `http://${host}:${port}` },
+    );
+}
 
 describe("startHappyAgentDaemon", () => {
     it("uses the API drain barrier without shutting down either transport", async () => {
         const runtime = arrangeRuntime(true);
         const closeHttp = vi.fn();
-        mocks.bindAgentHttpServer.mockResolvedValue({
-            close: closeHttp,
-            host: "127.0.0.1",
-            port: 3000,
-            url: "http://127.0.0.1:3000",
-        });
+        arrangeHttp(closeHttp);
         const daemon = await startHappyAgentDaemon();
         daemon.drain();
         expect(runtime.beginDrain).toHaveBeenCalledOnce();
@@ -49,12 +56,7 @@ describe("startHappyAgentDaemon", () => {
     it("binds TCP HTTP instead of the local socket in team mode", async () => {
         const runtime = arrangeRuntime(true);
         const closeHttp = vi.fn();
-        mocks.bindAgentHttpServer.mockResolvedValue({
-            close: closeHttp,
-            host: "127.0.0.1",
-            port: 3_000,
-            url: "http://127.0.0.1:3000",
-        });
+        arrangeHttp(closeHttp);
 
         const daemon = await startHappyAgentDaemon();
 
@@ -84,22 +86,67 @@ describe("startHappyAgentDaemon", () => {
         const daemon = await startHappyAgentDaemon();
 
         expect(mocks.bindAgentSocket).toHaveBeenCalledOnce();
-        expect(mocks.bindAgentHttpServer).not.toHaveBeenCalled();
+        expect(mocks.bindAgentHttpServer).toHaveBeenCalledOnce();
         expect(mocks.removeInactiveAgentSocket).not.toHaveBeenCalled();
         await daemon.close();
         expect(closeSocket).toHaveBeenCalledOnce();
         expect(runtime.close).toHaveBeenCalledOnce();
     });
 
+    it("serves phones on their own loopback listener and closes it before the main transport", async () => {
+        const runtime = arrangeRuntime(true);
+        const closeHttp = vi.fn();
+        arrangeHttp(closeHttp);
+
+        const daemon = await startHappyAgentDaemon();
+
+        expect(mocks.bindAgentHttpServer).toHaveBeenCalledTimes(2);
+        expect(mocks.bindAgentHttpServer).toHaveBeenLastCalledWith(
+            expect.anything(),
+            "127.0.0.1",
+            0,
+        );
+        expect(runtime.attachMobileTransport).toHaveBeenCalledWith(expect.anything(), {
+            host: "127.0.0.1",
+            port: 45_678,
+        });
+        expect(daemon.httpUrl).toBe("http://127.0.0.1:3000");
+
+        await daemon.close();
+        expect(closeMobile).toHaveBeenCalledOnce();
+        expect(runtime.shutdown.mock.invocationCallOrder[0]).toBeLessThan(
+            closeMobile.mock.invocationCallOrder[0]!,
+        );
+        expect(closeMobile.mock.invocationCallOrder[0]).toBeLessThan(
+            closeHttp.mock.invocationCallOrder[0]!,
+        );
+    });
+
+    it("keeps serving everything else when the mobile transport cannot attach", async () => {
+        const runtime = arrangeRuntime(false);
+        runtime.attachMobileTransport.mockImplementation(() => {
+            throw new Error("already attached");
+        });
+        const closeSocket = vi.fn();
+        mocks.bindAgentSocket.mockResolvedValue({
+            close: closeSocket,
+            socketPath: "/tmp/happy-team/server.sock",
+        });
+        arrangeHttp(vi.fn());
+
+        const daemon = await startHappyAgentDaemon();
+
+        expect(closeMobile).toHaveBeenCalledOnce();
+        expect(daemon.socketPath).toBe("/tmp/happy-team/server.sock");
+        await daemon.close();
+        expect(closeMobile).toHaveBeenCalledOnce();
+        expect(closeSocket).toHaveBeenCalledOnce();
+    });
+
     it("opens Tailcat around the active transport and closes it with the daemon", async () => {
         const runtime = arrangeRuntime(true, true);
         const closeHttp = vi.fn();
-        mocks.bindAgentHttpServer.mockResolvedValue({
-            close: closeHttp,
-            host: "127.0.0.1",
-            port: 3_000,
-            url: "http://127.0.0.1:3000",
-        });
+        arrangeHttp(closeHttp);
         const daemon = await startHappyAgentDaemon();
 
         expect(runtime.attachTransport).toHaveBeenCalledWith(expect.anything(), {
@@ -119,6 +166,7 @@ function arrangeRuntime(
     teamModeEnabled: boolean,
     tailcatEnabled = false,
 ): {
+    readonly attachMobileTransport: ReturnType<typeof vi.fn>;
     readonly attachTransport: ReturnType<typeof vi.fn>;
     readonly beginDrain: ReturnType<typeof vi.fn>;
     readonly close: ReturnType<typeof vi.fn>;
@@ -156,6 +204,7 @@ function arrangeRuntime(
           }
         : { enabled: false, state: "disabled" };
     const attachTransport = vi.fn(async () => status);
+    const attachMobileTransport = vi.fn();
     const runtime = {
         api: {
             onShutdown: vi.fn(() => vi.fn()),
@@ -163,6 +212,7 @@ function arrangeRuntime(
             drainProgress: vi.fn(() => [{ name: "agent-system", count: 1 }]),
         },
         modules: {
+            mobileConnector: { attachTransport: attachMobileTransport },
             tailcat: {
                 attachTransport,
                 currentStatus: vi.fn(() => status),
@@ -190,6 +240,7 @@ function arrangeRuntime(
         },
     );
     return {
+        attachMobileTransport,
         attachTransport,
         beginDrain: runtime.api.beginDrain,
         close: runtime.close,

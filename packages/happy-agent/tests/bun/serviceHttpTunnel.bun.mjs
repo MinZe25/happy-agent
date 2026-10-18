@@ -37,7 +37,7 @@ async function serviceFixture() {
     const prepared = {
         context: () => ({}),
         api: {
-            listenWorkspaceProxyTcp: (token) => proxy.listenTcp(token),
+            listenWorkspaceProxyTcp: () => proxy.listenTcp(),
             handleRequest: async (_ctx, _req, res) => res.end("healthy"),
             handleRemoteAttachment: async () => false,
             prepareWorkspaceProxySocket: async () => ({ handled: false }),

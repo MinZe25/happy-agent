@@ -18,6 +18,13 @@ export const WORKSPACE_PROXY_ROUTE_HEADER = "x-happy-proxy-route";
 /** Opens a connection from the workspace's own network. */
 export type WorkspaceProxyConnector = (host: string, port: number) => Promise<Duplex>;
 
+/** The loopback TCP hop Bun front doors forward workspace tunnels to, and how they are admitted. */
+export interface WorkspaceProxyTcpHop {
+    readonly port: number;
+    /** The `Proxy-Authorization` value the front door adds to each connection's first request. */
+    readonly authorization: string;
+}
+
 /**
  * HTTP/1.1 forward proxy spoken inside the workspace CONNECT attachment.
  *
@@ -26,9 +33,16 @@ export type WorkspaceProxyConnector = (host: string, port: number) => Promise<Du
  * there, and every request and tunnel on that attachment then opens its connection through it.
  */
 export class WorkspaceProxy {
+    /** Attachments handed over directly, and the private Unix socket. Both are owner-only. */
     readonly #server = createServer();
+    /**
+     * Loopback TCP, which any local process can reach, so each connection is admitted by a
+     * memory-only credential. Every front door shares this one hop.
+     */
+    readonly #tcpServer = createServer();
     readonly #sockets = new Set<Duplex>();
     #socketPath: string | undefined;
+    #tcpHop: Promise<WorkspaceProxyTcpHop> | undefined;
     #tcpToken: string | undefined;
     readonly #admitted = new WeakSet<Duplex>();
     readonly #connectors = new WeakMap<Duplex, WorkspaceProxyConnector>();
@@ -38,27 +52,32 @@ export class WorkspaceProxy {
     >();
 
     constructor() {
-        this.#server.on("request", (request, response) => {
-            if (!this.#admit(request)) {
+        this.#serve(this.#server, false);
+        this.#serve(this.#tcpServer, true);
+    }
+
+    #serve(server: ReturnType<typeof createServer>, admitted: boolean): void {
+        server.on("request", (request, response) => {
+            if (admitted && !this.#admit(request)) {
                 sendProxyError(response, 407, "Proxy authentication is required.");
                 return;
             }
             this.#forwardRequest(request, response);
         });
-        this.#server.on("connect", (request, socket, head) => {
-            if (!this.#admit(request)) {
+        server.on("connect", (request, socket, head) => {
+            if (admitted && !this.#admit(request)) {
                 refuse(socket, 407, "Proxy Authentication Required");
                 return;
             }
             this.#openTunnel(request, socket, head);
         });
-        this.#server.on("connection", (socket) => {
+        server.on("connection", (socket) => {
             this.#sockets.add(socket);
             socket.once("close", () => {
                 this.#sockets.delete(socket);
             });
         });
-        this.#server.on("clientError", (_error, socket) => {
+        server.on("clientError", (_error, socket) => {
             refuse(socket, 400, "Bad Request");
         });
     }
@@ -107,37 +126,46 @@ export class WorkspaceProxy {
         await chmod(path, 0o600);
     }
 
-    /** Bun team listeners use loopback TCP internally, never a local API socket. */
-    async listenTcp(token: string): Promise<number> {
-        if (this.#server.listening && this.#tcpToken !== token) {
-            throw new Error("The workspace HTTP proxy is already listening.");
+    /**
+     * The loopback TCP hop for Bun front doors, opened on first use. Every caller receives the same
+     * hop, so a second front door beside the first, Unix socket or not, shares it.
+     */
+    async listenTcp(): Promise<WorkspaceProxyTcpHop> {
+        this.#tcpHop ??= this.#openTcp();
+        try {
+            return await this.#tcpHop;
+        } catch (error) {
+            this.#tcpHop = undefined;
+            throw error;
         }
-        this.#tcpToken = token;
-        if (!this.#server.listening) {
-            await new Promise<void>((resolve, reject) => {
-                const failed = (error: Error): void => {
-                    this.#server.off("listening", listening);
-                    reject(error);
-                };
-                const listening = (): void => {
-                    this.#server.off("error", failed);
-                    resolve();
-                };
-                this.#server.once("error", failed);
-                this.#server.once("listening", listening);
-                this.#server.listen({ host: "127.0.0.1", port: 0 });
-            });
-        }
-        const address = this.#server.address();
+    }
+
+    async #openTcp(): Promise<WorkspaceProxyTcpHop> {
+        const token = randomBytes(32).toString("base64url");
+        await new Promise<void>((resolve, reject) => {
+            const failed = (error: Error): void => {
+                this.#tcpServer.off("listening", listening);
+                reject(error);
+            };
+            const listening = (): void => {
+                this.#tcpServer.off("error", failed);
+                resolve();
+            };
+            this.#tcpServer.once("error", failed);
+            this.#tcpServer.once("listening", listening);
+            this.#tcpServer.listen({ host: "127.0.0.1", port: 0 });
+        });
+        const address = this.#tcpServer.address();
         if (address === null || typeof address === "string") {
             throw new Error("The workspace HTTP proxy is not listening on TCP.");
         }
-        return address.port;
+        this.#tcpToken = token;
+        return { port: address.port, authorization: `Bearer ${token}` };
     }
 
     #admit(request: IncomingMessage): boolean {
         const token = this.#tcpToken;
-        if (token === undefined) return true;
+        if (token === undefined) return false;
         const authorization = request.headers["proxy-authorization"];
         delete request.headers["proxy-authorization"];
         if (this.#admitted.has(request.socket)) return true;
@@ -178,13 +206,9 @@ export class WorkspaceProxy {
         this.#sockets.clear();
         const path = this.#socketPath;
         this.#socketPath = undefined;
+        this.#tcpHop = undefined;
         this.#tcpToken = undefined;
-        if (!this.#server.listening) return;
-        await new Promise<void>((resolve, reject) => {
-            this.#server.close((error) => (error === undefined ? resolve() : reject(error)));
-        }).catch((error: unknown) => {
-            if (!(error instanceof Error) || !/not running/i.test(error.message)) throw error;
-        });
+        await Promise.all([closeServer(this.#server), closeServer(this.#tcpServer)]);
         if (path === undefined) return;
         await unlink(path).catch((error: NodeJS.ErrnoException) => {
             if (error.code !== "ENOENT") throw error;
@@ -365,6 +389,15 @@ function deferredDuplex(opening: Promise<Duplex>): Duplex {
         },
     );
     return stream;
+}
+
+async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
+    if (!server.listening) return;
+    await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+    }).catch((error: unknown) => {
+        if (!(error instanceof Error) || !/not running/i.test(error.message)) throw error;
+    });
 }
 
 function sendProxyError(response: ServerResponse, status: number, message: string): void {
