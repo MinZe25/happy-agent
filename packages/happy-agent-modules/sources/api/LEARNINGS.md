@@ -64,21 +64,13 @@ through parent activity and have no list membership to update on archive; worksp
 subtasks retain ordinary owner-series ordering. Capability flags, focused reads, and archival
 events use the same distinction. Ordinary subagents and non-subtask managed roots remain read-only.
 
-## Service attachments are HTTP endpoints, not workspace forward proxies
+## Workspace services are an unavailable optional capability
 
-Each service CONNECT authenticates both the normal caller and a short-lived credential for the
-exact principal, workspace, service, and execution. It owns one already-connected native endpoint;
-neither request URLs nor Host headers can select another destination. Node's HTTP parser and
-client stream bodies and WebSocket upgrades on that socket, preserving application credentials
-and duplicate headers. Canonical body framing must be restored after removing hop-by-hop headers:
-honoring Connection's nomination of Content-Length without reframing turns a GET body into a new
-upstream request. Validate WebSocket method, version, key, and absence of a body before upgrading.
-The header deadline must not end a quiet active SSE response. Stop revokes live attachments before
-confirmed cleanup, and both pending admissions and established connections have bounded counts.
-
-The service list captures its journal cursor before loading its snapshot. Input uses independent
-principal/view reader positions, returns bounded capture, and does not publish I/O or credentials
-in events. Ordinary workspace CONNECT remains a separate existing API contract.
+Workspace services and their private credential/tunnel layer have been removed. Their published
+routes authenticate and resolve the workspace before returning `501 unsupported`, which the API
+already defines as feature unavailability. Existing client schemas, events, and the optional
+workspace cleanup field remain compatible with older daemons. Browser previews use the agent's
+own workspace proxy instead.
 
 ## Team drafts belong to users, not shared agent metadata
 
@@ -223,7 +215,7 @@ shutdown and does not claim that terminals or background processes have exited.
   owners receive the same code, mode, and actions with generic instructions, no commands, and a
   null source. In standalone mode possession of the API bearer is the installation authority;
   there is no separate human credential class. Any future API credential class must be classified
-  before it can read messages. Runner, service, and exported-bot credentials remain outside the
+  before it can read messages. Runner and exported-bot credentials remain outside the
   ordinary API admission boundary.
 
 - Invalid diagnostic shapes must not take the unredacted fast path. An unauthorized reader loses
@@ -268,17 +260,25 @@ shutdown and does not claim that terminals or background processes have exited.
   route by route. Client schemas keep the field optional only for older compatible daemons and
   tolerate unknown keys so newer built-ins retain ordinary bot behavior in older UIs.
 
-## The workspace proxy reaches a runner folder's network through a route
+## Every workspace proxy connection opens through an explicit network
 
-A runner folder's dev server listens on the runner's loopback, which the daemon's own network
-cannot reach. Admitting a runner folder's proxy attachment mints a route: a one-time, minute-long
-key naming a connector that opens connections through the runner's compute network. Node hands the
-route to `WorkspaceProxy.accept` directly; the Bun front door adds it as a private header on the
-attachment's first inner request and sends that folder's inner `CONNECT`s to the internal proxy
-listener too, instead of connecting them natively. The header is removed before anything is
-forwarded, a replayed key is not a route, and this machine's folders keep the native fast path.
-Plain requests use `createConnection` over a stream that waits for the runner connection, which
-Bun and Node both honor.
+The proxy used to treat a missing route as "this machine": an attachment admitted without one, an
+expired or replayed key, or a Bun tunnel connected natively all quietly reached the daemon's own
+network. Admission now always mints a route, a one-time key naming the network every connection
+on the attachment opens from, and a request or tunnel without a valid route is answered `502`.
+The folder proxy uses the host network or the folder's runner. A workspace whose agents each work
+in a container (Docker workspace, or a bot whose compute is Docker) has no single network, so the
+folder proxy answers `501` instead of picking one. `CONNECT
+/v0/workspaces/:workspaceId/agents/:agentId/proxy` checks that the agent belongs to the workspace
+and opens through `ComputeModule.network`, the agent's exact cached machine; never guess an agent.
+
+The proxy is a plain forwarder. Only opening a connection is bounded (30 seconds, `504`); the
+listeners disable Node's request timeout and nothing caps a body, so server-sent events and slow
+uploads stream for as long as both sides keep them open. Abandoning a request destroys its
+upstream. Hop-by-hop headers, `Proxy-Authorization`, and the route header are dropped; the
+client's own `Authorization` and `Cookie` pass through and nothing is added. Tunnels forward
+end of stream as a half-close and a reset or early close as a close. IPv6 literals reach the
+connector without brackets.
 
 ## Artifact files are matched on the request target as sent
 

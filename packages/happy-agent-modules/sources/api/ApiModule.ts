@@ -74,9 +74,6 @@ import {
     userIdsSchema,
     skillPageQuerySchema,
     updateGlobalSkillRequestSchema,
-    workspaceServiceListQuerySchema,
-    workspaceServiceInputRequestSchema,
-    stopWorkspaceServiceRequestSchema,
     type ArtifactFileInput as ArtifactRequestFile,
     type ArtifactSourceInput as ArtifactRequestSource,
     type AuthenticationChallenge,
@@ -94,11 +91,17 @@ import {
     type AgentModule,
     type AgentModuleHooks,
     type AgentSystemRef,
+    withAgentConfig,
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { afterCommit, detach, shutdown, withLifetime, type Context } from "@steve.kite/stdlib";
-import { MAX_RUNNER_FRAME_BYTES, RunnerUnavailableError } from "@slopus/happy-agent-compute";
+import { afterCommit, detach, shutdown, type Context } from "@steve.kite/stdlib";
+import {
+    createHostNetwork,
+    MAX_RUNNER_FRAME_BYTES,
+    RunnerUnavailableError,
+    type ComputeNetwork,
+} from "@slopus/happy-agent-compute";
 import { WebSocketServer } from "ws";
 
 import { AbortModule } from "../abort/index.js";
@@ -127,8 +130,6 @@ import {
     type PreparedExportedBotSocket,
 } from "../exportedBots/index.js";
 import { ChatMediaModule } from "../chatMedia/index.js";
-import { ServicesModule, ServiceError, ServiceAccessError } from "../services/index.js";
-import { ServiceHttpTunnel } from "./ServiceHttpTunnel.js";
 import {
     BotAvatarInputError,
     BotConflictError,
@@ -455,10 +456,10 @@ export type PreparedWorkspaceProxySocket =
     | {
           readonly handled: true;
           /**
-           * For a folder on a runner, the one-time key its attachment presents to the workspace
-           * proxy so connections are made from the runner's network. Absent for this machine.
+           * The one-time key the attachment presents to the workspace proxy, naming the network
+           * every one of its connections is opened from.
            */
-          readonly route?: string;
+          readonly route: string;
           /**
            * Aborts when the credential that opened this attachment is withdrawn, such as a
            * removed phone's. A transport that keeps the tunnel itself closes it then.
@@ -594,11 +595,6 @@ export class ApiModule implements AgentModule {
         noServer: true,
         perMessageDeflate: false,
     });
-    readonly #serviceTunnels = new Map<ServiceHttpTunnel, string>();
-    readonly #serviceAdmissions = new Map<string, number>();
-    #serviceAttachmentCount = 0;
-    #serviceInputs = 0;
-    readonly #services: ServicesModule | undefined;
     readonly #unsubscribe: (() => void)[] = [];
     readonly #streams = new Set<SseWriter>();
     /** Event streams that live document frames can address, with the person who opened each. */
@@ -658,7 +654,6 @@ export class ApiModule implements AgentModule {
         connections: ConnectionsModule,
         node: NodeModule,
         globalSkills?: GlobalSkillsModule,
-        services?: ServicesModule,
         subtasks?: SubtasksModule,
         live?: LiveModule,
         runners?: RunnersModule,
@@ -700,7 +695,6 @@ export class ApiModule implements AgentModule {
         this.#connections = connections;
         this.#node = node;
         this.#globalSkills = globalSkills;
-        this.#services = services;
         this.#subtasks = subtasks;
         this.#live = live;
         this.#runners = runners;
@@ -811,7 +805,6 @@ export class ApiModule implements AgentModule {
         if (this.#closed) return;
         this.#closed = true;
         this.#ready = false;
-        for (const tunnel of this.#serviceTunnels.keys()) tunnel.close();
         for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
         this.#shutdownListeners.clear();
         this.#drainSources.clear();
@@ -1132,7 +1125,14 @@ export class ApiModule implements AgentModule {
                 );
                 return;
             }
-            if (await this.#handleServiceRoute(ctx, request, response, url)) return;
+            const retiredService =
+                /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/services(?:\/[a-z][a-z0-9]*(?:\/(?:input|access-token))?)?$/.exec(
+                    url.pathname,
+                );
+            if (retiredService !== null) {
+                await this.#resolveWorkspaceScope(ctx, retiredService[1]!);
+                throw unsupported("Workspace services are unavailable in this daemon.");
+            }
             if (request.method === "GET" && url.pathname === "/") {
                 sendJson(response, 200, { text: "Welcome to Happy Agent!" });
                 return;
@@ -1966,6 +1966,8 @@ export class ApiModule implements AgentModule {
         socket: Socket,
         head: Buffer,
     ): Promise<boolean> {
+        // HTTP hands a CONNECT socket over without its error handling, and admission waits.
+        socket.on("error", () => undefined);
         if (isMobileTransport(ctx)) {
             try {
                 ctx = await this.#admitMobileDevice(ctx, request.headers.authorization, socket);
@@ -1975,7 +1977,6 @@ export class ApiModule implements AgentModule {
             }
         }
         if (await this.handleRemoteAttachment(ctx, request, socket, head)) return true;
-        if (await this.handleServiceAttachment(ctx, request, socket, head)) return true;
         const prepared = await this.prepareWorkspaceProxySocket(
             ctx,
             requestUrl(request).pathname,
@@ -1987,112 +1988,6 @@ export class ApiModule implements AgentModule {
             return true;
         }
         this.#workspaceProxy.accept(socket, head, prepared.route);
-        return true;
-    }
-
-    /** Node and native Bun use this same authenticated, fixed-service attachment boundary. */
-    async handleServiceAttachment(
-        ctx: Context,
-        request: IncomingMessage,
-        socket: import("node:stream").Duplex,
-        head: Buffer,
-    ): Promise<boolean> {
-        const match =
-            /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/services\/([a-z][a-z0-9]*)\/proxy$/.exec(
-                requestUrl(request).pathname,
-            );
-        if (request.method !== "CONNECT" || match === null) return false;
-        let release: (() => void) | undefined;
-        const disconnected = new AbortController();
-        const closed = () => disconnected.abort();
-        socket.once("close", closed);
-        try {
-            const signal =
-                ctx.lifetime === undefined
-                    ? disconnected.signal
-                    : AbortSignal.any([ctx.lifetime, disconnected.signal]);
-            ctx = await this.#authenticate(
-                withLifetime(ctx, signal),
-                request.headers.authorization,
-            );
-            this.#closeWithMobileDevice(ctx, socket);
-            this.#assertTeamUser(ctx);
-            if (!this.#ready || this.#closed)
-                throw new ApiError(
-                    503,
-                    "not_initialized",
-                    "Happy Agent is not ready for attachments.",
-                );
-            if (this.#draining)
-                throw new ApiError(
-                    503,
-                    "draining",
-                    "Happy Agent is draining and no longer accepts attachments.",
-                );
-            const services = this.#services;
-            if (services === undefined)
-                throw unsupported("Workspace services are unavailable in this daemon.");
-            if (head.length > 65536)
-                throw invalidRequest("The service attachment's initial data is too large.");
-            const workspaceId = match[1]!;
-            const serviceId = match[2]!;
-            const key = `${workspaceId}/${serviceId}`;
-            const count = this.#serviceAdmissions.get(key) ?? 0;
-            if (count >= 32 || this.#serviceAttachmentCount >= 256)
-                throw new ApiError(
-                    503,
-                    "service_unavailable",
-                    "The service attachment limit has been reached.",
-                );
-            this.#serviceAdmissions.set(key, count + 1);
-            this.#serviceAttachmentCount += 1;
-            let released = false;
-            release = () => {
-                if (released) return;
-                released = true;
-                this.#serviceAttachmentCount -= 1;
-                const remaining = (this.#serviceAdmissions.get(key) ?? 1) - 1;
-                if (remaining === 0) this.#serviceAdmissions.delete(key);
-                else this.#serviceAdmissions.set(key, remaining);
-            };
-            const credential = request.headers["x-happy-service-authorization"];
-            const accessToken =
-                typeof credential === "string" && credential.startsWith("Bearer ")
-                    ? credential.slice(7)
-                    : undefined;
-            const endpoint = await services.connect(
-                ctx,
-                teamUser(ctx)?.id ?? "standalone",
-                workspaceId,
-                serviceId,
-                accessToken,
-            );
-            if (socket.destroyed || this.#closed) {
-                endpoint.destroy();
-                release();
-                return true;
-            }
-            if (endpoint.destroyed)
-                throw new ApiError(
-                    503,
-                    "service_unavailable",
-                    "The service connection has closed.",
-                );
-            const releaseAdmission = release;
-            const tunnel = new ServiceHttpTunnel(endpoint, () => {
-                this.#serviceTunnels.delete(tunnel);
-                releaseAdmission();
-            });
-            this.#serviceTunnels.set(tunnel, key);
-            tunnel.accept(socket, head);
-            release = undefined;
-        } catch (error) {
-            release?.();
-            const rejection = this.#socketRejection(ctx, error, "The service was not found.");
-            writeSocketError(socket, rejection);
-        } finally {
-            socket.off("close", closed);
-        }
         return true;
     }
 
@@ -2343,30 +2238,35 @@ export class ApiModule implements AgentModule {
         pathname: string,
         authorization: string | string[] | undefined,
     ): Promise<PreparedWorkspaceProxySocket> {
-        const match = /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/proxy$/.exec(pathname);
+        const match =
+            /^\/v0\/workspaces\/([a-z][a-z0-9]*)(?:\/services\/([a-z][a-z0-9]*)|\/agents\/([a-z][a-z0-9]*))?\/proxy$/.exec(
+                pathname,
+            );
         if (match === null) return { handled: false };
         try {
             ctx = await this.#authenticate(ctx, authorization);
             this.#assertTeamUser(ctx);
             this.#assertSocketReady();
-            const { runnerId } = await this.#resolveWorkspaceScope(ctx, match[1] as string);
-            const runners = this.#runners;
-            // The native fast path connects from this process; a workload user's previews are
-            // reached through that user's runner, like a runner's are.
+            const workspaceId = match[1] as string;
+            const scope = await this.#resolveWorkspaceScope(ctx, workspaceId);
+            if (match[2] !== undefined)
+                throw unsupported("Workspace services are unavailable in this daemon.");
             const revoked = mobileDevice(ctx)?.revoked;
-            if (runners === undefined || runners.native(runnerId)) {
-                runners?.assertLocalExecution();
-                return { handled: true, ...(revoked === undefined ? {} : { revoked }) };
+            if (match[3] !== undefined) {
+                const route = await this.#agentProxyRoute(ctx, workspaceId, match[3]);
+                return { handled: true, route, ...(revoked === undefined ? {} : { revoked }) };
             }
-            // Refuse a runner that is not there now, rather than every request on the tunnel.
-            await runners.machine(runnerId);
+            if (await this.#agentsWorkInContainers(ctx, scope)) {
+                throw unsupported(
+                    "Each agent in this workspace works in a container of its own. Open an agent's proxy to reach its network.",
+                );
+            }
+            const network = await this.#folderNetwork(scope.runnerId);
             // Connections outlive the request that opened the attachment.
             const connectCtx = detach(ctx).named("workspace-proxy-connections");
-            const route = this.#workspaceProxy.route(async (host, port) => {
-                const network = (await runners.machine(runnerId)).network;
-                if (network === undefined) throw new Error("The runner cannot open connections.");
-                return await network.connect(connectCtx, { host, port });
-            });
+            const route = this.#workspaceProxy.route(
+                async (host, port) => await (await network()).connect(connectCtx, { host, port }),
+            );
             return { handled: true, route, ...(revoked === undefined ? {} : { revoked }) };
         } catch (error: unknown) {
             return {
@@ -2374,6 +2274,63 @@ export class ApiModule implements AgentModule {
                 rejection: this.#socketRejection(ctx, error, "The workspace was not found."),
             };
         }
+    }
+
+    /**
+     * A route through one agent's own machine. The agent must belong to this workspace; every
+     * connection is then opened from its machine and nowhere else.
+     */
+    async #agentProxyRoute(ctx: Context, workspaceId: string, agentId: string): Promise<string> {
+        const config = await this.#agentSystem().config(ctx, agentId);
+        if (config === undefined || (await this.#workspaceIdForAgent(ctx, agentId)) !== workspaceId)
+            throw notFound("The agent was not found.");
+        if (typeof config.metadata?.["archivedAt"] === "number")
+            throw new ApiError(409, "conflict", "The agent is archived.");
+        // Connections outlive the request that opened the attachment.
+        const connectCtx = detach(ctx).named("workspace-agent-proxy-connections");
+        let connect;
+        try {
+            connect = await this.#compute.network(withAgentConfig(ctx, config), agentId);
+        } catch (error: unknown) {
+            if ((error as { code?: unknown } | null)?.code === "ENOTSUP")
+                throw unsupported("This agent's machine cannot open network connections.");
+            throw error;
+        }
+        return this.#workspaceProxy.route(
+            async (host, port) => await connect(connectCtx, { host, port }),
+        );
+    }
+
+    /**
+     * The network of the machine a folder is on: this computer or its runner. The machine is
+     * checked now, so an attachment for a runner that is away is refused instead of every
+     * connection on it. Each connection asks again, since a runner may have reconnected.
+     */
+    async #folderNetwork(runnerId: string | undefined): Promise<() => Promise<ComputeNetwork>> {
+        const runners = this.#runners;
+        if (runners === undefined) {
+            const network = createHostNetwork();
+            return async () => network;
+        }
+        const reachable = async (): Promise<ComputeNetwork> => {
+            const network = (await runners.machine(runnerId)).network;
+            if (network === undefined) {
+                throw unsupported("This folder's machine cannot open network connections.");
+            }
+            return network;
+        };
+        await reachable();
+        return reachable;
+    }
+
+    /** Whether a workspace's agents each work in a container, so it has no one network. */
+    async #agentsWorkInContainers(
+        ctx: Context,
+        scope: { readonly botId?: string; readonly docker?: { readonly image: string } },
+    ): Promise<boolean> {
+        if (scope.docker !== undefined) return true;
+        if (scope.botId === undefined) return false;
+        return (await this.#bots.settings(ctx, scope.botId)).compute.type === "docker";
     }
 
     async listenWorkspaceProxyHttp(path: string): Promise<void> {
@@ -2409,28 +2366,6 @@ export class ApiModule implements AgentModule {
                             undefined,
                             event.ownerId === "standalone" ? undefined : event.ownerId,
                         ),
-                    );
-                }),
-            );
-        if (this.#services !== undefined)
-            this.#unsubscribe.push(
-                this.#services.onEvent((event) => {
-                    const { type, ...payload } = event;
-                    if (
-                        event.type === "service.updated" &&
-                        event.changes.status !== undefined &&
-                        event.changes.status !== "running"
-                    ) {
-                        const key = `${event.workspaceId}/${event.serviceId}`;
-                        for (const [tunnel, owner] of this.#serviceTunnels)
-                            if (owner === key) tunnel.close();
-                    }
-                    this.#journal.append(
-                        type,
-                        payload,
-                        type === "service.created"
-                            ? event.service.createdAt
-                            : event.changes.updatedAt,
                     );
                 }),
             );
@@ -7285,133 +7220,6 @@ export class ApiModule implements AgentModule {
         };
     }
 
-    async #handleServiceRoute(
-        ctx: Context,
-        request: IncomingMessage,
-        response: ServerResponse,
-        url: URL,
-    ): Promise<boolean> {
-        const match =
-            /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/services(?:\/([a-z][a-z0-9]*)(?:\/(input|access-token))?)?$/.exec(
-                url.pathname,
-            );
-        if (match === null) return false;
-        const services = this.#services;
-        if (services === undefined)
-            throw unsupported("Workspace services are unavailable in this daemon.");
-        const workspaceId = match[1]!;
-        const serviceId = match[2];
-        const action = match[3];
-        if (request.method === "GET" && serviceId === undefined) {
-            for (const key of ["includeStopped", "pageCursor", "limit"])
-                if (url.searchParams.getAll(key).length > 1)
-                    throw invalidRequest("The service query contains duplicate parameters.");
-            const query = queryAs(
-                {
-                    includeStopped: booleanParameter(url.searchParams.get("includeStopped"), false),
-                    ...(url.searchParams.has("pageCursor")
-                        ? { pageCursor: url.searchParams.get("pageCursor")! }
-                        : {}),
-                    ...(url.searchParams.has("limit")
-                        ? { limit: Number(url.searchParams.get("limit")) }
-                        : {}),
-                },
-                workspaceServiceListQuerySchema,
-                "service list",
-            );
-            const cursor = this.#journal.cursor();
-            sendJson(response, 200, { ...(await services.list(ctx, workspaceId, query)), cursor });
-            return true;
-        }
-        if (serviceId === undefined)
-            throw notFound("The requested service endpoint does not exist.");
-        if (request.method === "GET" && action === undefined) {
-            sendJson(response, 200, { service: await services.get(ctx, workspaceId, serviceId) });
-            return true;
-        }
-        if (request.method === "DELETE" && action === undefined) {
-            const body = await optionalBodyAs(
-                request,
-                stopWorkspaceServiceRequestSchema,
-                "service stop",
-                8192,
-            );
-            const service = await this.#withMutationId(body.mutationId, () =>
-                services.stop(ctx, workspaceId, serviceId),
-            );
-            sendJson(
-                response,
-                service.status === "stopping" ||
-                    service.status === "running" ||
-                    service.status === "starting"
-                    ? 202
-                    : 200,
-                { service },
-            );
-            return true;
-        }
-        const principalId = teamUser(ctx)?.id ?? "standalone";
-        if (request.method === "POST" && action === "access-token") {
-            await bodyAs(
-                request,
-                Type.Object({}, { additionalProperties: false }),
-                "service access request",
-                1024,
-            );
-            sendJson(
-                response,
-                200,
-                await services.accessToken(ctx, principalId, workspaceId, serviceId),
-            );
-            return true;
-        }
-        if (request.method === "POST" && action === "input") {
-            if (this.#serviceInputs >= 256)
-                throw new ApiError(
-                    503,
-                    "service_unavailable",
-                    "Too many service input requests are already waiting.",
-                );
-            this.#serviceInputs += 1;
-            const disconnected = new AbortController();
-            const closed = () => disconnected.abort();
-            response.once("close", closed);
-            try {
-                const body = await bodyAs(
-                    request,
-                    workspaceServiceInputRequestSchema,
-                    "service input",
-                    512 * 1024,
-                );
-                const chars = body.chars ?? "";
-                const signal =
-                    ctx.lifetime === undefined
-                        ? disconnected.signal
-                        : AbortSignal.any([ctx.lifetime, disconnected.signal]);
-                // Normal API authentication grants this existing process input operation. It does
-                // not confer Full access or change any part of the service's enforced sandbox.
-                const inputCtx = withLifetime(ctx, signal);
-                const result = await services.input(
-                    inputCtx,
-                    workspaceId,
-                    serviceId,
-                    { kind: "api", principalId, readerId: body.readerId },
-                    {
-                        chars,
-                        waitMs: body.waitMs ?? (chars.length === 0 ? 1000 : 250),
-                        maxOutputBytes: body.maxOutputBytes ?? 65536,
-                    },
-                );
-                sendJson(response, 200, result);
-            } finally {
-                response.off("close", closed);
-                this.#serviceInputs -= 1;
-            }
-            return true;
-        }
-        throw notFound("The requested service endpoint does not exist.");
-    }
-
     /** The plain HTTP side of local bridges: reading them and closing one. */
     async #handleBridgeRoute(
         ctx: Context,
@@ -8743,7 +8551,7 @@ export class ApiModule implements AgentModule {
     }
 
     async #sendError(ctx: Context, response: ServerResponse, error: unknown): Promise<void> {
-        error = serviceApiError(error) ?? bridgeApiError(error) ?? error;
+        error = bridgeApiError(error) ?? error;
         if (response.headersSent) {
             response.end();
             return;
@@ -8936,7 +8744,7 @@ export class ApiModule implements AgentModule {
     }
 
     #socketRejection(ctx: Context, error: unknown, notFoundMessage: string): ApiSocketRejection {
-        error = serviceApiError(error) ?? bridgeApiError(error) ?? error;
+        error = bridgeApiError(error) ?? error;
         if (error instanceof RemoteConnectionError)
             return { code: error.code, status: error.status, message: error.message };
         if (error instanceof ApiError) {
@@ -8964,21 +8772,6 @@ export class ApiModule implements AgentModule {
             status: 500,
         };
     }
-}
-
-function serviceApiError(error: unknown): ApiError | undefined {
-    if (error instanceof ServiceAccessError)
-        return new ApiError(error.code === "unauthorized" ? 401 : 403, error.code, error.message);
-    if (!(error instanceof ServiceError)) return undefined;
-    const statuses = {
-        not_found: 404,
-        invalid_request: 400,
-        service_not_running: 409,
-        service_unavailable: 503,
-        output_unavailable: 410,
-        reader_limit: 409,
-    } as const;
-    return new ApiError(statuses[error.code], error.code, error.message);
 }
 
 function remoteRoute(target: string | undefined): { id: string; path: string } | undefined {

@@ -1,14 +1,20 @@
 # Socket transport learnings
 
-## Private services use the same native attachment carrier
+## Retired service attachments use workspace admission only to reject them
 
-Bun's raw carrier also recognizes exact workspace-service CONNECT paths. Both standalone and team
-listeners reconstruct the bounded attachment handshake, then call the same API authentication and
-fixed-service gateway as Node. This does not turn the carrier into an ordinary HTTP body parser or
-an arbitrary destination proxy. Native Bun coverage must exercise streamed HTTP and binary
-WebSockets after asynchronous admission. Bun's WebSocket test client can ignore createConnection;
-send the handshake on the actual admitted socket to prove the tunnel rather than accidentally
-dialing a test hostname.
+Workspace services and their private HTTP tunnel have been removed. Both Node and Bun send the
+old service CONNECT paths through workspace proxy admission, which authenticates, resolves the
+workspace, and returns `501 unsupported`. No service credential is issued or consumed. Ordinary
+workspace proxy and remote attachment traffic keep their existing transports.
+
+## Bun sends every workspace tunnel through the routed proxy
+
+The Bun front door used to connect a local folder's nested `CONNECT` natively, bypassing the
+network its admission chose. Every inner request and tunnel now goes to the internal proxy
+listener with the attachment's route; an attachment without one is answered `502`. The bridge
+forwards a FIN with `shutdown()`, because Bun's `end()` closes both directions and lost replies
+sent after a client finished uploading. Each side's outbound queue pauses the side that feeds it
+past 1 MiB and resumes it on drain, so a fast download waits for a slow reader.
 
 ## Team terminals need native Bun upgrades too
 

@@ -34,8 +34,17 @@ async function runnerFixture() {
             listenWorkspaceProxyTcp: () => proxy.listenTcp(),
             handleRequest: async (_ctx, _req, res) => res.end("healthy"),
             handleRemoteAttachment: async () => false,
-            handleServiceAttachment: async () => false,
             prepareWorkspaceProxySocket: async (_ctx, pathname) => {
+                if (pathname === "/v0/workspaces/runnerspace/services/retired/proxy") {
+                    return {
+                        handled: true,
+                        rejection: {
+                            status: 501,
+                            code: "unsupported",
+                            message: "Workspace services are unavailable in this daemon.",
+                        },
+                    };
+                }
                 if (pathname !== "/v0/workspaces/runnerspace/proxy") return { handled: false };
                 const route = proxy.route(async (host, port) => {
                     opened.push(`${host}:${port}`);
@@ -52,16 +61,17 @@ async function runnerFixture() {
     return {
         opened,
         seen,
-        async attach() {
+        async attach(pathname = "/v0/workspaces/runnerspace/proxy", status = 200) {
             const socket = connect(listener.port, "127.0.0.1");
             cleanups.push(() => socket.destroy());
             const established = once(socket, "data");
             socket.write(
-                "CONNECT /v0/workspaces/runnerspace/proxy HTTP/1.1\r\nHost: fixture\r\nAuthorization: Bearer fixture\r\n\r\n",
+                `CONNECT ${pathname} HTTP/1.1\r\nHost: fixture\r\nAuthorization: Bearer fixture\r\n\r\n`,
             );
-            expect((await established)[0].toString()).toBe(
-                "HTTP/1.1 200 Connection Established\r\n\r\n",
-            );
+            const response = (await established)[0].toString();
+            if (status === 200)
+                expect(response).toBe("HTTP/1.1 200 Connection Established\r\n\r\n");
+            else expect(response).toStartWith(`HTTP/1.1 ${status} `);
             return socket;
         },
     };
@@ -73,6 +83,14 @@ async function readUntilEnd(socket) {
     await once(socket, "end");
     return text;
 }
+
+test("a retired service CONNECT receives workspace admission's unavailable response", async () => {
+    const f = await runnerFixture();
+    const socket = await f.attach("/v0/workspaces/runnerspace/services/retired/proxy", 501);
+    socket.destroy();
+    expect(f.opened).toEqual([]);
+    expect(f.seen).toEqual([]);
+}, 5000);
 
 test("a runner folder's plain proxy request reaches the runner's own localhost", async () => {
     const f = await runnerFixture();

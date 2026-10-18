@@ -11,6 +11,8 @@ const MAX_HEADER_BYTES = 64 * 1024;
 // connects its internal peer before more than a header is buffered, but the hard bound must still
 // accommodate one complete legal request when that connection is delayed.
 const MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
+/** Queued bytes for one side past which the side feeding it stops reading until it drains. */
+const OUTBOUND_HIGH_WATER_BYTES = 1024 * 1024;
 const HEADER_TIMEOUT_SECONDS = 10;
 const CONNECT_TIMEOUT_MS = 30_000;
 
@@ -28,6 +30,8 @@ interface BunSocket {
     data: SocketState;
     close(): void;
     end(data?: string | Uint8Array): number | void;
+    /** Send end of stream while still reading; `end` closes both directions. */
+    shutdown?(halfClose?: boolean): void;
     timeout?(seconds: number): void;
     write(data: string | Uint8Array): number;
     pause?(): void;
@@ -41,7 +45,10 @@ export interface BunRuntime {
 
 interface OutboundState {
     drained?: ((error?: Error | null) => void) | undefined;
-    endAfterFlush: boolean;
+    /** What follows once the queue drains: half-close the write side, or close the socket. */
+    finishAfterFlush: "end" | "shutdown" | undefined;
+    /** Whether the side that feeds this one was paused because this one's queue is full. */
+    feederPaused: boolean;
     outboundBytes: number;
     outboundOffset: number;
     outboundQueue: Buffer[];
@@ -54,7 +61,7 @@ interface ClientState extends OutboundState {
     connectTimer: ReturnType<typeof setTimeout> | undefined;
     kind: "client";
     phase: "connecting" | "headers" | "proxy_headers" | "raw" | "routing";
-    /** The workspace proxy route of a folder on a runner, whose connections are made there. */
+    /** The workspace proxy route naming the network this attachment's connections come from. */
     proxyRoute: string | undefined;
     /** Stops watching the credential that admitted this tunnel, once the tunnel closes. */
     release?: (() => void) | undefined;
@@ -126,7 +133,7 @@ export function startBunSocketBridge(
                     return;
                 }
                 const upstream = clientUpstream(socket);
-                if (upstream !== undefined) finishOutbound(upstream);
+                if (upstream !== undefined) finishOutbound(upstream, "shutdown");
             },
             close(socket: BunSocket) {
                 closeClientState(socket);
@@ -193,11 +200,7 @@ function routeInitialRequest(
     // Bun's node:http server does not own native upgrade/CONNECT sockets. Give the
     // shared authenticated API gateway a Duplex over this native socket instead.
     if (
-        (pathname?.startsWith("/v0/connections/") === true ||
-            (parsed.method === "CONNECT" &&
-                /^\/v0\/workspaces\/[a-z][a-z0-9]*\/services\/[a-z][a-z0-9]*\/proxy$/.test(
-                    pathname ?? "",
-                ))) &&
+        pathname?.startsWith("/v0/connections/") === true &&
         options.forwardAuthenticatedAttachment !== undefined &&
         (parsed.method === "CONNECT" || parsed.upgrade?.toLowerCase() === "websocket")
     ) {
@@ -240,7 +243,7 @@ function routeInitialRequest(
             .then((prepared) => {
                 if (state.closed) return;
                 if (!prepared.handled) {
-                    connectPeer(bun, socket, options.httpAddress, () => undefined);
+                    connectPeer(bun, socket, options.httpAddress);
                     return;
                 }
                 if ("rejection" in prepared) {
@@ -270,7 +273,7 @@ function routeInitialRequest(
     }
     // Native Bun HTTP owns every ordinary request and local WebSocket upgrade, including
     // later requests on a keep-alive connection. Only raw tunnels are handled above.
-    connectPeer(bun, socket, options.httpAddress, () => undefined);
+    connectPeer(bun, socket, options.httpAddress);
 }
 
 function routeProxyRequest(
@@ -287,66 +290,35 @@ function routeProxyRequest(
     }
     state.phase = "connecting";
     socket.timeout?.(0);
-    // A runner folder's tunnels are opened from the runner, which only the internal listener can
-    // reach; this machine's own tunnels are connected natively below.
-    if (parsed.method !== "CONNECT" || state.proxyRoute !== undefined) {
-        const added = [
-            ...(options.proxyHttpAuthorization === undefined
-                ? []
-                : [`Proxy-Authorization: ${options.proxyHttpAuthorization}`]),
-            ...(state.proxyRoute === undefined
-                ? []
-                : [`${WORKSPACE_PROXY_ROUTE_HEADER}: ${state.proxyRoute}`]),
-        ];
-        if (added.length > 0) {
-            // Only the first inner request is inspected. The admitted internal connection
-            // then owns ordinary HTTP framing and keep-alive, just like the Unix listener.
-            const lines = state.buffer
-                .subarray(0, parsed.bytes - 4)
-                .toString("latin1")
-                .split("\r\n");
-            const head = lines.filter(
-                (line) =>
-                    !/^proxy-authorization\s*:/i.test(line) &&
-                    !line.toLowerCase().startsWith(`${WORKSPACE_PROXY_ROUTE_HEADER}:`),
-            );
-            head.push(...added);
-            state.buffer = Buffer.concat([
-                Buffer.from(`${head.join("\r\n")}\r\n\r\n`, "latin1"),
-                state.buffer.subarray(parsed.bytes),
-            ]);
-        }
-        connectPeer(bun, socket, options.proxyHttpAddress, () => undefined);
+    const route = state.proxyRoute;
+    if (route === undefined) {
+        refuse(socket, 502, "Bad Gateway");
         return;
     }
-    let target: URL;
-    try {
-        target = new URL(`http://${parsed.target}`);
-    } catch {
-        refuse(socket, 400, "Bad Request");
-        return;
-    }
-    const port = target.port === "" ? 80 : Number(target.port);
-    if (!Number.isInteger(port) || port < 1 || port > 65_535 || target.hostname.length === 0) {
-        refuse(socket, 400, "Bad Request");
-        return;
-    }
-    state.buffer = state.buffer.subarray(parsed.bytes);
-    connectTcpPeer(bun, socket, target.hostname, port);
+    // Every request and tunnel goes to the internal proxy listener with the attachment's route,
+    // which opens it from the workspace's network. Nothing here connects to a target directly.
+    // Only the first inner request is inspected. The admitted internal connection then owns
+    // ordinary HTTP framing and keep-alive, just like the Unix listener.
+    const lines = state.buffer
+        .subarray(0, parsed.bytes - 4)
+        .toString("latin1")
+        .split("\r\n");
+    const head = lines.filter(
+        (line) =>
+            !/^proxy-authorization\s*:/i.test(line) &&
+            !line.toLowerCase().startsWith(`${WORKSPACE_PROXY_ROUTE_HEADER}:`),
+    );
+    if (options.proxyHttpAuthorization !== undefined)
+        head.push(`Proxy-Authorization: ${options.proxyHttpAuthorization}`);
+    head.push(`${WORKSPACE_PROXY_ROUTE_HEADER}: ${route}`);
+    state.buffer = Buffer.concat([
+        Buffer.from(`${head.join("\r\n")}\r\n\r\n`, "latin1"),
+        state.buffer.subarray(parsed.bytes),
+    ]);
+    connectPeer(bun, socket, options.proxyHttpAddress);
 }
 
-function connectTcpPeer(bun: BunRuntime, client: BunSocket, hostname: string, port: number): void {
-    connectPeer(bun, client, { hostname, port }, () => {
-        enqueueWrite(client, Buffer.from("HTTP/1.1 200 Connection Established\r\n\r\n"));
-    });
-}
-
-function connectPeer(
-    bun: BunRuntime,
-    client: BunSocket,
-    address: BunSocketAddress,
-    connected: () => void,
-): void {
+function connectPeer(bun: BunRuntime, client: BunSocket, address: BunSocketAddress): void {
     const state = clientStateOf(client);
     state.phase = "connecting";
     state.connectTimer = setTimeout(() => {
@@ -368,7 +340,6 @@ function connectPeer(
                     clearConnectTimer(state);
                     state.upstream = upstream;
                     state.phase = "raw";
-                    connected();
                     const initial = state.buffer;
                     state.buffer = Buffer.alloc(0);
                     if (initial.byteLength > 0) enqueueWrite(upstream, initial);
@@ -380,7 +351,7 @@ function connectPeer(
                     flushOutbound(upstream);
                 },
                 end(upstream: BunSocket) {
-                    finishOutbound(peerStateOf(upstream).peer);
+                    finishOutbound(peerStateOf(upstream).peer, "shutdown");
                 },
                 close(upstream: BunSocket) {
                     const peer = peerStateOf(upstream).peer;
@@ -513,10 +484,14 @@ function enqueueWrite(socket: BunSocket, data: Buffer): void {
         state.outboundQueue.push(data);
         state.outboundOffset = written;
         state.outboundBytes = data.byteLength - written;
-        return;
+    } else {
+        state.outboundQueue.push(data);
+        state.outboundBytes += data.byteLength;
     }
-    state.outboundQueue.push(data);
-    state.outboundBytes += data.byteLength;
+    if (state.outboundBytes > OUTBOUND_HIGH_WATER_BYTES && !state.feederPaused) {
+        state.feederPaused = true;
+        feederOf(socket)?.pause?.();
+    }
 }
 
 function flushOutbound(socket: BunSocket): void {
@@ -536,16 +511,31 @@ function flushOutbound(socket: BunSocket): void {
         state.outboundQueue.shift();
         state.outboundOffset = 0;
     }
-    if (state.endAfterFlush) socket.end();
+    if (state.feederPaused) {
+        state.feederPaused = false;
+        feederOf(socket)?.resume?.();
+    }
+    const how = state.finishAfterFlush;
+    state.finishAfterFlush = undefined;
+    if (how !== undefined) finish(socket, how);
     const drained = state.drained;
     state.drained = undefined;
     drained?.();
 }
 
-function finishOutbound(socket: BunSocket): void {
+/**
+ * End this side once everything queued for it is written. A forwarded end of stream only
+ * half-closes, so the other direction keeps flowing; Bun's `end` would close both.
+ */
+function finishOutbound(socket: BunSocket, how: "end" | "shutdown" = "end"): void {
     const state = outboundStateOf(socket);
-    if (state.outboundQueue.length === 0) socket.end();
-    else state.endAfterFlush = true;
+    if (state.outboundQueue.length === 0) finish(socket, how);
+    else if (state.finishAfterFlush !== "end") state.finishAfterFlush = how;
+}
+
+function finish(socket: BunSocket, how: "end" | "shutdown"): void {
+    if (how === "shutdown" && socket.shutdown !== undefined) socket.shutdown();
+    else socket.end();
 }
 
 function closeBridge(socket: BunSocket): void {
@@ -596,6 +586,11 @@ function clearConnectTimer(state: ClientState): void {
     state.connectTimer = undefined;
 }
 
+/** The socket whose data is written to this one: a client's upstream, or a peer's client. */
+function feederOf(socket: BunSocket): BunSocket | undefined {
+    return socket.data.kind === "client" ? socket.data.upstream : socket.data.peer;
+}
+
 function clientUpstream(socket: BunSocket): BunSocket | undefined {
     return socket.data.kind === "client" ? socket.data.upstream : undefined;
 }
@@ -605,7 +600,8 @@ function clientState(): ClientState {
         buffer: Buffer.alloc(0),
         closed: false,
         connectTimer: undefined,
-        endAfterFlush: false,
+        finishAfterFlush: undefined,
+        feederPaused: false,
         kind: "client",
         outboundBytes: 0,
         outboundOffset: 0,
@@ -618,7 +614,8 @@ function clientState(): ClientState {
 
 function peerState(peer: BunSocket): PeerState {
     return {
-        endAfterFlush: false,
+        finishAfterFlush: undefined,
+        feederPaused: false,
         kind: "peer",
         outboundBytes: 0,
         outboundOffset: 0,

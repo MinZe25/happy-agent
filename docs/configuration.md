@@ -232,7 +232,7 @@ there earlier stay listed so they can be archived, and their work fails with
 `local_execution_disabled`. Work on a folder whose runner is away fails with `runner_unavailable`;
 nothing falls back to the daemon. A runner project can run its workspaces in containers on the
 runner by setting `defaultWorkspaceCompute` to `{ "type": "docker", "image": "..." }`; the runner
-needs Docker. Attached secrets and sandboxed services are not available on runners yet.
+needs Docker. Attached secrets are not available on runners yet.
 
 ## Work as separate Linux users
 
@@ -280,8 +280,8 @@ the same folders, as after a runner restart.
 It is machine configuration only: a project `happy.toml` cannot set it. It cannot be combined with
 `[runners]`, since nothing runs on this machine once runners are configured; give each runner its
 own unprivileged user on its own machine instead. Restart the daemon after changing it. As on
-runners, commands that select attached secrets are refused, sandboxed services are unavailable,
-and live Git state is not tracked for these folders. Docker workspaces and a bot's Docker compute
+runners, commands that select attached secrets are refused, and live Git state is not tracked for
+these folders. Docker workspaces and a bot's Docker compute
 are started by the workload user's runner, which then needs Docker access — root-equivalent on that
 host, and therefore the end of this separation.
 

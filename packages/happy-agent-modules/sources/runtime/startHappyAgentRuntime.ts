@@ -75,7 +75,6 @@ import { ProviderScanModule } from "../providerScan/index.js";
 import { SchedulingModule } from "../scheduling/index.js";
 import { SearchModule } from "../search/index.js";
 import { SecretsModule } from "../secrets/index.js";
-import { ServicesModule } from "../services/index.js";
 import { SlashCommandsModule } from "../slashCommands/index.js";
 import { SkillsModule, GlobalSkillsModule, SkillFoldersModule } from "../skills/index.js";
 import { SystemPromptModule } from "../systemPrompt/index.js";
@@ -185,7 +184,6 @@ export interface HappyAgentRuntimeModules {
     readonly scheduling: SchedulingModule;
     readonly search: SearchModule;
     readonly secrets: SecretsModule;
-    readonly services: ServicesModule;
     readonly slashCommands: SlashCommandsModule;
     readonly skills: SkillsModule;
     readonly globalSkills: GlobalSkillsModule;
@@ -531,17 +529,6 @@ export async function startHappyAgentRuntime(
             config,
             runners,
         );
-        const services = new ServicesModule(
-            config,
-            compute.computeModule,
-            workspaces,
-            projects,
-            bots,
-            tasks,
-            durableFunctions,
-            events,
-            surfaces,
-        );
         const node = new NodeModule(config, bots, compute.computeModule, durableFunctions);
         const skillFolders = new SkillFoldersModule(config, bots);
         const tailcat = new TailcatModule(config, bots, durableFunctions);
@@ -701,7 +688,6 @@ export async function startHappyAgentRuntime(
             connections,
             node,
             globalSkills,
-            services,
             subtasks,
             live,
             runners,
@@ -765,7 +751,6 @@ export async function startHappyAgentRuntime(
             scheduling,
             search,
             secrets,
-            services,
             slashCommands,
             skills: compute.skillsModule,
             globalSkills,
@@ -849,7 +834,6 @@ export async function startHappyAgentRuntime(
             imageGeneration,
             compute.skillsModule,
             compute.computeModule,
-            services,
             happy,
             installation,
             menuBar,

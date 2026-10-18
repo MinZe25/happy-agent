@@ -20,6 +20,7 @@ it("protects loopback proxy admission and never forwards its private credential"
     await once(target, "listening");
     const address = target.address();
     if (address === null || typeof address === "string") throw new Error("Missing fixture port.");
+    const route = () => proxy.route(async () => connect(address.port, "127.0.0.1"));
     const call = async (authorization?: string, reuse = false) =>
         await new Promise<number>((resolve, reject) => {
             const outgoing = request(
@@ -28,8 +29,12 @@ it("protects loopback proxy admission and never forwards its private credential"
                     hostname: "127.0.0.1",
                     port,
                     path: `http://127.0.0.1:${address.port}/`,
-                    headers:
-                        authorization === undefined ? {} : { "proxy-authorization": authorization },
+                    headers: {
+                        ...(authorization === undefined
+                            ? {}
+                            : { "proxy-authorization": authorization }),
+                        [WORKSPACE_PROXY_ROUTE_HEADER]: route(),
+                    },
                 },
                 (response) => {
                     response.resume();
@@ -171,8 +176,14 @@ it("shares one admitted TCP hop with every front door, beside its private Unix s
                     agent: false,
                     ...("socketPath" in via ? via : { hostname: "127.0.0.1", port: via.port }),
                     path: `http://127.0.0.1:${address.port}/`,
-                    headers:
-                        authorization === undefined ? {} : { "proxy-authorization": authorization },
+                    headers: {
+                        ...(authorization === undefined
+                            ? {}
+                            : { "proxy-authorization": authorization }),
+                        [WORKSPACE_PROXY_ROUTE_HEADER]: proxy.route(async () =>
+                            connect(address.port, "127.0.0.1"),
+                        ),
+                    },
                 },
                 (response) => {
                     response.resume();

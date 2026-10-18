@@ -10,10 +10,6 @@ import {
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { createId } from "@paralleldrive/cuid2";
-import {
-    workspaceServiceCleanupSchema,
-    type WorkspaceServiceCleanup,
-} from "@slopus/happy-agent-client";
 import { Value } from "@sinclair/typebox/value";
 import { computePermissions, type Compute } from "@slopus/happy-agent-compute";
 import { backoff, detach, mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
@@ -27,12 +23,6 @@ import { ProjectRegistrationError, ProjectsModule, type Project } from "../proje
 import type { RunnerRunOptions, RunnerRunResult, RunnersModule } from "../runners/index.js";
 
 import { WorkspaceLifecycleError } from "./WorkspaceLifecycleError.js";
-import {
-    workspaceServiceArchiveListenerSchema,
-    workspaceRemovalBarrierSchema,
-    type WorkspaceServiceArchiveListener,
-    type WorkspaceRemovalBarrier,
-} from "./WorkspaceServiceCleanup.js";
 
 import { copyProjectFolder } from "./impl/copyProjectFolder.js";
 
@@ -215,8 +205,6 @@ export class WorkspacesModule implements AgentModule {
 
     readonly #store: WorkspaceStore;
     readonly #mutations: WorkspaceMutations;
-    readonly #serviceArchiveListeners = new Set<WorkspaceServiceArchiveListener>();
-    readonly #removalBarriers = new Set<WorkspaceRemovalBarrier>();
     readonly #enabled: boolean;
     readonly #botSettings: BotSettingsModule | undefined;
     #agents: AgentSystemRef | undefined;
@@ -345,26 +333,6 @@ export class WorkspacesModule implements AgentModule {
     /** Takes a subscriber that runs once the change is durable. */
     onEvent(listener: WorkspaceEventListener): WorkspaceUnsubscribe {
         return this.#mutations.onEvent(listener);
-    }
-
-    /** Services close admission in the same transaction as the optimistic archive decision. */
-    onServiceArchiveTransactional(listener: WorkspaceServiceArchiveListener): WorkspaceUnsubscribe {
-        if (!Value.Check(workspaceServiceArchiveListenerSchema, listener))
-            throw new Error("A workspace service archive subscriber must be a function.");
-        this.#serviceArchiveListeners.add(listener);
-        return () => {
-            this.#serviceArchiveListeners.delete(listener);
-        };
-    }
-
-    /** Cleanup owners must positively finish before this module may remove a workspace folder. */
-    onBeforeFolderRemoval(listener: WorkspaceRemovalBarrier): WorkspaceUnsubscribe {
-        if (!Value.Check(workspaceRemovalBarrierSchema, listener))
-            throw new Error("A workspace removal barrier must be a function.");
-        this.#removalBarriers.add(listener);
-        return () => {
-            this.#removalBarriers.delete(listener);
-        };
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -744,16 +712,10 @@ export class WorkspacesModule implements AgentModule {
             normalized.operationId,
             workspaceId,
             async (txCtx, request) => {
-                const before = await this.get(txCtx, workspaceId);
-                const serviceCleanup =
-                    before === undefined || isArchivalDecided(before)
-                        ? undefined
-                        : await this.#prepareServiceArchive(txCtx, before);
                 return await this.#store.beginArchive(
                     txCtx,
                     {
                         workspaceId,
-                        ...(serviceCleanup === undefined ? {} : { serviceCleanup }),
                         ...(normalized.expectedVersion === undefined
                             ? {}
                             : { expectedVersion: normalized.expectedVersion }),
@@ -1562,88 +1524,6 @@ export class WorkspacesModule implements AgentModule {
 
     // --- Archival ----------------------------------------------------------------------------
 
-    async #prepareServiceArchive(
-        ctx: Context,
-        workspace: Workspace,
-    ): Promise<WorkspaceServiceCleanup | undefined> {
-        const serviceIds = new Set<string>();
-        for (const listener of this.#serviceArchiveListeners) {
-            for (const id of await listener(ctx, structuredClone(workspace))) serviceIds.add(id);
-        }
-        if (serviceIds.size === 0) return undefined;
-        const cleanup: WorkspaceServiceCleanup = {
-            phase: "stopping_services",
-            serviceIds: [...serviceIds],
-            error: null,
-        };
-        if (!Value.Check(workspaceServiceCleanupSchema, cleanup))
-            throw new Error("The workspace service cleanup identities are invalid.");
-        return cleanup;
-    }
-
-    async #recordServiceCleanup(
-        ctx: Context,
-        workspaceId: string,
-        cleanup: WorkspaceServiceCleanup,
-    ): Promise<void> {
-        if (!Value.Check(workspaceServiceCleanupSchema, cleanup))
-            throw new Error("The workspace service cleanup state is invalid.");
-        await this.#mutate(
-            ctx,
-            "set_service_cleanup",
-            undefined,
-            workspaceId,
-            async (txCtx, request) =>
-                await this.#store.setServiceCleanup(txCtx, { workspaceId, cleanup }, request),
-            (before, after) => ({
-                type: "workspace_updated",
-                change: "set_service_cleanup",
-                workspace: after,
-                previousWorkspace: requirePreviousWorkspace(before),
-            }),
-        );
-    }
-
-    async #confirmRemoval(ctx: Context, workspace: Workspace): Promise<void> {
-        await backoff(
-            ctx,
-            async (retryCtx) => {
-                if (workspace.serviceCleanup != null)
-                    await this.#recordServiceCleanup(retryCtx, workspace.id, {
-                        ...workspace.serviceCleanup,
-                        phase: "stopping_services",
-                        error: null,
-                    });
-                for (const barrier of this.#removalBarriers)
-                    await barrier(retryCtx, structuredClone(workspace));
-                if (workspace.serviceCleanup != null)
-                    await this.#recordServiceCleanup(retryCtx, workspace.id, {
-                        ...workspace.serviceCleanup,
-                        phase: "removing_files",
-                        error: null,
-                    });
-            },
-            {
-                onError: async (retryCtx) => {
-                    if (workspace.serviceCleanup != null)
-                        await this.#recordServiceCleanup(retryCtx, workspace.id, {
-                            ...workspace.serviceCleanup,
-                            phase: "blocked",
-                            error: {
-                                code: "service_cleanup_unconfirmed",
-                                message:
-                                    "Service cleanup is not confirmed. Workspace files have been retained.",
-                            },
-                        });
-                    retryCtx.log.warn(
-                        { workspaceId: workspace.id },
-                        "Workspace removal is waiting for confirmed runtime cleanup.",
-                    );
-                },
-            },
-        );
-    }
-
     async #archiveWorkspaceFolder(ctx: Context, workspaceId: string, kv: AgentKV): Promise<void> {
         const workspace = await this.get(ctx, workspaceId);
         if (workspace === undefined || workspace.status === "archived") return;
@@ -1668,18 +1548,11 @@ export class WorkspacesModule implements AgentModule {
         }
         const project = await this.#project(ctx, workspace.projectRef);
         if (project === undefined) throw new Error("The workspace's project was not found.");
-        await this.#confirmRemoval(ctx, workspace);
         const machine = await this.#runners.machine(workspace.runnerId);
         const settings = await this.#folderSettings(machine, project.repositoryRef);
         await backoff(
             ctx,
             async (retryCtx) => {
-                if (workspace.serviceCleanup != null)
-                    await this.#recordServiceCleanup(retryCtx, workspace.id, {
-                        ...workspace.serviceCleanup,
-                        phase: "removing_files",
-                        error: null,
-                    });
                 await this.#projects.runInProjectGitLock(retryCtx, project.id, async () => {
                     await removeWorkspaceDirectory({
                         git: this.#git,
@@ -1694,17 +1567,7 @@ export class WorkspacesModule implements AgentModule {
                 });
             },
             {
-                onError: async (retryCtx, error) => {
-                    if (workspace.serviceCleanup != null)
-                        await this.#recordServiceCleanup(retryCtx, workspace.id, {
-                            ...workspace.serviceCleanup,
-                            phase: "blocked",
-                            error: {
-                                code: "folder_cleanup_failed",
-                                message:
-                                    "The workspace folder could not be removed yet. Its services are stopped.",
-                            },
-                        });
+                onError: (retryCtx, error) => {
                     retryCtx.log.warn(
                         { error, workspaceId },
                         "The archived workspace's folder could not be removed yet.",

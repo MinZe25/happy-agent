@@ -18,7 +18,6 @@ export async function forwardBunAttachment(
     try {
         const ctx = prepared.context("bun-authenticated-attachment");
         if (await prepared.api.handleRemoteAttachment(ctx, request, stream, bytes)) return;
-        if (await prepared.api.handleServiceAttachment(ctx, request, stream, bytes)) return;
         stream.destroy();
     } finally {
         request.destroy();

@@ -17,14 +17,12 @@ archives the workspace when the subtask is archived. This module stays unaware o
 Workspace setup captures its command output in the app. Its child process explicitly hides the
 Windows console so session/workspace creation does not flash a separate terminal.
 
-## Optimistic archival does not authorize early file removal
+## Archival no longer depends on workspace services
 
-Service admission closes in the archive transaction, which records the bounded service IDs and
-initial cleanup phase in the same workspace version. The durable removal operation then awaits
-positive service teardown before touching files. Failed cleanup retains the directory and records
-a credential-free blocked status; retries resume the same intent. Progress changes use ordinary
-workspace versions and events, and successful archival clears the cleanup field. Abort signals or
-shell exit notifications alone never satisfy this removal barrier.
+Workspace services have been removed. Durable archival still stops attached agents and their
+background processes before removing files, but has no service admission hook or service teardown
+barrier. The optional stored cleanup field remains readable for API compatibility and clears when
+archival completes.
 
 ## Child workspaces reuse the project's credential owner
 

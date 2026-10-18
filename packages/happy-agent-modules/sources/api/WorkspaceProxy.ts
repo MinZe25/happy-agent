@@ -3,17 +3,32 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
     createServer,
     request as requestHttp,
+    type IncomingHttpHeaders,
     type IncomingMessage,
+    type OutgoingHttpHeaders,
     type ServerResponse,
 } from "node:http";
-import { connect as connectTcp, type Socket } from "node:net";
-import { Duplex } from "node:stream";
+import type { Socket } from "node:net";
+import { pipeline, type Duplex } from "node:stream";
 
-const CONNECT_TIMEOUT_MS = 30_000;
+/** How long opening one connection may take. Nothing bounds a connection once it is open. */
+const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 /** How long a route waits for the attachment it was made for before it is forgotten. */
 const ROUTE_TTL_MS = 60_000;
 /** Carries a route from the Bun front door to this listener; never forwarded upstream. */
 export const WORKSPACE_PROXY_ROUTE_HEADER = "x-happy-proxy-route";
+/** Headers that describe one hop's connection, not the request, and are never forwarded. */
+const HOP_HEADERS = new Set([
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "upgrade",
+    WORKSPACE_PROXY_ROUTE_HEADER,
+]);
 
 /** Opens a connection from the workspace's own network. */
 export type WorkspaceProxyConnector = (host: string, port: number) => Promise<Duplex>;
@@ -25,21 +40,31 @@ export interface WorkspaceProxyTcpHop {
     readonly authorization: string;
 }
 
+export interface WorkspaceProxyOptions {
+    /** Overrides the 30-second bound on opening one connection. */
+    readonly connectTimeoutMs?: number;
+}
+
 /**
- * HTTP/1.1 forward proxy spoken inside the workspace CONNECT attachment.
+ * HTTP/1.1 forward proxy spoken inside a workspace CONNECT attachment.
  *
- * A folder on this machine reaches this machine's network directly. A folder on a runner reaches
- * the runner's: its attachment is admitted with a route, a one-time key naming how to connect from
- * there, and every request and tunnel on that attachment then opens its connection through it.
+ * Every attachment is admitted with a route: a one-time key naming the network its connections are
+ * opened from — this machine, a runner, or one agent's machine. Every request and tunnel on that
+ * attachment opens its connection through that route and nowhere else. A request that arrives
+ * without a route is refused; it is never connected from this process's own network instead.
+ *
+ * Once a connection is open, bytes flow in both directions for as long as both sides keep it
+ * open, with backpressure and half-close passed through. Only opening a connection is bounded.
  */
 export class WorkspaceProxy {
     /** Attachments handed over directly, and the private Unix socket. Both are owner-only. */
-    readonly #server = createServer();
+    readonly #server = createServer({ requestTimeout: 0 });
     /**
      * Loopback TCP, which any local process can reach, so each connection is admitted by a
      * memory-only credential. Every front door shares this one hop.
      */
-    readonly #tcpServer = createServer();
+    readonly #tcpServer = createServer({ requestTimeout: 0 });
+    readonly #connectTimeoutMs: number;
     readonly #sockets = new Set<Duplex>();
     #socketPath: string | undefined;
     #tcpHop: Promise<WorkspaceProxyTcpHop> | undefined;
@@ -51,7 +76,8 @@ export class WorkspaceProxy {
         { readonly connector: WorkspaceProxyConnector; readonly timer: NodeJS.Timeout }
     >();
 
-    constructor() {
+    constructor(options: WorkspaceProxyOptions = {}) {
+        this.#connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
         this.#serve(this.#server, false);
         this.#serve(this.#tcpServer, true);
     }
@@ -94,9 +120,14 @@ export class WorkspaceProxy {
         return key;
     }
 
-    accept(socket: Socket, head: Buffer, route?: string): void {
-        const connector = route === undefined ? undefined : this.#take(route);
-        if (connector !== undefined) this.#connectors.set(socket, connector);
+    /** Open an admitted attachment on this socket, connecting only through its route. */
+    accept(socket: Socket, head: Buffer, route: string): void {
+        const connector = this.#take(route);
+        if (connector === undefined) {
+            refuse(socket, 502, "Bad Gateway");
+            return;
+        }
+        this.#connectors.set(socket, connector);
         socket.write("HTTP/1.1 200 Connection Established\r\n\r\n", () => {
             if (head.byteLength > 0) socket.unshift(head);
             this.#server.emit("connection", socket);
@@ -188,7 +219,7 @@ export class WorkspaceProxy {
         return entry.connector;
     }
 
-    /** How this request's connection reaches its target, when it is not this machine's network. */
+    /** The network this request's connection is opened from; undefined when it has no route. */
     #connectorFor(request: IncomingMessage): WorkspaceProxyConnector | undefined {
         const route = request.headers[WORKSPACE_PROXY_ROUTE_HEADER];
         delete request.headers[WORKSPACE_PROXY_ROUTE_HEADER];
@@ -197,6 +228,38 @@ export class WorkspaceProxy {
         const connector = this.#take(route);
         if (connector !== undefined) this.#connectors.set(request.socket, connector);
         return connector;
+    }
+
+    /** Open one connection through a route, bounded only until it is established. */
+    async #open(connector: WorkspaceProxyConnector, host: string, port: number): Promise<Duplex> {
+        return await new Promise<Duplex>((resolve, reject) => {
+            let settled = false;
+            const timer = setTimeout(() => {
+                settled = true;
+                reject(new ConnectTimeoutError());
+            }, this.#connectTimeoutMs);
+            timer.unref();
+            connector(host, port).then(
+                (opened) => {
+                    clearTimeout(timer);
+                    // Whoever takes the connection adds its own handling; until then, and for a
+                    // connection opened too late, an error must only close it.
+                    opened.on("error", () => undefined);
+                    if (settled) {
+                        opened.destroy();
+                        return;
+                    }
+                    settled = true;
+                    resolve(opened);
+                },
+                (error: unknown) => {
+                    clearTimeout(timer);
+                    if (settled) return;
+                    settled = true;
+                    reject(error instanceof Error ? error : new Error(String(error)));
+                },
+            );
+        });
     }
 
     async close(): Promise<void> {
@@ -228,39 +291,66 @@ export class WorkspaceProxy {
             return;
         }
         const connector = this.#connectorFor(request);
-        const headers = { ...request.headers };
-        delete headers["proxy-connection"];
-        const hostname = target.hostname;
+        if (connector === undefined) {
+            sendProxyError(response, 502, "This proxy connection has no workspace network.");
+            return;
+        }
+        const hostname = connectableHost(target.hostname);
         const port = target.port === "" ? 80 : Number(target.port);
-        const upstream = requestHttp(
-            {
-                hostname,
-                port,
-                path: `${target.pathname}${target.search}`,
-                method: request.method,
-                headers,
-                signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
-                ...(connector === undefined
-                    ? {}
-                    : { createConnection: () => deferredDuplex(connector(hostname, port)) }),
-            },
-            (upstreamResponse) => {
-                response.writeHead(
-                    upstreamResponse.statusCode ?? 502,
-                    upstreamResponse.statusMessage,
-                    upstreamResponse.headers,
+        // The request's lifetime is the client's: once it gives up, so does everything opened
+        // for it, whether or not the connection was established yet.
+        let abandoned = false;
+        let upstream: ReturnType<typeof requestHttp> | undefined;
+        response.once("close", () => {
+            if (response.writableFinished) return;
+            abandoned = true;
+            upstream?.destroy();
+        });
+        this.#open(connector, hostname, port).then(
+            (connection) => {
+                if (abandoned) {
+                    connection.destroy();
+                    return;
+                }
+                const outgoing = requestHttp(
+                    {
+                        hostname,
+                        port,
+                        path: `${target.pathname}${target.search}`,
+                        method: request.method,
+                        headers: endToEndHeaders(request.headers),
+                        createConnection: () => connection as Socket,
+                    },
+                    (upstreamResponse) => {
+                        response.writeHead(
+                            upstreamResponse.statusCode ?? 502,
+                            upstreamResponse.statusMessage,
+                            endToEndHeaders(upstreamResponse.headers),
+                        );
+                        pipeline(upstreamResponse, response, () => {
+                            outgoing.destroy();
+                        });
+                    },
                 );
-                upstreamResponse.pipe(response);
+                upstream = outgoing;
+                outgoing.on("error", () => {
+                    if (!response.headersSent) {
+                        sendProxyError(response, 502, "The proxied service could not be reached.");
+                    } else {
+                        response.destroy();
+                    }
+                });
+                pipeline(request, outgoing, () => undefined);
+            },
+            (error: unknown) => {
+                if (abandoned) return;
+                if (error instanceof ConnectTimeoutError) {
+                    sendProxyError(response, 504, "The proxied service took too long to answer.");
+                } else {
+                    sendProxyError(response, 502, "The proxied service could not be reached.");
+                }
             },
         );
-        upstream.on("error", () => {
-            if (!response.headersSent) {
-                sendProxyError(response, 502, "The proxied service could not be reached.");
-            } else {
-                response.destroy();
-            }
-        });
-        request.pipe(upstream);
     }
 
     #openTunnel(request: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -272,123 +362,105 @@ export class WorkspaceProxy {
             return;
         }
         const port = target.port === "" ? 80 : Number(target.port);
-        if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+        if (!Number.isInteger(port) || port < 1 || port > 65_535 || target.hostname.length === 0) {
             refuse(socket, 400, "Bad Request");
             return;
         }
         const connector = this.#connectorFor(request);
-        if (connector !== undefined) {
-            this.#openRoutedTunnel(connector, target.hostname, port, socket, head);
+        if (connector === undefined) {
+            refuse(socket, 502, "Bad Gateway");
             return;
         }
-        const upstream = connectTcp({
-            host: target.hostname,
-            port,
-        });
-        const timeout = setTimeout(() => {
-            upstream.destroy();
-            refuse(socket, 504, "Gateway Timeout");
-        }, CONNECT_TIMEOUT_MS);
-        timeout.unref();
-        upstream.once("connect", () => {
-            clearTimeout(timeout);
-            socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-            if (head.byteLength > 0) upstream.write(head);
-            upstream.pipe(socket);
-            socket.pipe(upstream);
-        });
-        upstream.once("error", () => {
-            clearTimeout(timeout);
-            refuse(socket, 502, "Bad Gateway");
-        });
-        socket.once("close", () => upstream.destroy());
-    }
-
-    #openRoutedTunnel(
-        connector: WorkspaceProxyConnector,
-        hostname: string,
-        port: number,
-        socket: Duplex,
-        head: Buffer,
-    ): void {
-        let settled = false;
-        const timeout = setTimeout(() => {
-            settled = true;
-            refuse(socket, 504, "Gateway Timeout");
-        }, CONNECT_TIMEOUT_MS);
-        timeout.unref();
-        connector(hostname, port).then(
+        // HTTP hands a CONNECT socket over without its error handling. A reset while the
+        // connection is still being opened must only close this tunnel.
+        socket.on("error", () => undefined);
+        this.#open(connector, connectableHost(target.hostname), port).then(
             (upstream) => {
-                clearTimeout(timeout);
-                if (settled || socket.destroyed) {
+                if (socket.destroyed) {
                     upstream.destroy();
                     return;
                 }
-                settled = true;
                 socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
                 if (head.byteLength > 0) upstream.write(head);
-                upstream.pipe(socket);
-                socket.pipe(upstream);
-                upstream.once("error", () => socket.destroy());
-                socket.once("error", () => upstream.destroy());
-                socket.once("close", () => upstream.destroy());
+                joinTunnel(socket, upstream);
             },
-            () => {
-                clearTimeout(timeout);
-                if (settled) return;
-                settled = true;
-                refuse(socket, 502, "Bad Gateway");
+            (error: unknown) => {
+                if (error instanceof ConnectTimeoutError) refuse(socket, 504, "Gateway Timeout");
+                else refuse(socket, 502, "Bad Gateway");
             },
         );
     }
 }
 
+class ConnectTimeoutError extends Error {
+    constructor() {
+        super("Opening the connection took too long.");
+    }
+}
+
 /**
- * A stream usable the moment HTTP asks for a connection, while the real one is still being opened
- * elsewhere. Writes wait for it; a connection that cannot be opened fails the request.
+ * Join both ends of an established tunnel. Each side's end of stream half-closes the other
+ * direction. A side that is reset or closes before its end of stream ends the other at once; one
+ * that closes after it ends the other once everything written to it has been delivered.
  */
-function deferredDuplex(opening: Promise<Duplex>): Duplex {
-    let upstream: Duplex | undefined;
-    const waiting: { chunk: Buffer; callback: (error?: Error | null) => void }[] = [];
-    let ending: (() => void) | undefined;
-    const stream = new Duplex({
-        read() {
-            upstream?.resume();
-        },
-        write(chunk: Buffer, _encoding, callback) {
-            if (upstream === undefined) waiting.push({ chunk, callback });
-            else upstream.write(chunk, callback);
-        },
-        final(callback) {
-            if (upstream === undefined) ending = () => upstream?.end(callback);
-            else upstream.end(callback);
-        },
-        destroy(error, callback) {
-            upstream?.destroy();
-            callback(error);
-        },
-    });
-    opening.then(
-        (opened) => {
-            if (stream.destroyed) {
-                opened.destroy();
-                return;
-            }
-            upstream = opened;
-            opened.on("data", (chunk: Buffer) => {
-                if (!stream.push(chunk)) opened.pause();
-            });
-            opened.once("end", () => stream.push(null));
-            opened.once("error", (error) => stream.destroy(error));
-            opened.once("close", () => stream.destroy());
-            for (const { chunk, callback } of waiting.splice(0)) opened.write(chunk, callback);
-            ending?.();
-        },
-        (error: unknown) => {
-            stream.destroy(error instanceof Error ? error : new Error(String(error)));
-        },
+function joinTunnel(client: Duplex, upstream: Duplex): void {
+    client.pipe(upstream);
+    upstream.pipe(client);
+    const follow = (from: Duplex, to: Duplex): void => {
+        from.on("error", () => abort(to));
+        from.once("close", () => {
+            if (!from.readableEnded) abort(to);
+            else closeAfterFlush(to);
+        });
+    };
+    follow(client, upstream);
+    follow(upstream, client);
+}
+
+/** End a side abruptly: a TCP reset where the side is a socket, so the peer sees one too. */
+function abort(stream: Duplex): void {
+    if (stream.destroyed) return;
+    const socket = stream as Partial<Socket>;
+    if (typeof socket.resetAndDestroy === "function" && socket.connecting === false) {
+        try {
+            socket.resetAndDestroy();
+            return;
+        } catch {
+            // Not a connected TCP socket after all; destroy it as any stream.
+        }
+    }
+    stream.destroy();
+}
+
+function closeAfterFlush(stream: Duplex): void {
+    if (stream.destroyed) return;
+    if (stream.writableFinished) {
+        stream.destroy();
+        return;
+    }
+    stream.once("finish", () => stream.destroy());
+    stream.end();
+}
+
+/** A URL's host as a connection names it: an IPv6 literal without its brackets. */
+function connectableHost(hostname: string): string {
+    return hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+}
+
+/** The headers a hop forwards: everything except what describes its own connection. */
+function endToEndHeaders(headers: IncomingHttpHeaders): OutgoingHttpHeaders {
+    const named = new Set(
+        String(headers.connection ?? "")
+            .split(",")
+            .map((name) => name.trim().toLowerCase())
+            .filter((name) => name.length > 0),
     );
-    return stream;
+    const forwarded: OutgoingHttpHeaders = {};
+    for (const [name, value] of Object.entries(headers)) {
+        if (value === undefined || HOP_HEADERS.has(name) || named.has(name)) continue;
+        forwarded[name] = value;
+    }
+    return forwarded;
 }
 
 async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
@@ -401,6 +473,10 @@ async function closeServer(server: ReturnType<typeof createServer>): Promise<voi
 }
 
 function sendProxyError(response: ServerResponse, status: number, message: string): void {
+    if (response.headersSent || response.destroyed) {
+        response.destroy();
+        return;
+    }
     const body = Buffer.from(message);
     response.writeHead(status, {
         connection: "close",

@@ -1,5 +1,4 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
-import { workspaceServiceCleanupSchema } from "@slopus/happy-agent-client";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
@@ -143,15 +142,6 @@ export const workspaceStoreArchiveInputSchema = Type.Object(
     {
         workspaceId: workspaceIdSchema,
         expectedVersion: Type.Optional(workspaceVersionSchema),
-        serviceCleanup: Type.Optional(workspaceServiceCleanupSchema),
-    },
-    { additionalProperties: false },
-);
-
-export const workspaceStoreServiceCleanupInputSchema = Type.Object(
-    {
-        workspaceId: workspaceIdSchema,
-        cleanup: Type.Union([workspaceServiceCleanupSchema, Type.Null()]),
     },
     { additionalProperties: false },
 );
@@ -233,7 +223,6 @@ export const workspaceStoreSchema = Type.Object(
         reorder: mutation(workspaceStoreReorderInputSchema),
         beginArchive: mutation(workspaceStoreArchiveInputSchema),
         completeArchive: mutation(workspaceStoreWorkspaceInputSchema),
-        setServiceCleanup: mutation(workspaceStoreServiceCleanupInputSchema),
         applyGitFacts: mutation(workspaceStoreApplyGitFactsInputSchema),
         applyProbe: mutation(workspaceStoreApplyProbeInputSchema),
     },
@@ -521,9 +510,6 @@ export function createWorkspaceStore(catalog: WorkspacesModule): WorkspaceStore 
                     ...current,
                     status: "archiving",
                     archivedAt: Math.max(now(), current.updatedAt + 1),
-                    ...(input.serviceCleanup === undefined
-                        ? {}
-                        : { serviceCleanup: input.serviceCleanup }),
                 };
                 delete next.initializationError;
                 return next;
@@ -540,15 +526,6 @@ export function createWorkspaceStore(catalog: WorkspacesModule): WorkspaceStore 
                 };
                 delete next.initializationError;
                 return next;
-            }),
-
-        setServiceCleanup: async (ctx, input, operation) =>
-            await update(ctx, input.workspaceId, operation, (before) => {
-                if (before.status !== "archiving")
-                    throw new Error("Only an archiving workspace has pending service cleanup.");
-                return sameJson(before.serviceCleanup, input.cleanup)
-                    ? undefined
-                    : { ...before, serviceCleanup: input.cleanup };
             }),
 
         applyGitFacts: async (ctx, input, operation) =>

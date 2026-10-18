@@ -78,10 +78,6 @@ import {
 } from "./ProjectProvisioning.js";
 import { ProjectLifecycleError } from "./ProjectLifecycleError.js";
 import { ProjectRegistrationError } from "./ProjectRegistrationError.js";
-import {
-    projectRemovalBarrierSchema,
-    type ProjectRemovalBarrier,
-} from "./ProjectRemovalBarrier.js";
 import { findHostingAvatar, findRepositoryAvatar } from "./impl/findProjectAvatar.js";
 import { normalizeProjectAvatar } from "./impl/normalizeProjectAvatar.js";
 import { removeManagedProjectDirectory } from "./impl/removeManagedProjectDirectory.js";
@@ -233,7 +229,6 @@ export class ProjectsModule implements AgentModule {
     readonly #homeDirectory: string;
     readonly #projectLocks: MapAsyncLock<string> = mapAsyncLock();
     readonly #agentAssociationLocks: MapAsyncLock<string> = mapAsyncLock();
-    readonly #removalBarriers = new Set<ProjectRemovalBarrier>();
 
     /** This machine, as the installation that built the catalog named it. */
     #localInstanceId: string | undefined;
@@ -320,16 +315,6 @@ export class ProjectsModule implements AgentModule {
     /** Takes a subscriber that runs once a catalog change is durable. */
     onEvent(listener: ProjectEventListener): ProjectUnsubscribe {
         return this.#mutations.onEvent(listener);
-    }
-
-    /** An awaited cleanup barrier; a failure always retains the managed project directory. */
-    onBeforeFolderRemoval(listener: ProjectRemovalBarrier): ProjectUnsubscribe {
-        if (!Value.Check(projectRemovalBarrierSchema, listener))
-            throw new Error("A project removal barrier must be a function.");
-        this.#removalBarriers.add(listener);
-        return () => {
-            this.#removalBarriers.delete(listener);
-        };
     }
 
     /**
@@ -851,11 +836,8 @@ export class ProjectsModule implements AgentModule {
         await backoff(
             ctx,
             async (retryCtx) => {
-                for (const barrier of this.#removalBarriers)
-                    await barrier(retryCtx, structuredClone(project));
                 await this.runInProjectGitLock(retryCtx, projectId, async (lockedCtx) => {
-                    // Restore cancels cleanup while holding this same lock. A previously awaited
-                    // runtime barrier must never authorize deleting a now-active project.
+                    // Restore cancels cleanup while holding this same lock.
                     lockedCtx.lifetime?.throwIfAborted();
                     const current = await this.get(lockedCtx, projectId);
                     if (current?.status !== "archived") return;

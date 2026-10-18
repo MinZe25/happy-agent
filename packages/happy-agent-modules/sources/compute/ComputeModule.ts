@@ -14,28 +14,20 @@ import {
 import {
     createDockerCompute,
     createHostCompute,
-    computeServiceStartSchema,
     HOST_SESSION_STOP_GRACE_MS,
     hostComputeProvider,
     killProcessGroup,
     NativeProcessManager,
     type Compute,
+    type ComputeConnectOptions,
     type ComputeHostPolicy,
-    type ComputeService,
-    type ComputeServiceExecution,
-    type ComputeServiceStartOptions,
     type HostComputeConfig,
 } from "@slopus/happy-agent-compute";
 import { createId } from "@paralleldrive/cuid2";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import {
-    afterCommit,
-    detach,
-    mapAsyncLock,
-    type Context,
-    type MapAsyncLock,
-} from "@steve.kite/stdlib";
+import { detach, mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
+import type { Duplex } from "node:stream";
 
 import type { BotSettingsModule } from "../botSettings/index.js";
 import type { ConfigModule } from "../config/index.js";
@@ -224,6 +216,8 @@ interface CachedCompute {
     closing: boolean;
     readonly cwd: string;
     readonly compute: HostCompute;
+    /** Connections opened from this machine on the product's behalf, ended with the machine. */
+    readonly connections: Set<Duplex>;
     readonly processContext: Context;
     readonly processManager: NativeProcessManager | undefined;
 }
@@ -233,14 +227,6 @@ export interface ComputeAbortSnapshot {
     readonly processGroups: number;
     readonly sessions: readonly ComputeSessionActivity[];
 }
-
-/** Features persist revocation with the same transaction that accepts an owning-agent abort. */
-export type ComputeAgentAbortListener = (ctx: Context, agentId: string) => void | Promise<void>;
-export type ComputeServiceStopListener = (
-    ctx: Context,
-    agentId: string,
-    execution: ComputeServiceExecution,
-) => void | Promise<void>;
 
 /**
  * The shared compute module.
@@ -271,8 +257,6 @@ export class ComputeModule implements AgentModule {
     readonly #computeLocks: MapAsyncLock<string> = mapAsyncLock<string>();
     readonly #activeOperations = new Set<Promise<unknown>>();
     readonly #processes = new ComputeProcessRegistry();
-    readonly #abortListeners = new Set<ComputeAgentAbortListener>();
-    readonly #serviceStopListeners = new Set<ComputeServiceStopListener>();
     readonly #readLocks: MapAsyncLock<string> = mapAsyncLock<string>();
     /**
      * Read locks for the automatic permission reviewer's tools. The reviewer runs over a compute the
@@ -397,6 +381,7 @@ export class ComputeModule implements AgentModule {
                     closing: false,
                     cwd: config.cwd,
                     compute,
+                    connections: new Set(),
                     processContext: created.processContext,
                     processManager: created.processManager,
                 };
@@ -406,6 +391,53 @@ export class ComputeModule implements AgentModule {
                 return compute;
             }),
         );
+    }
+
+    /**
+     * Open connections from one agent's own machine: this computer, its runner, or its container.
+     *
+     * The context must carry the agent's configuration, as for {@link resolve}; the machine is
+     * started now if it is not running yet. Every connection the returned function opens comes from
+     * that exact machine and is ended when the agent is archived or this module is disposed. Once
+     * the machine is gone, the function refuses instead of starting another one.
+     */
+    async network(
+        ctx: Context,
+        agentId: string,
+    ): Promise<(ctx: Context, options: ComputeConnectOptions) => Promise<Duplex>> {
+        const compute = await this.resolve(ctx, agentId);
+        if (compute?.network === undefined) {
+            throw Object.assign(
+                new Error("This agent's machine cannot open network connections."),
+                {
+                    code: "ENOTSUP",
+                },
+            );
+        }
+        const network = compute.network;
+        const current = (): CachedCompute => {
+            const cached = this.#computes.get(agentId);
+            if (cached === undefined || cached.compute !== compute || cached.closing) {
+                throw Object.assign(new Error("This agent's machine has stopped."), {
+                    code: "ECONNREFUSED",
+                });
+            }
+            return cached;
+        };
+        return async (connectCtx, options) => {
+            current();
+            const connection = await network.connect(connectCtx, options);
+            let cached: CachedCompute;
+            try {
+                cached = current();
+            } catch (error) {
+                connection.destroy();
+                throw error;
+            }
+            cached.connections.add(connection);
+            connection.once("close", () => cached.connections.delete(connection));
+            return connection;
+        };
     }
 
     /**
@@ -445,27 +477,8 @@ export class ComputeModule implements AgentModule {
     /** Durably remember what this abort is about to kill for the agent's next model request. */
     async recordAbortNotice(ctx: Context, agentId: string): Promise<ComputeAbortSnapshot> {
         const snapshot = this.abortSnapshot(agentId);
-        for (const listener of this.#abortListeners) await listener(ctx, agentId);
         await this.#storeAbortNotice(ctx, agentId, snapshot);
         return snapshot;
-    }
-
-    onAgentAbortTransactional(listener: ComputeAgentAbortListener): () => void {
-        if (!Value.Check(callableSchema, listener))
-            throw new Error("An agent abort subscriber must be a function.");
-        this.#abortListeners.add(listener);
-        return () => {
-            this.#abortListeners.delete(listener);
-        };
-    }
-
-    onServiceStopTransactional(listener: ComputeServiceStopListener): () => void {
-        if (!Value.Check(callableSchema, listener))
-            throw new Error("A service stop subscriber must be a function.");
-        this.#serviceStopListeners.add(listener);
-        return () => {
-            this.#serviceStopListeners.delete(listener);
-        };
     }
 
     async #storeAbortNotice(
@@ -528,96 +541,12 @@ export class ComputeModule implements AgentModule {
         return stopped !== undefined;
     }
 
-    /** Start one strict service on the owning compute's independent process lifetime. */
-    async startService(
-        ctx: Context,
-        agentId: string,
-        options: ComputeServiceStartOptions,
-    ): Promise<{ service: ComputeService; process: ComputeProcess }> {
-        if (!Value.Check(computeServiceStartSchema, options))
-            throw new Error("The service start options are invalid.");
-        const generation = this.#computes.get(agentId)?.abortGeneration ?? 0;
-        const compute = await this.resolve(ctx, agentId);
-        const cached = this.#computes.get(agentId);
-        if (compute?.services === undefined || cached === undefined) {
-            throw new Error("This compute cannot enforce sandboxed services.");
-        }
-        if (cached.closing || this.#closed) throw new Error("This agent's compute is closing.");
-        if (cached.abortGeneration !== generation)
-            throw new Error("The service was cancelled by an owning-agent abort.");
-        const services = compute.services;
-        return await this.#track(
-            (async () => {
-                const service = await services.start(
-                    cached.processContext,
-                    structuredClone(options),
-                );
-                let process: ComputeProcess;
-                try {
-                    process = this.#processes.registerService(
-                        agentId,
-                        compute,
-                        service,
-                        options.command,
-                    );
-                } catch (error: unknown) {
-                    await service.stop(cached.processContext);
-                    throw error;
-                }
-                if (cached.abortGeneration !== generation || cached.closing || this.#closed) {
-                    await this.#processes.stop(cached.processContext, agentId, process.id);
-                    process =
-                        this.#processes.list(agentId).find((entry) => entry.id === process.id) ??
-                        process;
-                }
-                return { service, process };
-            })(),
-        );
-    }
-
-    /** Cleanup proof remains available while an archived compute refuses new work. */
-    async reconcileService(
-        ctx: Context,
-        agentId: string,
-        execution: ComputeServiceExecution,
-    ): Promise<void> {
-        const compute = this.#computes.get(agentId)?.compute ?? (await this.resolve(ctx, agentId));
-        if (compute?.services === undefined)
-            throw new Error("This compute cannot confirm the service sandbox cleanup.");
-        await compute.services.reconcile(ctx, execution);
-        this.#processes.confirmServiceReconciled(agentId, compute, execution);
-    }
-
     /** Stop one command addressed by its public process ID and return its final public state. */
     async stopProcess(
         ctx: Context,
         agentId: string,
         processId: string,
     ): Promise<ComputeProcess | undefined> {
-        const execution = this.#processes.serviceExecution(agentId, processId);
-        if (execution !== undefined && agentDatabase(ctx) !== undefined) {
-            let stopping: Promise<ComputeProcess | undefined> | undefined;
-            await ctx.inTx(async (txCtx) => {
-                for (const listener of this.#serviceStopListeners)
-                    await listener(txCtx, agentId, execution);
-                afterCommit(txCtx, () => {
-                    const processCtx = this.#computes.get(agentId)?.processContext;
-                    if (processCtx === undefined) return;
-                    stopping = this.#processes.stop(processCtx, agentId, processId);
-                    void stopping.catch(() => {
-                        processCtx.log.warn("Service process cleanup is not confirmed.", {
-                            agentId,
-                            processId,
-                        });
-                    });
-                });
-            });
-            // A nested caller still owns the commit. Return its current projection without
-            // waiting on an effect that must not run before that caller commits or rolls back.
-            return stopping === undefined
-                ? this.#processes.list(agentId).find((process) => process.id === processId)
-                : await stopping;
-        }
         return await this.#processes.stop(ctx, agentId, processId);
     }
 
@@ -631,9 +560,9 @@ export class ComputeModule implements AgentModule {
                 if (cached === undefined) return;
                 cached.closing = true;
                 cached.abortGeneration += 1;
+                endConnections(cached);
                 await this.#processes.drain();
                 await cached.compute.dispose(lockCtx);
-                await this.#processes.stopServices(lockCtx, agentId, cached.compute);
                 this.#processes.exitAll(agentId, cached.compute);
                 this.#processes.detach(cached.compute);
                 this.#computes.delete(agentId);
@@ -720,6 +649,7 @@ export class ComputeModule implements AgentModule {
             await Promise.allSettled([...this.#activeOperations]);
             const cached = [...this.#computes.values()];
             this.#computes.clear();
+            for (const entry of cached) endConnections(entry);
             this.#promptedAbortNotices.clear();
             this.#sharedKV = undefined;
             const reviewer = this.#reviewer;
@@ -1161,7 +1091,7 @@ export class ComputeModule implements AgentModule {
         };
     }
 
-    /** Shell rows exit immediately; service rows still require the native teardown barrier. */
+    /** Immediately publish stopped shell rows and hard-kill every owned process group. */
     async #hardKillCached(ctx: Context, agentId: string, cached: CachedCompute): Promise<void> {
         this.#processes.exitAll(agentId, cached.compute);
         const processManager = cached.processManager;
@@ -1172,12 +1102,7 @@ export class ComputeModule implements AgentModule {
                       async (processGroupId) =>
                           await killProcessGroup(ctx, processGroupId, "SIGKILL"),
                   );
-        // Start revocation even if another process group cannot be signaled. Neither failure
-        // cancels cleanup of the other owners, nor is a failed service barrier called success.
-        const results = await Promise.allSettled([
-            ...kills,
-            this.#processes.stopServices(ctx, agentId, cached.compute),
-        ]);
+        const results = await Promise.allSettled(kills);
         const failures = results.flatMap((result) =>
             result.status === "rejected" ? [result.reason] : [],
         );
@@ -1221,6 +1146,11 @@ function vendorFor(scope: AgentModuleScope): ComputeToolVendor {
             ? {}
             : { providerKind: scope.agent.providerKind }),
     });
+}
+
+function endConnections(cached: CachedCompute): void {
+    for (const connection of cached.connections) connection.destroy();
+    cached.connections.clear();
 }
 
 function runtimeCompute(compute: Compute): unknown {

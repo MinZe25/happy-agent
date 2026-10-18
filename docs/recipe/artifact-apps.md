@@ -348,15 +348,10 @@ happy-agent artifact dev ./my-app --scratch .context/my-app-data
 
 It serves the folder at `http://127.0.0.1:4173/`, answers `/api/*` with the same code, limits, and
 SDK as the daemon, and keeps data and the debug log in the `--scratch` folder (without it, in a
-temporary folder removed on exit). It never touches the daemon's data. Run it as a workspace
-service, with the folder as an input and the scratch folder as scratch, so the person can open the
-preview beside you:
-
-```text
-service_start  name: "my-app"  port: 4173
-               cmd: "happy-agent artifact dev my-app --scratch .context/my-app-data"
-               sandbox: { inputs: ["my-app"], scratch: [".context/my-app-data"] }
-```
+temporary folder removed on exit). It never touches the daemon's data. Start it through an
+ordinary shell command or workspace terminal, then open the preview through the selected
+workspace's browser proxy. The server must listen in that workspace's network context; listeners
+inside a restricted command's private sandbox are isolated from the workspace proxy.
 
 Everything the server can do is under `/__happy/`: an HTML panel at `/__happy/`, and JSON routes
 for scripts and for you:
@@ -377,7 +372,7 @@ for scripts and for you:
 The debug log route itself is never faulted, so the log shows what pages reported during an
 outage. The loop that finds most bugs:
 
-1. Start `artifact dev` as a service and open the app; open it again with `?as=Bob`.
+1. Start `artifact dev` and open the app; open it again with `?as=Bob`.
 2. Make changes as both people, then make the network bad: go offline, add latency, fail or drop a
    few writes, cut the streams. Check that both pages end up showing the same thing and that
    `GET /__happy/data` holds what you expect, with no doubled items.
