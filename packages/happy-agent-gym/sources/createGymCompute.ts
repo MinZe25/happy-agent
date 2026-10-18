@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 
 import {
+    createHostNetwork,
     createJustBashCompute,
     type Compute,
     type ComputeFileSystem,
@@ -19,8 +20,15 @@ import type { Context } from "@steve.kite/stdlib";
  * model is scripted and the machine is emulated, and everything between them — the loop, the
  * tools, the permissions, the daemon, the database — is the real product. A test that needs the
  * real host boundary belongs in a suite that starts the agent with the host compute instead.
+ *
+ * The emulated machine shares this computer's loopback, so a test can serve a fixture the agent's
+ * machine reaches. Every connection it opens is reported to `connected`, naming the machine by its
+ * working directory, so a scenario can tell the agent's machine from the daemon's own network.
  */
-export function createGymCompute(): (ctx: Context, config: HostComputeConfig) => Promise<Compute> {
+export function createGymCompute(
+    connected: (connection: GymMachineConnection) => void = () => undefined,
+): (ctx: Context, config: HostComputeConfig) => Promise<Compute> {
+    const network = createHostNetwork();
     return async (_ctx, config) => {
         await mkdir(config.cwd, { recursive: true });
         const machine = createJustBashCompute({
@@ -36,8 +44,22 @@ export function createGymCompute(): (ctx: Context, config: HostComputeConfig) =>
             id: "host",
             kind: "host",
             shell: machine.shell,
+            network: {
+                connect: async (connectCtx, options) => {
+                    const connection = await network.connect(connectCtx, options);
+                    connected({ cwd: config.cwd, host: options.host, port: options.port });
+                    return connection;
+                },
+            },
         };
     };
+}
+
+/** One connection an emulated machine opened, named by the machine's working directory. */
+export interface GymMachineConnection {
+    readonly cwd: string;
+    readonly host: string;
+    readonly port: number;
 }
 
 /** Every call a compute filesystem answers, which is exactly what the agent may ask it. */

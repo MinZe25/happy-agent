@@ -13,7 +13,7 @@ import {
 } from "@slopus/happy-agent-client";
 import { startHappyAgentDaemon, type HappyAgentDaemon } from "@slopus/happy-agent";
 
-import { createGymCompute } from "./createGymCompute.js";
+import { createGymCompute, type GymMachineConnection } from "./createGymCompute.js";
 import {
     createGymHome,
     resolveFixturePath,
@@ -153,6 +153,8 @@ export interface AgentGym {
     readonly selection: GymSelection;
     /** Errors the HTTP server reported outside a response. A healthy scenario leaves this empty. */
     readonly errors: readonly unknown[];
+    /** Connections the agents' emulated machines opened, oldest first. */
+    readonly machineConnections: readonly GymMachineConnection[];
 
     /** Send a user message and, by default, wait for the run it starts to settle. */
     send(text: string, options?: GymSendOptions): Promise<GymAcceptance>;
@@ -232,6 +234,7 @@ class AgentGymInstance implements AgentGym {
     readonly #options: AgentGymOptions;
     readonly #scripted: ReturnType<typeof createScriptedInference>;
     readonly #errors: unknown[] = [];
+    readonly #machineConnections: GymMachineConnection[] = [];
     readonly #timeoutMs: number;
     #daemon: HappyAgentDaemon | undefined;
     #client: HappyAgentClient | undefined;
@@ -259,7 +262,7 @@ class AgentGymInstance implements AgentGym {
             providers: this.#scripted.createProviders(),
         };
         const daemon = await startHappyAgentDaemon({
-            compute: createGymCompute(),
+            compute: createGymCompute((connection) => this.#machineConnections.push(connection)),
             environment: {
                 ANTHROPIC_API_KEY: undefined,
                 ANTHROPIC_AUTH_TOKEN: undefined,
@@ -373,6 +376,10 @@ class AgentGymInstance implements AgentGym {
 
     get errors(): readonly unknown[] {
         return this.#errors;
+    }
+
+    get machineConnections(): readonly GymMachineConnection[] {
+        return this.#machineConnections;
     }
 
     async send(text: string, options: GymSendOptions = {}): Promise<GymAcceptance> {

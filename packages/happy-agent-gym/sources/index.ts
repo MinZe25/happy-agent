@@ -24,7 +24,7 @@ export {
     connectWorkspaceProxy,
     type HappyAgentSocketTransport,
 } from "./HappyAgentDuplex.js";
-export { createGymCompute } from "./createGymCompute.js";
+export { createGymCompute, type GymMachineConnection } from "./createGymCompute.js";
 export * from "./chaos/index.js";
 export {
     createGymHome,

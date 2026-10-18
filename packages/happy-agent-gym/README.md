@@ -22,6 +22,11 @@ provider. The machine is emulated, because a test must not run commands on the c
 commands execute inside just-bash over one folder, so files really change and `gym.readFile` sees
 them, but no host process is ever started and nothing outside that folder exists.
 
+The emulated machine shares this computer's loopback network. A fixture server a test starts on
+`127.0.0.1` is reachable from the agent's machine, for example through the agent's workspace
+proxy, and `gym.machineConnections` lists every connection a machine opened with that machine's
+working directory, so a scenario can prove which machine a connection came from.
+
 Everything between those two substitutions — the loop, tool dispatch, permissions, persistence,
 the HTTP layer and the event journal — is the product.
 
