@@ -10,17 +10,9 @@ import {
 } from "@slopus/happy-agent-base";
 import { computePermissions } from "@slopus/happy-agent-compute";
 import {
-    createTodoSurfaceRequestSchema,
-    createSeparatorSurfaceRequestSchema,
-    createDocumentSurfaceRequestSchema,
-    createArtifactSurfaceRequestSchema,
-    createBotSurfaceRequestSchema,
-    createTaskSurfaceRequestSchema,
-    surfaceDocumentSchema,
+    createSurfaceRequestSchema,
     surfaceDocumentRevisionSchema,
     surfaceDocumentVersionSummarySchema,
-    surfaceDocumentUpdatedPayloadSchema,
-    updateSurfaceDocumentRequestSchema,
     createTodoRequestSchema,
     surfaceSchema,
     surfaceMemberSchema,
@@ -33,7 +25,14 @@ import {
     surfaceUpdatedPayloadSchema,
     todoCreatedPayloadSchema,
     todoUpdatedPayloadSchema,
+    calendarEventCreatedPayloadSchema,
+    calendarEventUpdatedPayloadSchema,
     resourceVersionSchema,
+    type CalendarEvent,
+    type CalendarEventRevision,
+    type CalendarEventVersionListResponse,
+    type CreateCalendarEventRequest,
+    type UpdateCalendarEventRequest,
     type CreateSurfaceRequest,
     type CreateTodoRequest,
     type UpdateTodoRequest,
@@ -42,10 +41,10 @@ import {
     type Todo,
     type TodoRevision,
     type TodoListScope,
-    type SurfaceDocument,
+    type SurfaceDocumentChangeListResponse,
     type SurfaceDocumentRevision,
+    type SurfaceDocumentStateResponse,
     type SurfaceDocumentVersionListResponse,
-    type UpdateSurfaceDocumentRequest,
 } from "@slopus/happy-agent-client";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -63,7 +62,6 @@ import { apiResourceVersion } from "../utils/apiResourceVersion.js";
 import { isUserOriginMetadata } from "../impl/messageOrigin.js";
 import { SurfacesPersistence, surfacesMigrations } from "./persistence/SurfacesPersistence.js";
 import { SurfaceError } from "./SurfaceError.js";
-import { SurfaceDocumentConflictError } from "./SurfaceDocumentConflictError.js";
 import { compareStrings, surfaceOrderKey } from "./impl/surfaceOrderKey.js";
 import {
     normalizeManagedImage,
@@ -74,6 +72,12 @@ import { surfaceReferenceSchema, type SurfaceReference } from "./SurfaceReferenc
 import { surfaceChatSchema, type SurfaceChat } from "./SurfaceChat.js";
 import { formatSurfaceChatPrompt } from "./impl/formatSurfaceChatPrompt.js";
 import { surfaceTools } from "./tools/surfaceTools.js";
+import {
+    SurfaceDocumentLive,
+    type DocumentFrameListener,
+} from "./documents/SurfaceDocumentLive.js";
+import { SurfaceDocuments, type DocumentProjection } from "./documents/SurfaceDocuments.js";
+import { SurfaceCalendars, type CalendarRange } from "./calendar/SurfaceCalendars.js";
 
 const eventSchema = Type.Union([
     Type.Object({ type: Type.Literal("surface.created"), payload: surfaceCreatedPayloadSchema }),
@@ -81,23 +85,31 @@ const eventSchema = Type.Union([
     Type.Object({ type: Type.Literal("todo.created"), payload: todoCreatedPayloadSchema }),
     Type.Object({ type: Type.Literal("todo.updated"), payload: todoUpdatedPayloadSchema }),
     Type.Object({
-        type: Type.Literal("surface.document.updated"),
-        payload: surfaceDocumentUpdatedPayloadSchema,
+        type: Type.Literal("calendar_event.created"),
+        payload: calendarEventCreatedPayloadSchema,
+    }),
+    Type.Object({
+        type: Type.Literal("calendar_event.updated"),
+        payload: calendarEventUpdatedPayloadSchema,
     }),
 ]);
 export type SurfaceEvent = Static<typeof eventSchema>;
 type Listener = (ctx: Context, event: SurfaceEvent) => void | Promise<void>;
 export type SurfaceActor = TodoRevision["actor"];
-const supportedCreationSchema = Type.Union([
-    createTodoSurfaceRequestSchema,
-    createSeparatorSurfaceRequestSchema,
-    createDocumentSurfaceRequestSchema,
-    createArtifactSurfaceRequestSchema,
-    createBotSurfaceRequestSchema,
-    createTaskSurfaceRequestSchema,
+/**
+ * Types an earlier daemon stored that are no longer part of the catalog. Their rows stay in
+ * storage unchanged, but no list, route, or event ever reaches them again.
+ */
+const WITHDRAWN_TYPES: ReadonlySet<string> = new Set(["separator"]);
+/** Types whose content a shared conversation can work on. */
+const CHAT_TYPES: ReadonlySet<string> = new Set([
+    "todo",
+    "document",
+    "calendar",
+    "artifact",
+    "bot",
+    "task",
 ]);
-/** Types whose content a shared conversation can work on; separators have none. */
-const CHAT_TYPES: ReadonlySet<string> = new Set(["todo", "document", "artifact", "bot", "task"]);
 const PREPARE_CHAT = "surfaces.prepareChat";
 /** How long a person's request waits for a chat's folder and agent before reporting 503. */
 const CHAT_READY_TIMEOUT_MS = 20_000;
@@ -116,8 +128,11 @@ export class SurfacesModule implements AgentModule {
     readonly #listeners = new Set<Listener>();
     readonly #transactional = new Set<Listener>();
     readonly #chatWaiters = new Map<string, Set<() => void>>();
+    readonly #live = new SurfaceDocumentLive();
     #store!: SurfacesPersistence;
     #kv!: AgentKV;
+    #documents!: SurfaceDocuments;
+    #calendars!: SurfaceCalendars;
     #agents: AgentSystemRef | undefined;
     constructor(
         readonly durable: DurableFunctionsModule,
@@ -153,6 +168,10 @@ export class SurfacesModule implements AgentModule {
     readonly beforeStart = (ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
         this.#store = new SurfacesPersistence(agentDatabase(ctx)!);
         this.#kv = this.#store.kv();
+        this.#documents = new SurfaceDocuments(this.#store, this.#kv, this.#live);
+        this.#calendars = new SurfaceCalendars(this.#store, this.#kv, (eventCtx, event) =>
+            this.#event(eventCtx, event),
+        );
         this.#agents = agents;
         return {
             instructions: async (hookCtx, scope) => {
@@ -250,11 +269,11 @@ export class SurfacesModule implements AgentModule {
         adminAgentId?: string,
         actor?: SurfaceActor,
     ): Promise<Surface> {
-        const input = checked(supportedCreationSchema, request);
+        const input = checked(createSurfaceRequestSchema, request);
         const reference = referenceFor(input);
         if (reference !== undefined) checked(surfaceReferenceSchema, reference);
         let image: SurfaceImageAsset | null = null;
-        if (input.type !== "separator" && input.image !== undefined) {
+        if (input.image !== undefined) {
             try {
                 const normalized = await normalizeManagedImage(
                     Buffer.from(input.image.data, "base64"),
@@ -276,7 +295,7 @@ export class SurfacesModule implements AgentModule {
             await this.#validateUser(tx, creatorUserId);
             const id = input.id ?? createId();
             const old = await this.#kv.read(tx, `surface.${id}`);
-            if (old !== undefined) return this.#present(tx, readSurface(old));
+            if (old !== undefined) return this.#present(tx, await this.#surface(tx, id));
             if (
                 reference !== undefined &&
                 (await this.#resolve(tx, reference)).state === "unavailable"
@@ -306,26 +325,14 @@ export class SurfacesModule implements AgentModule {
             await this.#kv.write(tx, `surface.${id}`, surface);
             if (image !== null) await this.#kv.write(tx, `image.${id}`, image);
             if (reference !== undefined) await this.#kv.write(tx, `reference.${id}`, reference);
-            if (input.type === "document") {
-                const revisionActor = actor ?? {
-                    userId: await this.owner(tx),
-                    agentId: adminAgentId ?? null,
-                };
-                await this.#saveDocument(
+            if (input.type === "document")
+                await this.#documents.create(
                     tx,
-                    {
-                        surfaceId: id,
-                        text: input.text ?? "",
-                        authorUserId: creatorUserId,
-                        lastEditorUserId: revisionActor.userId,
-                        createdAt: now,
-                        updatedAt: now,
-                        version: createUuidV7Factory(Date.now, surface.version)(),
-                    },
-                    revisionActor,
-                    input.mutationId,
+                    surface,
+                    input.text,
+                    actor ?? { userId: await this.owner(tx), agentId: adminAgentId ?? null },
+                    input.mutationId ?? null,
                 );
-            }
             await this.#event(tx, {
                 type: "surface.created",
                 payload: { surface, ...echo(input.mutationId) },
@@ -568,7 +575,7 @@ export class SurfacesModule implements AgentModule {
         return ctx.inTx(async (tx) => {
             const current = await this.getTodo(tx, surfaceId, id);
             if (current.version !== version)
-                throw new SurfaceError("conflict", "The todo has changed.", current);
+                throw new SurfaceError("conflict", "The todo has changed.", { todo: current });
             let candidate = { ...current } as Todo;
             if (operation === "update") {
                 const edit = checked(updateTodoRequestSchema, input);
@@ -607,11 +614,9 @@ export class SurfacesModule implements AgentModule {
                 };
             else if (operation === "reorder") {
                 if (current.status !== "active")
-                    throw new SurfaceError(
-                        "conflict",
-                        "Only active todos can be reordered.",
-                        current,
-                    );
+                    throw new SurfaceError("conflict", "Only active todos can be reordered.", {
+                        todo: current,
+                    });
                 const { afterId } = checked(
                     Type.Object({ afterId: Type.Union([cuid2Schema, Type.Null()]) }),
                     input,
@@ -627,7 +632,7 @@ export class SurfacesModule implements AgentModule {
                     if (key !== undefined) candidate = { ...current, orderKey: key };
                 } catch (error) {
                     if (error instanceof SurfaceError)
-                        throw new SurfaceError(error.code, error.message, current);
+                        throw new SurfaceError(error.code, error.message, { todo: current });
                     throw error;
                 }
             }
@@ -700,49 +705,213 @@ export class SurfacesModule implements AgentModule {
             return readRevision(row);
         });
     }
-    async getDocument(ctx: Context, surfaceId: string): Promise<SurfaceDocument> {
-        return ctx.inTx(async (tx) => {
-            await this.#surface(tx, surfaceId, "document");
-            return checked(surfaceDocumentSchema, await this.#kv.read(tx, `document.${surfaceId}`));
-        });
-    }
-    async updateDocument(
+    /** Occurrences overlapping `[from, to)`, expanded by the daemon, with their events. */
+    async listCalendar(
         ctx: Context,
         surfaceId: string,
-        version: string,
-        input: UpdateSurfaceDocumentRequest,
-        actor: SurfaceActor,
-    ): Promise<SurfaceDocument> {
-        checked(resourceVersionSchema, version);
-        checked(updateSurfaceDocumentRequestSchema, input);
+        range: { from: number; to: number; timeZone: string },
+        maxOccurrences?: number,
+    ): Promise<CalendarRange> {
         return ctx.inTx(async (tx) => {
-            const current = await this.getDocument(tx, surfaceId);
-            if (current.version !== version) throw new SurfaceDocumentConflictError(current);
-            if (current.text === input.text) return current;
-            const document: SurfaceDocument = {
-                ...current,
-                text: input.text,
-                lastEditorUserId: actor.userId,
-                updatedAt: Date.now(),
-                version: createUuidV7Factory(Date.now, current.version)(),
-            };
-            await this.#saveDocument(tx, document, actor, input.mutationId);
-            await this.#event(tx, {
-                type: "surface.document.updated",
-                payload: {
-                    surfaceId,
-                    previousVersion: current.version,
-                    version: document.version,
-                    changes: {
-                        text: document.text,
-                        lastEditorUserId: document.lastEditorUserId,
-                        updatedAt: document.updatedAt,
-                    },
-                    ...echo(input.mutationId),
-                },
-            });
-            return document;
+            await this.#surface(tx, surfaceId, "calendar");
+            return this.#calendars.range(
+                tx,
+                surfaceId,
+                range.from,
+                range.to,
+                range.timeZone,
+                maxOccurrences,
+            );
         });
+    }
+    async getCalendarEvent(ctx: Context, surfaceId: string, id: string): Promise<CalendarEvent> {
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "calendar");
+            checked(cuid2Schema, id);
+            return this.#calendars.get(tx, surfaceId, id);
+        });
+    }
+    async createCalendarEvent(
+        ctx: Context,
+        surfaceId: string,
+        input: CreateCalendarEventRequest,
+        actor: SurfaceActor,
+        authorUserId: string | null,
+    ): Promise<CalendarEvent> {
+        if (input.id !== undefined) checked(cuid2Schema, input.id);
+        return ctx.inTx(async (tx) => {
+            await this.#validateUser(tx, authorUserId);
+            await this.#surface(tx, surfaceId, "calendar");
+            return this.#calendars.create(
+                tx,
+                surfaceId,
+                input.id ?? createId(),
+                input,
+                actor,
+                authorUserId,
+            );
+        });
+    }
+    /** Change or delete a whole series; `version` must be the one the caller read. */
+    async mutateCalendarEvent(
+        ctx: Context,
+        surfaceId: string,
+        id: string,
+        version: string,
+        edit: UpdateCalendarEventRequest | "delete",
+        actor: SurfaceActor,
+        mutationId?: string,
+    ): Promise<CalendarEvent> {
+        checked(resourceVersionSchema, version);
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "calendar");
+            checked(cuid2Schema, id);
+            return this.#calendars.mutate(tx, surfaceId, id, version, edit, actor, mutationId);
+        });
+    }
+    async calendarEventVersions(
+        ctx: Context,
+        surfaceId: string,
+        id: string,
+        afterVersion?: string,
+        limit = 100,
+    ): Promise<CalendarEventVersionListResponse> {
+        checked(Type.Integer({ minimum: 1, maximum: 200 }), limit);
+        if (afterVersion !== undefined) checked(resourceVersionSchema, afterVersion);
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "calendar");
+            checked(cuid2Schema, id);
+            return this.#calendars.versions(tx, surfaceId, id, afterVersion, limit);
+        });
+    }
+    async getCalendarEventVersion(
+        ctx: Context,
+        surfaceId: string,
+        id: string,
+        version: string,
+    ): Promise<CalendarEventRevision> {
+        checked(resourceVersionSchema, version);
+        return ctx.inTx(async (tx) => {
+            await this.#surface(tx, surfaceId, "calendar");
+            checked(cuid2Schema, id);
+            return this.#calendars.version(tx, surfaceId, id, version);
+        });
+    }
+    /** The document's Markdown projection, current or as of `seq`. */
+    async document(ctx: Context, surfaceId: string, seq?: number): Promise<DocumentProjection> {
+        return ctx.inTx(async (tx) =>
+            this.#documents.projection(tx, await this.#surface(tx, surfaceId, "document"), seq),
+        );
+    }
+    async documentState(
+        ctx: Context,
+        surfaceId: string,
+        query: { stateVector?: string; seq?: number },
+    ): Promise<SurfaceDocumentStateResponse> {
+        return ctx.inTx(async (tx) =>
+            this.#documents.state(tx, await this.#surface(tx, surfaceId, "document"), query),
+        );
+    }
+    /** Store one person's or agent's Yjs change; changes merge, so no version guard applies. */
+    async changeDocument(
+        ctx: Context,
+        surfaceId: string,
+        update: string,
+        actor: SurfaceActor,
+        mutationId: string | null,
+    ): Promise<{ seq: number }> {
+        return ctx.inTx(async (tx) => {
+            const surface = await this.#surface(tx, surfaceId, "document");
+            const { seq } = await this.#documents.change(
+                tx,
+                surface,
+                new Uint8Array(Buffer.from(update, "base64")),
+                actor,
+                mutationId,
+            );
+            return { seq };
+        });
+    }
+    /** Apply an agent's Markdown, written against version `seq`, as the difference from it. */
+    async changeDocumentFromMarkdown(
+        ctx: Context,
+        surfaceId: string,
+        seq: number,
+        text: string,
+        actor: SurfaceActor,
+    ): Promise<DocumentProjection & { changed: boolean }> {
+        return ctx.inTx(async (tx) => {
+            const surface = await this.#surface(tx, surfaceId, "document");
+            const result = await this.#documents.agentChange(tx, surface, seq, text, actor);
+            return {
+                ...(await this.#documents.projection(tx, surface)),
+                changed: result.appended,
+            };
+        });
+    }
+    async documentChanges(
+        ctx: Context,
+        surfaceId: string,
+        afterSeq = 0,
+        limit = 100,
+    ): Promise<SurfaceDocumentChangeListResponse> {
+        checked(Type.Integer({ minimum: 1, maximum: 200 }), limit);
+        return ctx.inTx(async (tx) =>
+            this.#documents.entries(
+                tx,
+                await this.#surface(tx, surfaceId, "document"),
+                afterSeq,
+                limit,
+            ),
+        );
+    }
+    /**
+     * Follow a document's changes and presence on one event stream. The subscription exists
+     * before the current `seq` is read, so no change committed after that read is missed.
+     */
+    async subscribeDocument(
+        ctx: Context,
+        surfaceId: string,
+        streamId: string,
+    ): Promise<{ seq: number }> {
+        await this.#surfaceOf(ctx, surfaceId, "document");
+        const added = !this.#live.isSubscribed(surfaceId, streamId);
+        this.#live.subscribe(surfaceId, streamId);
+        try {
+            const seq = await ctx.inTx(
+                async (tx) =>
+                    (await this.#documents.head(tx, await this.#surface(tx, surfaceId, "document")))
+                        .seq,
+            );
+            if (added) this.#live.sendPresence(surfaceId, streamId);
+            return { seq };
+        } catch (error) {
+            if (added) this.#live.unsubscribe(surfaceId, streamId);
+            throw error;
+        }
+    }
+    async unsubscribeDocument(ctx: Context, surfaceId: string, streamId: string): Promise<void> {
+        await this.#surfaceOf(ctx, surfaceId, "document");
+        this.#live.unsubscribe(surfaceId, streamId);
+    }
+    /** Relay presence, never stored, to the document's other subscribed streams. */
+    async shareDocumentPresence(
+        ctx: Context,
+        surfaceId: string,
+        streamId: string,
+        awarenessClientId: number,
+        update: string,
+    ): Promise<void> {
+        await this.#surfaceOf(ctx, surfaceId, "document");
+        this.#live.presence(surfaceId, streamId, awarenessClientId, update);
+    }
+    /** A closed event stream ends its subscriptions, and its presence with them. */
+    closeDocumentStream(streamId: string): void {
+        this.#live.closeStream(streamId);
+    }
+    /** Receive live frames addressed to individual event streams. */
+    onDocumentFrame(listener: DocumentFrameListener): () => void {
+        return this.#live.onFrame(listener);
     }
     async documentVersions(
         ctx: Context,
@@ -789,35 +958,6 @@ export class SurfacesModule implements AgentModule {
                 throw new SurfaceError("not_found", "The document revision was not found.");
             return checked(surfaceDocumentRevisionSchema, revision);
         });
-    }
-    async #saveDocument(
-        ctx: Context,
-        document: SurfaceDocument,
-        actor: SurfaceActor,
-        mutationId?: string,
-    ): Promise<void> {
-        const revision = checked(surfaceDocumentRevisionSchema, {
-            document,
-            actor,
-            mutationId: mutationId ?? null,
-            source: actor.agentId === null ? "api" : "tool",
-        });
-        const { document: _snapshot, ...metadata } = revision;
-        const summary = { ...metadata, version: document.version, updatedAt: document.updatedAt };
-        if (
-            !(await this.#store.writeValueIfAbsent(
-                ctx,
-                `document-revision.${document.surfaceId}.${document.version}`,
-                revision,
-            )) ||
-            !(await this.#store.writeValueIfAbsent(
-                ctx,
-                `document-summary.${document.surfaceId}.${document.version}`,
-                summary,
-            ))
-        )
-            throw new Error("A document revision cannot be overwritten.");
-        await this.#kv.write(ctx, `document.${document.surfaceId}`, document);
     }
     async #chatBy(ctx: Context, key: string): Promise<SurfaceChat | undefined> {
         const surfaceId = await this.#kv.read(ctx, key);
@@ -914,7 +1054,9 @@ export class SurfacesModule implements AgentModule {
         return this.#agents;
     }
     async #stored(ctx: Context): Promise<Surface[]> {
-        return (await this.#kv.list(ctx, "surface.")).map((row) => readSurface(row.value));
+        return (await this.#kv.list(ctx, "surface."))
+            .map((row) => readSurface(row.value))
+            .filter((surface) => !WITHDRAWN_TYPES.has(surface.type));
     }
     /** Shared records never hold a target projection; it is resolved for each read. */
     async #present(ctx: Context, surface: Surface): Promise<Surface> {
@@ -970,12 +1112,15 @@ export class SurfacesModule implements AgentModule {
             version: apiResourceVersion(task.updatedAt, task.version, task.id),
         };
     }
+    async #surfaceOf(ctx: Context, id: string, type?: Surface["type"]): Promise<Surface> {
+        return ctx.inTx((tx) => this.#surface(tx, id, type));
+    }
     async #surface(ctx: Context, id: string, type?: Surface["type"]): Promise<Surface> {
         checked(surfaceIdSchema, id);
         const value = await this.#kv.read(ctx, `surface.${id}`);
         if (value === undefined) throw new SurfaceError("not_found", "The Surface was not found.");
         const surface = readSurface(value);
-        if (type !== undefined && surface.type !== type)
+        if (WITHDRAWN_TYPES.has(surface.type) || (type !== undefined && surface.type !== type))
             throw new SurfaceError("not_found", "The Surface was not found.");
         return surface;
     }
@@ -1049,7 +1194,7 @@ function readRevision(value: unknown): TodoRevision {
 function isReferenceType(type: string): type is SurfaceReference["type"] {
     return type === "artifact" || type === "bot" || type === "task";
 }
-function referenceFor(input: Static<typeof supportedCreationSchema>): SurfaceReference | undefined {
+function referenceFor(input: CreateSurfaceRequest): SurfaceReference | undefined {
     if (input.type === "artifact") return { type: "artifact", artifactId: input.artifactId };
     if (input.type === "bot") return { type: "bot", botId: input.botId };
     if (input.type === "task") return { type: "task", taskId: input.taskId };

@@ -122,12 +122,31 @@ describe("Surface chat preparation", () => {
         expect((await f.surfaces.list(f.ctx))[0]).toEqual(surface);
     });
 
-    it("refuses separators without reserving anything", async () => {
+    it("refuses stored types without chats, and withdrawn separators, without reserving anything", async () => {
         const f = await fixture({});
-        const separator = await f.surfaces.create(f.ctx, { type: "separator", name: "Work" }, null);
-        await expect(f.surfaces.requestChat(f.ctx, separator.id)).rejects.toMatchObject({
+        const stored = (id: string, type: string) => ({
+            id,
+            type,
+            name: "Stored",
+            creatorUserId: null,
+            chatAgentId: null,
+            image: null,
+            members: [{ userId: null, joinedAt: 1, orderKey: "1" }],
+            updatedAt: 1,
+            version: "01890a5d-ac96-774b-bcce-b302099a8057",
+        });
+        const whiteboard = "whiteboardsurface0000001";
+        const separator = "separatorsurface00000001";
+        await f.kv.write(f.ctx, `surface.${whiteboard}`, stored(whiteboard, "whiteboard"));
+        await f.kv.write(f.ctx, `surface.${separator}`, stored(separator, "separator"));
+        await expect(f.surfaces.requestChat(f.ctx, whiteboard)).rejects.toMatchObject({
             code: "conflict",
         });
-        expect(await f.kv.read(f.ctx, `chat.${separator.id}`)).toBeUndefined();
+        await expect(f.surfaces.requestChat(f.ctx, separator)).rejects.toMatchObject({
+            code: "not_found",
+        });
+        expect(await f.kv.read(f.ctx, `chat.${whiteboard}`)).toBeUndefined();
+        expect(await f.kv.read(f.ctx, `chat.${separator}`)).toBeUndefined();
+        expect(f.mkdir).not.toHaveBeenCalled();
     });
 });

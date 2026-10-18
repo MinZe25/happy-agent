@@ -18,6 +18,11 @@ export function formatHistoryMessage(
     position: number,
     options: { includeTools?: boolean; textLimit?: number } = {},
 ): string {
+    if (
+        message.blocks.length > 0 &&
+        message.blocks.every((block) => block.type === "configuration")
+    )
+        return "";
     const includeTools = options.includeTools !== false;
     const textLimit = options.textLimit ?? TEXT_LIMIT;
     const attribution =
@@ -28,6 +33,7 @@ export function formatHistoryMessage(
     const sender = message.senderAgentId === undefined ? "" : ` (${message.senderAgentId})`;
     const lines = [`${position}. ${message.role.toLocaleUpperCase()}${sender}${attribution}`];
     for (const block of message.blocks) {
+        if (block.type === "configuration") continue;
         if (block.type === "text") {
             lines.push(`Text: ${truncate(block.text, textLimit)}`);
         } else if (block.type === "image") {

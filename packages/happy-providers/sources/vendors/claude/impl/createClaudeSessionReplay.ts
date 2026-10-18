@@ -33,11 +33,16 @@ export interface ClaudeSessionReplay {
     compactionSummary(): string | undefined;
     entries(): readonly SessionStoreEntry[];
     message: SDKUserMessage;
-    options: Pick<ClaudeSdkOptions, "persistSession" | "resume" | "sessionStore">;
+    options: Pick<
+        ClaudeSdkOptions,
+        "persistSession" | "resume" | "resumeSessionAt" | "sessionStore"
+    >;
     prompt: AsyncIterable<SDKUserMessage>;
 }
 
 export function createClaudeSessionReplay(options: {
+    /** A native `/compact` query, which Claude Code never answers with a placeholder. */
+    compaction?: boolean;
     context: SessionContext;
     /** The directory the live query runs in; defaults to this process's own, as the SDK does. */
     cwd?: string;
@@ -72,11 +77,28 @@ export function createClaudeSessionReplay(options: {
             ),
     };
     const message = toPromptMessage(promptMessages);
+    // Claude Code's print-mode loader splices a synthetic assistant "No response requested." after
+    // a transcript whose last message entry is user-role; attachments do not count as the end.
+    // The model would take that line as its own. `--reply-on-resume` suppresses it only in the
+    // interactive REPL, but the loader applies `resumeSessionAt` after the splice, so resuming at
+    // the last replayed entry cuts the placeholder off. Native `/compact` sends no placeholder,
+    // and given an anchor it drops the turns after the last assistant reply, so it gets none.
+    const lastEntry = entries.at(-1);
+    const endsOnUserTurn =
+        options.compaction !== true &&
+        entries.findLast((entry) => entry.type !== "attachment")?.type === "user";
     return {
         compactionSummary: () => compactionSummary,
         entries: () => entries,
         message,
-        options: { persistSession: true, resume: options.sessionId, sessionStore },
+        options: {
+            persistSession: true,
+            resume: options.sessionId,
+            ...(endsOnUserTurn && typeof lastEntry?.uuid === "string"
+                ? { resumeSessionAt: lastEntry.uuid }
+                : {}),
+            sessionStore,
+        },
         prompt: singleMessagePrompt(message),
     };
 }

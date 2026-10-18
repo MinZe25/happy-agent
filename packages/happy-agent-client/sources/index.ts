@@ -55,6 +55,7 @@ export * from "./protocol/integrations.js";
 export * from "./protocol/live.js";
 export * from "./protocol/liveDesktop.js";
 export * from "./protocol/messages.js";
+export * from "./protocol/mobileConnector.js";
 export * from "./protocol/processes.js";
 export * from "./protocol/profile.js";
 export * from "./protocol/projects.js";

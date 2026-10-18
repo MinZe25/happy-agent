@@ -439,7 +439,7 @@ export async function startHappyAgentRuntime(
         });
 
         const events = new EventsModule();
-        const history = new HistoryModule(events, botSettings);
+        const history = new HistoryModule(events, botSettings, config);
         history.onAppend(observation.recordHistory);
         const presence = new PresenceModule(config);
         const systemPrompt = new SystemPromptModule(config, compute.computeModule);
@@ -564,7 +564,13 @@ export async function startHappyAgentRuntime(
             "artifact-data",
             async (shutdownCtx) => await artifactData.close(shutdownCtx),
         );
-        const collaboration = new CollaborationModule(config, abort, history, botSettings);
+        const collaboration = new CollaborationModule(
+            config,
+            abort,
+            history,
+            compute.computeModule,
+            botSettings,
+        );
         const subtasks = new SubtasksModule(
             bots,
             tasks,

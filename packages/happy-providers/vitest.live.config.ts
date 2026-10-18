@@ -12,6 +12,7 @@ export default defineConfig({
         },
     },
     test: {
+        setupFiles: ["../../scripts/exitOrphanedTestWorker.ts"],
         environment: "node",
         include: ["tests/**/*.live.test.ts"],
     },

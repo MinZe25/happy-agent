@@ -18,6 +18,10 @@ The daemon has two mutually exclusive deployment transports:
   container or service whose external boundary is controlled by its deployment platform.
   A configured port of `0` selects an ephemeral port.
 
+Either mode may also serve the same API over Tailcat: `[feature.tailcat]` exposes the deployment
+transport, and the mobile connector's socket serves paired phones with credentials of their own.
+See Mobile connector.
+
 Clients construct request URLs against an arbitrary authority — the daemon ignores the `Host`
 header. Only the path and query string matter.
 
@@ -209,11 +213,15 @@ have no credentials: no sign-in method, bearer token, or bridge token authentica
 `GET /v0/authentication` is the only unauthenticated endpoint. Every other endpoint, health
 included, requires a valid bearer token.
 
+The mobile connector's socket accepts none of these credentials, only a paired phone's device
+token and the pairing credentials, and has no unauthenticated endpoint. The main transports accept
+none of the mobile credentials. See "Credentials on the connector's socket".
+
 ### Versioning
 
 All routes are prefixed with `/v0`. Independently of the path version, every daemon advertises
 its identity through the health endpoint as a single `version` object: a numeric `protocol`
-(integer, currently 26) and the `daemon` product version string. Protocol versions from 22 onward
+(integer, currently 27) and the `daemon` product version string. Protocol versions from 22 onward
 are backward-compatible and additive. Clients support that compatibility range for existing
 capabilities instead of requiring equality with their own protocol number. A client may require
 a newer protocol for a capability it needs and must explain that an upgrade is required when the
@@ -237,6 +245,12 @@ that show runners or create projects on them require protocol 26 or newer. An ol
 daemon answers `GET /v0/runners` with `404` and never returns a runner compute. A client that meets
 a compute `type` it does not recognize treats the folder as being on another machine and offers no
 local-path actions for it.
+
+Protocol 27 adds the mobile connector: `GET /v0/mobile-connector`, the pairing and device routes
+under `/v0/mobile-connector`, `mobile_connector.updated`, and the connector's socket with its
+handshake routes and credentials. Clients that offer direct phone connections require protocol 27
+or newer. An older compatible daemon answers these routes with `404`, which clients treat as the
+feature being unavailable, and never emits the event.
 
 Account provenance, configuration history blocks, and structured error details are additive output
 and do not increment the protocol version. Clients tolerate their absence and older clients keep
@@ -292,6 +306,12 @@ additive fields. A missing `chatAgentId` is treated as null. Surface chat worksp
 `kind: "surface"` and are discovered only through their Surface chat, never ordinary workspace
 listings. An older daemon may reject new Surface types or return `404`/`501` for document or
 chat routes; clients leave those features unavailable without disabling existing todo lists.
+Calendar Surfaces are additive and do not increment the protocol version. A daemon that serves
+them reports `capabilities.calendarSurfaces: true` from health. Older daemons omit it, reject
+`{ "type": "calendar" }` creation with `400`, and answer calendar routes with `404`; clients
+then offer no calendar creation. A calendar Surface listed by a daemon a client does not
+support is left unavailable like any unknown type. The `calendar_event.*` events are absent on
+older compatible daemons.
 
 Collaborative documents and the removal of the `separator` Surface type are a one-off exception
 to additive compatibility, approved for client and daemon together; the protocol number does not
@@ -312,6 +332,11 @@ Artifacts are additive and do not increment the protocol version. Clients detect
 `GET /v0/artifacts`: `404` means the daemon has no artifacts, not that the catalog is empty. The
 `artifact.*` events are absent on older compatible daemons, which also serve none of the artifact
 routes.
+
+Artifact backgrounds are additive and do not increment the protocol version. A daemon that has
+them always includes `background` on artifact and version objects, `null` when unset, and in the
+`changes` of `artifact.updated`. Older compatible daemons omit it and ignore a `background` sent to
+them; a client then shows every artifact on a transparent slot.
 
 User settings are additive and do not increment the protocol version. A daemon that serves them
 always includes `userSettings` in desktop bootstrap and never answers `GET /v0/user-settings` with
@@ -983,7 +1008,8 @@ Fields:
   bridges described under Workspaces. Optional `desktopLiveCapabilities` lists the additive
   voice desktop capability names the daemon accepts; see Live voice sessions.
   `collaborativeDocuments: true` advertises collaborative document Surfaces, described under
-  Document Surfaces.
+  Document Surfaces. `calendarSurfaces: true` advertises calendar Surfaces, described under
+  Calendar Surfaces.
 - `ready` — `false` while starting, `true` once the agent system is loaded.
 - `status` — `"starting"` or `"ready"`; the human-readable form of `ready`.
 - `version` — one identity object. `protocol` is the wire protocol number, the client's
@@ -2629,6 +2655,787 @@ integration. When Happy cannot confirm removing this computer, the request retur
 fresh authorization request, it returns `503` with code `happy_unavailable` and the now-unlinked
 `"disconnected"` integration; the previous credentials remain removed so a later retry cannot
 silently reconnect the account the person chose to replace.
+
+## Mobile connector
+
+The mobile connector lets a phone reach this daemon directly, without a relay. The phone scans a QR
+code shown on the desktop, runs a key exchange with the daemon over a dedicated private Tailcat
+socket, and derives a long-term device token from that exchange. Both screens then show the same
+four emoji. Pairing completes only when the person at the desktop and the person on the phone have
+both confirmed that the emoji match, so a leaked QR code by itself never yields a paired device.
+A paired phone then uses this same API over that socket with its device token.
+
+Happy Agent ships no phone code. A phone implements its side from this section alone; the fixed
+test vectors and the emoji table below are the reference it is checked against.
+
+The machine setting `[feature.mobile_connector]` has `enabled`, default `true`, and `port`, default
+`24781`. Only machine configuration can set it, never a repository's `happy.toml`.
+
+In standalone mode the installation's one person owns the pairing and the paired phones. In team
+mode each locally onboarded user has their own: authentication selects the owner for every route,
+no route takes an owner, and a phone acts with the authority of the user who paired it. Each owner
+has at most one pairing at a time.
+
+Pairing state lives only in daemon memory and a restart abandons an unfinished pairing. Paired
+phones are stored in the main database by the SHA-256 of their device token, never the token.
+
+### The connector's socket
+
+The connector's socket is a Tailcat exposure with its own stable identity, separate from
+`[feature.tailcat]`. The phone dials `server.tailcat` on the port from the QR code through a
+Tailcat client for the address from the QR code. Tailcat encrypts the traffic and authenticates the
+server. The address carries the identity's WireGuard key and pre-shared key, so it is a secret:
+phones keep it with the device token and never log it.
+
+Behind the socket is this API: the same routes, Server-Sent Events, WebSocket upgrades, and
+`CONNECT` tunnels as on the main transports, which are the Unix socket, the team TCP listener, and
+the `[feature.tailcat]` exposure. The socket differs only in the credentials it accepts.
+
+The socket is open only while a pairing is active, for three seconds after a pairing ends, or while
+at least one phone is paired. The three seconds let the answer to the request that ended a pairing,
+and a status read it woke, reach the phone. A restart reopens the socket when phones are paired.
+When nothing needs it, or the feature is disabled, nothing is exposed.
+
+### Credentials on the connector's socket
+
+Every request, WebSocket upgrade, and `CONNECT` on the connector's socket is authenticated before
+anything else happens, with one of three bearer credentials:
+
+```
+Authorization: Bearer <credential>
+```
+
+- A **device token**, `base64url(deviceToken)`, authenticates a paired phone. It acts with the
+  authority of the user who created the pairing, and may use every route that user may use, except:
+    - daemon lifecycle and debugging: `/v0/drain`, `/v0/shutdown`, and `/v0/debug` and everything
+      under it;
+    - mobile connector management: `/v0/mobile-connector` and everything under it, so one phone
+      can neither pair nor remove others.
+
+    Those return `403` with code `forbidden`, whatever the method.
+
+- The QR code's **pairing token** `t` authenticates only `POST /v0/mobile-connector/handshake`.
+- A **handshake credential**, the `handshakeId` that start returned, authenticates only that
+  handshake's own routes: `GET /v0/mobile-connector/handshake` and
+  `POST /v0/mobile-connector/handshake/reveal`, `/confirm`, and `/reject`.
+
+Anything else receives `401` with code `unauthorized` and no `authentication` field: a missing
+header, an unknown or removed device's token, a used, replaced, or expired pairing token, a
+handshake the daemon no longer knows, a pairing or handshake credential on any other route, and
+every credential of the main transports, namely the standalone token, WorkOS and JWT access
+tokens, runner tokens, and bridge tokens. On this socket no endpoint is unauthenticated,
+`GET /v0/authentication` included.
+
+The main transports never accept a device token, a pairing token, or a handshake credential: they
+receive `401` like any unknown token. The handshake routes exist only on the connector's socket; on
+a main transport they return `404` with code `not_found`.
+
+Removing a device from the desktop makes its token fail at once and closes every request, event
+stream, WebSocket, and `CONNECT` tunnel it has open. The device's `lastSeenAt` moves forward at most
+once a minute as the phone uses its token.
+
+### The mobile connector object
+
+```json
+{
+    "status": "open",
+    "pairing": {
+        "id": "pq7xk2m9r4t8w1y5z3a6b0c2",
+        "status": "verifying",
+        "qr": null,
+        "expiresAt": 1755400420000,
+        "device": { "name": "Steve's iPhone", "platform": "ios" },
+        "emoji": ["🐶", "🎸", "🍕", "🚀"],
+        "desktopConfirmed": false,
+        "mobileConfirmed": true,
+        "error": null
+    },
+    "devices": [
+        {
+            "id": "dv3n8k1m5q9r2t6w0y4z7a1c",
+            "name": "Steve's iPhone",
+            "platform": "ios",
+            "createdAt": 1755400000000,
+            "lastSeenAt": 1755400300000
+        }
+    ],
+    "error": null,
+    "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e",
+    "updatedAt": 1755400300000
+}
+```
+
+- `status` — the connector's socket, one of:
+    - `"disabled"` — `[feature.mobile_connector] enabled` is `false`;
+    - `"closed"` — enabled, but nothing needs the socket, so nothing is exposed;
+    - `"starting"` — the socket is opening;
+    - `"open"` — phones can reach the daemon;
+    - `"failed"` — the socket could not open; `error` says why. The next pairing or device change
+      tries again.
+- `pairing` — the caller's current or most recent pairing, or `null`. A finished pairing stays here
+  until the next start or cancel, so the desktop can show how it ended.
+    - `id` — a CUID2 naming this pairing in the desktop routes.
+    - `status` — one of:
+        - `"waiting"` — waiting for a phone. Before a phone uses the code, `qr` is set and `device`
+          is `null`. Once a phone has used it, `qr` is `null` and `device` is set, until the
+          phone's key arrives a moment later.
+        - `"verifying"` — the keys are exchanged. `device` and `emoji` are set, and the pairing
+          waits for both confirmations.
+        - `"completed"` — both people confirmed and the phone is paired; it is in `devices`.
+        - `"rejected"` — the person on the phone said the emoji do not match.
+        - `"expired"` — five minutes passed before both confirmations arrived.
+        - `"cancelled"` — the desktop cancelled it, or a newer pairing replaced it.
+        - `"failed"` — the phone's key did not match the one it committed to, the phone's key
+          could not be used, the phone's confirmation did not prove it derived the same keys, or
+          the socket could not open. `error` says which, in English safe to display.
+    - `qr` — the complete `happy://direct?…` text to show as a QR code while it can still be used;
+      `null` otherwise. It contains a one-time secret token and the socket's secret address, so
+      clients show it only on screen and never log or store it. Its format is specified under "The
+      QR code"; desktop clients treat it as opaque.
+    - `expiresAt` — epoch milliseconds five minutes after the pairing started. Everything, both
+      confirmations included, must happen before it.
+    - `device` — `{ name, platform }` as the phone described itself, or `null`. `name` is 1–128
+      printable characters; `platform` is `"ios"`, `"android"`, or `"other"`. The phone chose
+      these values, so they are for display and prove nothing.
+    - `emoji` — the four emoji to compare, set from `"verifying"` on and kept on a finished
+      pairing that reached it; `null` otherwise. Show them exactly as given.
+    - `desktopConfirmed`, `mobileConfirmed` — which confirmations have arrived.
+    - `error` — `null`, or an English message for a `"failed"` pairing.
+- `devices` — the caller's paired phones, oldest first. `createdAt` is when pairing completed;
+  `lastSeenAt` starts equal to it and afterwards moves forward, at most once a minute, when the
+  phone uses its token.
+- `error` — `null`, or an English message while `status` is `"failed"`.
+- `version` — a UUIDv7 minted for the caller whenever this snapshot changes. The event carries the
+  complete object, so a client keeps the one with the greater version.
+- `updatedAt` — when the snapshot last changed.
+
+### `GET /v0/mobile-connector`
+
+Response — `200`: `{ "mobileConnector": { ... } }`. This also answers while the feature is
+disabled, with `status: "disabled"`.
+
+### `POST /v0/mobile-connector/pairing`
+
+Starts a pairing, opening the socket if needed, and returns once the QR code is ready. It has no
+request body. Any earlier pairing of the caller's is cancelled and replaced, so its code stops
+working. If the socket cannot open, the response still succeeds and carries a `"failed"` pairing
+and a `"failed"` status.
+
+Response — `200`: `{ "mobileConnector": { ... } }`. When the feature is disabled, the request
+returns `503` with code `unsupported`.
+
+### `POST /v0/mobile-connector/pairing/confirm`
+
+```json
+{ "pairingId": "pq7xk2m9r4t8w1y5z3a6b0c2" }
+```
+
+The person at the desktop says the emoji match. If the phone has already confirmed, the phone is
+paired and the pairing becomes `"completed"` in the response; otherwise the pairing stays
+`"verifying"` with `desktopConfirmed: true` until the phone confirms.
+
+Response — `200`: `{ "mobileConnector": { ... } }`. A `pairingId` that is not the caller's current
+pairing returns `404` with code `not_found`. A pairing that is not `"verifying"`, including one
+that has just expired, returns `409` with code `conflict`.
+
+### `POST /v0/mobile-connector/pairing/cancel`
+
+```json
+{ "pairingId": "pq7xk2m9r4t8w1y5z3a6b0c2" }
+```
+
+The person at the desktop says the emoji do not match, or gives up. An active pairing becomes
+`"cancelled"` and nothing is paired. A finished pairing is dismissed, so `pairing` becomes `null`.
+Any other `pairingId` changes nothing, so a repeated cancel is harmless.
+
+Response — `200`: `{ "mobileConnector": { ... } }`.
+
+### `DELETE /v0/mobile-connector/devices/:deviceId`
+
+Removes one of the caller's paired phones. Its token stops working at once, every request, stream,
+WebSocket, and tunnel it has open is closed, and the socket closes if nothing else needs it. This
+also works while the feature is disabled.
+
+Response — `200`: `{ "mobileConnector": { ... } }`. A phone that is not one of the caller's returns
+`404` with code `not_found`.
+
+### Events
+
+Every change to a caller's snapshot emits `mobile_connector.updated` with the complete object. It is
+delivered only to that owner, in event pulls and in live or replayed streams, and never to another
+team member.
+
+### The QR code
+
+```
+happy://direct?<base64url(UTF-8 JSON)>
+```
+
+The scheme is Happy's existing `happy`, the host is `direct`, and the query is the whole bundle
+with no `=` or padding. Happy's older relay pairing uses `happy://terminal?…`, so the host alone
+tells the two apart: the app accepts `happy://direct?` alongside `happy://terminal?` and treats
+each according to its host. The bundle is plain encoding, not encryption:
+
+```json
+{
+    "v": 1,
+    "a": "tcEXAMPLE…",
+    "p": 24781,
+    "t": "Ad3…43 characters…",
+    "n": "Steve's Mac",
+    "e": 1755400420000
+}
+```
+
+| key | meaning                                                                  |
+| --- | ------------------------------------------------------------------------ |
+| `v` | format version, `1`                                                      |
+| `a` | the connector's Tailcat address, exactly as Tailcat printed it; a secret |
+| `p` | the port to dial on `server.tailcat`                                     |
+| `t` | the one-time pairing token: base64url of 32 random bytes                 |
+| `n` | the daemon's node name, for display only and untrusted                   |
+| `e` | the pairing's expiry in epoch milliseconds, for display only             |
+
+A reader ignores unknown keys. A bundle whose `v` is a number other than `1` asks the person to
+update the app. Anything else is not a pairing code.
+
+The token exists only in daemon memory. It expires five minutes after the pairing started and is
+consumed by the first start that presents it, whatever happens next. The daemon never logs it.
+
+### Encoding
+
+All binary values in JSON and in bearer credentials are base64url without padding, in canonical
+form. A 32-byte value is exactly 43 characters. `‖` is concatenation, `lp(x)` is a 4-byte
+big-endian length followed by `x`, and text labels are UTF-8 bytes with no length prefix. The
+primitives are X25519, SHA-256, HMAC-SHA-256, and HKDF-SHA-256.
+
+### Pairing
+
+```
+Phone                                                   Daemon
+a, A = X25519 key pair; Nm = 32 random bytes
+C = SHA256("happy-mobile-pair-v1/commit" ‖ A ‖ Nm)
+POST /v0/mobile-connector/handshake          Bearer t
+     {commitment: C, device}
+                                                        consume the token
+                                                        b, B = X25519 key pair; Nd = 32 random
+                       ←  {handshakeId, publicKey: B, nonce: Nd, expiresAt}
+POST /v0/mobile-connector/handshake/reveal   Bearer handshakeId
+     {publicKey: A, nonce: Nm}
+                                                        check C; derive the secrets
+                       ←  {status: "verifying"}
+both people compare the emoji
+POST /v0/mobile-connector/handshake/confirm  Bearer handshakeId
+     {mac: MAC("mobile")}
+GET  /v0/mobile-connector/handshake?wait=25  Bearer handshakeId, until "completed"
+                       ←  {status: "completed", deviceId, mac: MAC("daemon")}
+check MAC("daemon"), then store {address, port, deviceId, deviceToken}
+```
+
+#### Derivation
+
+Both sides compute, independently:
+
+```
+K           = X25519(own private key, peer public key)
+TH          = SHA256("happy-mobile-pair-v1" ‖ lp(t) ‖ lp(C) ‖ lp(A) ‖ lp(B) ‖ lp(Nm) ‖ lp(Nd)
+                     ‖ lp(utf8(address)) ‖ lp(u16be(port)))
+PRK         = HKDF-Extract(salt = TH, ikm = K)
+emojiKey    = HKDF-Expand(PRK, "happy-mobile-pair-v1 emoji", 32)
+confirmKey  = HKDF-Expand(PRK, "happy-mobile-pair-v1 confirm", 32)
+deviceToken = HKDF-Expand(PRK, "happy-mobile-pair-v1 device-token", 32)
+emoji       = stringForEmojiHashOfData(SHA256(emojiKey), 4)
+MAC(role)   = HMAC-SHA256(confirmKey, role ‖ TH), role "mobile" or "daemon"
+```
+
+- `t` is the token's 32 raw bytes, not its base64url text.
+- The phone uses the address and port it dialed from the QR code, and the daemon uses the ones it
+  serves, so a replaced QR code changes the transcript and the emoji.
+- Either side refuses a shared secret `K` of all zeros, which every low-order public key produces.
+- The daemon never sends emoji. The phone computes them itself.
+- The device token never crosses the wire. Both sides derive it, and the daemon stores only
+  `SHA256(deviceToken)` over its 32 raw bytes.
+
+The commitment makes a relaying attacker choose the key it shows the phone before it learns the
+phone's key, and the single-use token stops it retrying against the daemon. Its chance of matching
+emoji is about 1 in 333⁴, roughly 1 in 1.2·10¹⁰.
+
+#### Emoji
+
+The emoji function is Telegram iOS's, from
+`submodules/TelegramCallsUI/CallsEmoji/Sources/CallsEmoji.m` in TelegramMessenger/Telegram-iOS:
+
+- `stringForEmojiHashOfData(data, count)` takes exactly 32 bytes. For `i` from `0` to `count - 1`,
+  it reads bytes `[8i, 8i + 8)` as a big-endian 64-bit integer, clears its top bit, and takes the
+  remainder modulo 333 as an index into `emojisArray()`. The value exceeds 2⁵³, so JavaScript uses
+  `BigInt`.
+- `emojisArray()` has 333 entries, with the exact strings including U+FE0F variation selectors
+  such as `"✌️"`, `"⚡️"`, and `"1️⃣"`. The SHA-256 of the entries joined by `\n` in UTF-8, with
+  no trailing newline, is `c22c3a00d5a68df075fecc8cb8b730a45817a246a5ca70fa3b75d248ac5b54e9`. The
+  table is reproduced in full under "The emoji table" below; never normalize or reorder it.
+- `stringForEmojiHashOfData(x, 4)` gives:
+    - for `x` = 32 zero bytes: 😉 😉 😉 😉
+    - for `x` = `000102…1f`: 💍 ☔️ 📅 🍞
+    - for `x` = `SHA256(000102…1f)`: 🙉 🇷🇺 ☔️ ✈️
+
+#### Test vectors
+
+With phone private key `01`×32, daemon private key `02`×32, token `03`×32, phone nonce `04`×32,
+daemon nonce `05`×32, address `tcFixedVectorAddress`, and port `24781`, every value in hex:
+
+| value                 | hex                                                                |
+| --------------------- | ------------------------------------------------------------------ |
+| `A`                   | `a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209` |
+| `B`                   | `ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59` |
+| `C`                   | `ae75325169fe3b8d8571df1c5fd015ef9989051a0363e780322a09ebf2430caf` |
+| `K`                   | `2ed76ab549b1e73c031eb49c9448f0798aea81b698279a0c3dc3e49fbfc4b953` |
+| `TH`                  | `919140a78d542ec0999e8b045e9b368c94a5cc2d90d6c92e7f14e8d6d302eb08` |
+| `emojiKey`            | `fa42488ee1ceadb6998e8d35792cdda1a1210a63153069fe67f1f1ce57404369` |
+| `confirmKey`          | `152eb695974a86f350d777dd1a7e63abb327eb6af37ee465addbb46ea53cde3f` |
+| `deviceToken`         | `05bf38156a0b81046b4e15f584760e0e8996efe81239e5efe4560fef29c20aeb` |
+| `MAC("mobile")`       | `56562cd319819213d10c33fd9e508fffb19343d84b14882ecfc550c058181d85` |
+| `MAC("daemon")`       | `81fa0f2f506f539f4ca3f22eeeac675850f3cd902719f14799fc6519266893c9` |
+| `SHA256(deviceToken)` | `dd652c0915a809fbbdbedc963a8ddf0c940cff4bda204d9b9d886b3e661f67b1` |
+
+The emoji for these values are 🌀 👗 ⏳ 👟.
+
+### Handshake routes
+
+These routes exist only on the connector's socket. Each takes the credential named for it, as
+described under "Credentials on the connector's socket". A handshake's status is described by:
+
+```json
+{ "status": "completed", "deviceId": "dv3n8k1m5q9r2t6w0y4z7a1c", "mac": "…43 characters…" }
+```
+
+`status` is one of:
+
+- `"verifying"` — the pairing is in progress, including while it waits for either confirmation;
+- `"completed"` — both people confirmed. Only this status carries `deviceId` and `mac`, which is
+  `MAC("daemon")`. The phone stores nothing until that MAC checks out.
+- `"rejected"` — the pairing ended without a device: the phone or the desktop said the emoji do not
+  match, the desktop cancelled, or a key or MAC was wrong;
+- `"expired"` — five minutes passed first.
+
+Every failure is immediate and final. A wrong commitment, an unusable key, or a wrong MAC ends the
+pairing, and the single-use token cannot start another. A handshake the daemon no longer knows, for
+example after a restart or after the desktop started a newer pairing, fails authentication with
+`401`, which phones treat as `"expired"`.
+
+### `POST /v0/mobile-connector/handshake`
+
+Authenticated by the QR code's pairing token.
+
+```json
+{
+    "commitment": "…C…",
+    "device": { "name": "Steve's iPhone", "platform": "ios" }
+}
+```
+
+`device.name` is 1–128 printable characters and `device.platform` is `"ios"`, `"android"`, or
+`"other"`. The desktop shows them beside the emoji.
+
+Response — `200`:
+
+```json
+{
+    "handshakeId": "…43 characters…",
+    "publicKey": "…B…",
+    "nonce": "…Nd…",
+    "expiresAt": 1755400420000
+}
+```
+
+`handshakeId` is a separate random 32 bytes, not the desktop's pairing ID, and is the credential
+for the rest of the handshake. It is a secret: phones send it only in the `Authorization` header
+and never log it. A malformed body returns `400` with code `invalid_request` and still consumes the
+token.
+
+### `POST /v0/mobile-connector/handshake/reveal`
+
+Authenticated by the handshake credential.
+
+```json
+{ "publicKey": "…A…", "nonce": "…Nm…" }
+```
+
+Response — `200`: a handshake status. It is `"verifying"` when the key matched the commitment, and
+`"rejected"` when it did not or could not be used. Revealing twice returns `409` with code
+`conflict`.
+
+### `POST /v0/mobile-connector/handshake/confirm`
+
+Authenticated by the handshake credential.
+
+```json
+{ "mac": "…MAC(\"mobile\")…" }
+```
+
+The person on the phone says the emoji match. Response — `200`: a handshake status. It is
+`"completed"` when the desktop had already confirmed, `"verifying"` while the desktop has not, and
+`"rejected"` for a wrong MAC. Confirming before revealing returns `409` with code `conflict`.
+
+### `POST /v0/mobile-connector/handshake/reject`
+
+Authenticated by the handshake credential. It has no request body.
+
+The person on the phone says the emoji do not match. Response — `200`: a handshake status,
+normally `"rejected"`. Nothing is paired.
+
+### `GET /v0/mobile-connector/handshake?wait=25`
+
+Authenticated by the handshake credential. Reads the handshake's status. With `wait`, an integer
+number of seconds up to 25, a `"verifying"` handshake answers when its status changes or when the
+wait runs out, whichever is first. A finished handshake answers at once. Response — `200`: a
+handshake status.
+
+### The emoji table
+
+The 333 entries of Telegram iOS's `emojisArray()`, in order, as a JSON array. Index `0` is 😉 and
+index `332` is 🔷. Implementations copy these exact code points and check the SHA-256 above.
+
+<!-- emoji-table-begin -->
+
+```json
+[
+    "😉",
+    "😍",
+    "😛",
+    "😭",
+    "😱",
+    "😡",
+    "😎",
+    "😴",
+    "😵",
+    "😈",
+    "😬",
+    "😇",
+    "😏",
+    "👮",
+    "👷",
+    "💂",
+    "👶",
+    "👨",
+    "👩",
+    "👴",
+    "👵",
+    "😻",
+    "😽",
+    "🙀",
+    "👺",
+    "🙈",
+    "🙉",
+    "🙊",
+    "💀",
+    "👽",
+    "💩",
+    "🔥",
+    "💥",
+    "💤",
+    "👂",
+    "👀",
+    "👃",
+    "👅",
+    "👄",
+    "👍",
+    "👎",
+    "👌",
+    "👊",
+    "✌️",
+    "✋️",
+    "👐",
+    "👆",
+    "👇",
+    "👉",
+    "👈",
+    "🙏",
+    "👏",
+    "💪",
+    "🚶",
+    "🏃",
+    "💃",
+    "👫",
+    "👪",
+    "👬",
+    "👭",
+    "💅",
+    "🎩",
+    "👑",
+    "👒",
+    "👟",
+    "👞",
+    "👠",
+    "👕",
+    "👗",
+    "👖",
+    "👙",
+    "👜",
+    "👓",
+    "🎀",
+    "💄",
+    "💛",
+    "💙",
+    "💜",
+    "💚",
+    "💍",
+    "💎",
+    "🐶",
+    "🐺",
+    "🐱",
+    "🐭",
+    "🐹",
+    "🐰",
+    "🐸",
+    "🐯",
+    "🐨",
+    "🐻",
+    "🐷",
+    "🐮",
+    "🐗",
+    "🐴",
+    "🐑",
+    "🐘",
+    "🐼",
+    "🐧",
+    "🐥",
+    "🐔",
+    "🐍",
+    "🐢",
+    "🐛",
+    "🐝",
+    "🐜",
+    "🐞",
+    "🐌",
+    "🐙",
+    "🐚",
+    "🐟",
+    "🐬",
+    "🐋",
+    "🐐",
+    "🐊",
+    "🐫",
+    "🍀",
+    "🌹",
+    "🌻",
+    "🍁",
+    "🌾",
+    "🍄",
+    "🌵",
+    "🌴",
+    "🌳",
+    "🌞",
+    "🌚",
+    "🌙",
+    "🌎",
+    "🌋",
+    "⚡️",
+    "☔️",
+    "❄️",
+    "⛄️",
+    "🌀",
+    "🌈",
+    "🌊",
+    "🎓",
+    "🎆",
+    "🎃",
+    "👻",
+    "🎅",
+    "🎄",
+    "🎁",
+    "🎈",
+    "🔮",
+    "🎥",
+    "📷",
+    "💿",
+    "💻",
+    "☎️",
+    "📡",
+    "📺",
+    "📻",
+    "🔉",
+    "🔔",
+    "⏳",
+    "⏰",
+    "⌚️",
+    "🔒",
+    "🔑",
+    "🔎",
+    "💡",
+    "🔦",
+    "🔌",
+    "🔋",
+    "🚿",
+    "🚽",
+    "🔧",
+    "🔨",
+    "🚪",
+    "🚬",
+    "💣",
+    "🔫",
+    "🔪",
+    "💊",
+    "💉",
+    "💰",
+    "💵",
+    "💳",
+    "✉️",
+    "📫",
+    "📦",
+    "📅",
+    "📁",
+    "✂️",
+    "📌",
+    "📎",
+    "✒️",
+    "✏️",
+    "📐",
+    "📚",
+    "🔬",
+    "🔭",
+    "🎨",
+    "🎬",
+    "🎤",
+    "🎧",
+    "🎵",
+    "🎹",
+    "🎻",
+    "🎺",
+    "🎸",
+    "👾",
+    "🎮",
+    "🃏",
+    "🎲",
+    "🎯",
+    "🏈",
+    "🏀",
+    "⚽️",
+    "⚾️",
+    "🎾",
+    "🎱",
+    "🏉",
+    "🎳",
+    "🏁",
+    "🏇",
+    "🏆",
+    "🏊",
+    "🏄",
+    "☕️",
+    "🍼",
+    "🍺",
+    "🍷",
+    "🍴",
+    "🍕",
+    "🍔",
+    "🍟",
+    "🍗",
+    "🍱",
+    "🍚",
+    "🍜",
+    "🍡",
+    "🍳",
+    "🍞",
+    "🍩",
+    "🍦",
+    "🎂",
+    "🍰",
+    "🍪",
+    "🍫",
+    "🍭",
+    "🍯",
+    "🍎",
+    "🍏",
+    "🍊",
+    "🍋",
+    "🍒",
+    "🍇",
+    "🍉",
+    "🍓",
+    "🍑",
+    "🍌",
+    "🍐",
+    "🍍",
+    "🍆",
+    "🍅",
+    "🌽",
+    "🏡",
+    "🏥",
+    "🏦",
+    "⛪️",
+    "🏰",
+    "⛺️",
+    "🏭",
+    "🗻",
+    "🗽",
+    "🎠",
+    "🎡",
+    "⛲️",
+    "🎢",
+    "🚢",
+    "🚤",
+    "⚓️",
+    "🚀",
+    "✈️",
+    "🚁",
+    "🚂",
+    "🚋",
+    "🚎",
+    "🚌",
+    "🚙",
+    "🚗",
+    "🚕",
+    "🚛",
+    "🚨",
+    "🚔",
+    "🚒",
+    "🚑",
+    "🚲",
+    "🚠",
+    "🚜",
+    "🚦",
+    "⚠️",
+    "🚧",
+    "⛽️",
+    "🎰",
+    "🗿",
+    "🎪",
+    "🎭",
+    "🇯🇵",
+    "🇰🇷",
+    "🇩🇪",
+    "🇨🇳",
+    "🇺🇸",
+    "🇫🇷",
+    "🇪🇸",
+    "🇮🇹",
+    "🇷🇺",
+    "🇬🇧",
+    "1️⃣",
+    "2️⃣",
+    "3️⃣",
+    "4️⃣",
+    "5️⃣",
+    "6️⃣",
+    "7️⃣",
+    "8️⃣",
+    "9️⃣",
+    "0️⃣",
+    "🔟",
+    "❗️",
+    "❓",
+    "♥️",
+    "♦️",
+    "💯",
+    "🔗",
+    "🔱",
+    "🔴",
+    "🔵",
+    "🔶",
+    "🔷"
+]
+```
+
+<!-- emoji-table-end -->
 
 ## Secrets
 
@@ -6473,9 +7280,8 @@ Response — `200`: `{ "bot": { ... } }` with `avatar` `null`.
 
 A Surface is an instance of a predefined feature with its own typed API. Every instance has a
 CUID2 ID and a human name. Multiple independent Surfaces of each type may exist, with separate
-content, history, and members. Supported types are `todo`, `document`, `artifact`, `bot`, and
-`task`; calendars
-are a future type, not a current endpoint. The catalog initially has no instances.
+content, history, and members. Supported types are `todo`, `document`, `calendar`, `artifact`, `bot`,
+and `task`. The catalog initially has no instances.
 All onboarded authenticated people may read and modify Surface data, whether
 or not they joined. Joining and leaving control only the person's sidebar. Creating a Surface
 does not create a workspace, agent, or chat; the separate chat-ensure operation below is lazy.
@@ -6859,7 +7665,8 @@ fields and malformed values return `400 invalid_request`.
   `POST /unsubscribe` accepts the same body and returns `200 {}`; unsubscribing a stream that is
   not subscribed is a no-op. Both are described under live editing below.
 - `POST /presence` accepts `{ "streamId": "...", "awarenessClientId": 123, "update": "..." }`
-  and returns `200 {}`. Presence is relayed, never stored.
+  and returns `200 {}`. Presence is relayed, never stored. Presence sent through a stream that is
+  not subscribed to this document returns `200 {}` and is relayed to nobody.
 
 Every accepted change commits its log entry and stored state in one transaction, composable with
 its caller's transaction, and is sent to subscribers only after commit. Writes to one document
@@ -6936,6 +7743,348 @@ optional absolute `imagePath`. Its authority, attribution, creator join rules, i
 and permission boundaries match `create_todo_surface`. No document operation joins anyone
 automatically other than the explicit creator rule during Surface creation.
 
+### Calendar Surfaces
+
+A `calendar` Surface owns one shared set of calendar events that people and agents create, move,
+and edit. Events live only in Happy: there is no external calendar sync, subscription feed, or
+import, and the daemon makes no network request for calendar data. Recurring events are expanded
+by the daemon. Clients and models read expanded occurrences from the range read and never
+compute recurrences themselves.
+
+`POST /v0/surfaces` accepts `{ "type": "calendar", "name": "Team", "id": "...",
+"image": { "data": "..." }, "mutationId": "..." }`. Only `type` and `name` are required. It
+creates an empty calendar. Images, creator attribution, automatic creator membership,
+supplied-ID retries, and `surface.created` follow the catalog rules.
+
+#### Event data
+
+```json
+{
+    "id": "e4k8m2q9w1e5r7y3u6i0o2p4",
+    "surfaceId": "s4k8m2q9w1e5r7y3u6i0o2p4",
+    "authorUserId": "u1x2y3z4a5b6c7d8e9f0g1h2",
+    "title": "Team sync",
+    "notes": "Agenda in the shared doc.",
+    "location": "Room 4",
+    "timing": {
+        "kind": "timed",
+        "start": 1760943600000,
+        "end": 1760947200000,
+        "timeZone": "Europe/Berlin"
+    },
+    "recurrence": {
+        "frequency": "weekly",
+        "interval": 1,
+        "weekdays": ["monday", "thursday"],
+        "until": null,
+        "count": 10
+    },
+    "status": "active",
+    "createdAt": 1755300000000,
+    "updatedAt": 1755400000000,
+    "deletedAt": null,
+    "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e"
+}
+```
+
+`id` is a CUID2. `title` is always a string of 0–1,024 characters with no ASCII control
+characters. It may be empty or contain only whitespace; clients show such a title as their own
+placeholder, such as "(No title)". `notes` is `null` or 1–10,000 characters with no ASCII control
+characters except tab and newline. `location` is `null` or 1–1,024 characters containing a
+non-whitespace character and no ASCII control characters. Text is stored exactly as supplied,
+without trimming. `status` is `active` or `deleted`. An active event has `deletedAt: null`; a
+deleted event is a tombstone with a deletion timestamp that keeps every other field. `createdAt`, `updatedAt`, and `deletedAt` are epoch milliseconds. `version` is a
+UUIDv7 resource version.
+
+`authorUserId` follows the todo author rules exactly. It is the installation-local Happy user ID
+of the event's author, or `null`, set once at creation, never changed by any edit, deletion, or
+application of an earlier state, and repeated unchanged in every revision snapshot.
+
+#### Timing
+
+`timing` is one of two kinds.
+
+- **Timed:** `{ "kind": "timed", "start": 1760943600000, "end": 1760947200000,
+"timeZone": "Europe/Berlin" }`. `start` and `end` are instants in epoch milliseconds, with
+  `start < end` and both in `0` through `253402300799999` (the end of year 9999 UTC). `timeZone`
+  is an IANA time zone name such as `Europe/Berlin`, `America/New_York`, or `UTC`. The daemon
+  accepts any name its time zone database recognizes, including links such as `US/Eastern`, and
+  stores it exactly as supplied. Numeric offsets such as `+02:00` are not time zones. An
+  unrecognized name returns `400 invalid_request`. The time zone gives the event its local
+  wall-clock time: the event's local start is `start` read in `timeZone`.
+- **All-day:** `{ "kind": "allDay", "startDate": "2026-10-20", "endDate": "2026-10-21" }`.
+  Dates are `YYYY-MM-DD` Gregorian calendar dates from `1970-01-01` through `9999-12-31`.
+  `endDate` is exclusive and later than `startDate`, so a one-day event on 20 October has
+  `endDate: "2026-10-21"`. All-day events have no time zone: they cover the same dates wherever
+  they are viewed.
+
+An event lasts at most 366 days: `end - start` is at most 31,622,400,000 ms for timed events, and
+`endDate` is at most 366 days after `startDate` for all-day events. A longer event returns
+`400 invalid_request`.
+
+#### Recurrence
+
+`recurrence` is `null` for a one-off event, or a rule:
+
+```json
+{
+    "frequency": "monthly",
+    "interval": 1,
+    "until": "2027-06-30",
+    "count": null
+}
+```
+
+- `frequency` is `daily`, `weekly`, `monthly`, or `yearly`.
+- `interval` is an integer from 1 through 1,000: every `interval` days, weeks, months, or years.
+- `weekdays` exists only on weekly rules. It is `null` or 1–7 unique values from `monday`,
+  `tuesday`, `wednesday`, `thursday`, `friday`, `saturday`, and `sunday`, stored in that
+  Monday-first order whatever order the request used. `null` means the weekday of the event's
+  start, and follows the start when the timing changes.
+- `until` is `null` or an inclusive `YYYY-MM-DD` date no earlier than the start date.
+- `count` is `null` or an integer from 1 through 10,000: the total number of occurrences,
+  including the first.
+
+At most one of `until` and `count` is non-null; both `null` repeats forever. A weekly rule with
+`weekdays` on a daily, monthly, or yearly frequency, both `until` and `count`, or an `until`
+before the start date returns `400 invalid_request`. Requests may omit `interval` (default 1),
+`weekdays` (default `null`), `until`, and `count` (default `null`). Responses always include
+every field of the rule, so a stored rule can be sent back verbatim.
+
+The **start date** is the event's local start date: `startDate` for all-day events, and the date
+of `start` in `timeZone` for timed events. Its **local start time** is the wall-clock time of
+`start` in `timeZone`, to the millisecond. The event's own timing is always the first
+occurrence, index 0. Later occurrences fall on these local dates after the start date:
+
+- **Daily:** every `interval` days.
+- **Weekly:** every listed weekday (or the start's weekday when `weekdays` is `null`) in every
+  `interval`-th week. Weeks begin on Monday, and week 0 is the week containing the start date.
+  The start is always index 0, even when `weekdays` does not list its weekday.
+- **Monthly:** the start date's day of the month, every `interval` months. A month without that
+  day is skipped, as in RFC 5545: a series starting on 31 January continues on 31 March, not
+  28 February or 3 March.
+- **Yearly:** the start date's month and day, every `interval` years. A series starting on
+  29 February occurs only in leap years among those selected.
+
+Occurrences are numbered 0, 1, 2, … in date order. Skipped months and years produce no
+occurrence and consume no number, and `count` counts produced occurrences only. `until` keeps
+occurrences whose local date is on or before it.
+
+Timed occurrences are expanded in the event's own time zone, so the local start time stays fixed
+across daylight-saving changes: a 09:00 Berlin meeting stays at 09:00 Berlin time in both summer
+and winter, and its instant moves by an hour. Each occurrence's start is its local date at the
+local start time, converted to an instant in `timeZone`. A wall-clock time that does not exist
+because clocks jumped forward is moved forward by the length of the jump: 02:30 on a day that
+skips from 02:00 to 03:00 becomes 03:30. A wall-clock time that occurs twice because clocks went
+back uses the earlier instant. This matches RFC 5545 and JavaScript Temporal's `compatible`
+disambiguation. Every timed occurrence lasts exactly `end - start` milliseconds. Every all-day
+occurrence spans as many days as the event, with `endDate` shifted by the same number of days as
+`startDate`.
+
+There are no per-occurrence exceptions. An occurrence cannot be edited, moved, or deleted on its
+own: editing or deleting an event changes the whole series. To move a whole series, update the
+event's `timing`.
+
+#### Range reads and occurrences
+
+`GET /v0/surfaces/calendar/:surfaceId?from=1759269600000&to=1761951600000&timeZone=Europe%2FBerlin`
+returns every occurrence of the calendar's active events that overlaps the instant range
+`[from, to)`, with the events they belong to:
+
+```json
+{
+    "events": [{ "id": "e4k8m2q9w1e5r7y3u6i0o2p4", "...": "..." }],
+    "occurrences": [
+        {
+            "eventId": "e4k8m2q9w1e5r7y3u6i0o2p4",
+            "index": 3,
+            "timing": {
+                "kind": "timed",
+                "start": 1761552000000,
+                "end": 1761555600000,
+                "timeZone": "Europe/Berlin"
+            }
+        }
+    ],
+    "truncated": false,
+    "cursor": "..."
+}
+```
+
+- `from` and `to` are required epoch milliseconds written as plain decimal integers, with
+  `0 <= from < to <= 253402300800000` and `to - from` at most 100 days (8,640,000,000 ms).
+  One month or one week view, including its leading and trailing days, is one read.
+- `timeZone` is required: the IANA time zone in which the client shows the range. It decides
+  only how all-day occurrences meet the instant range. An all-day occurrence covers
+  `[midnight of startDate, midnight of endDate)` in that zone. A midnight that does not exist
+  there uses the same forward rule as recurrence expansion. Timed occurrences ignore it.
+- A timed occurrence overlaps when its start is before `to` and its end is after `from`. An
+  all-day occurrence overlaps when its covered range does, so an occurrence that started before
+  the range and is still running is included.
+- Each occurrence has `eventId`, its zero-based `index` in the series, and `timing` of the same
+  shape as an event's. A timed occurrence repeats its event's `timeZone`. An occurrence's
+  identity is `eventId` with `index`, and it is valid only for the event version it was read at.
+  A one-off event has exactly one occurrence, index 0, whose timing equals the event's.
+- `occurrences` is sorted by start, then all-day before timed at the same start, then `eventId`,
+  then `index`. An all-day occurrence's start is its zone midnight for this ordering.
+- `events` holds exactly the events referenced by `occurrences`, each once, in ascending ID
+  order, as full event objects. Deleted events and their occurrences never appear in a range
+  read.
+- At most 5,000 occurrences are returned. When more overlap the range, the response holds the
+  first 5,000 in the order above and `truncated: true`; the client reads a narrower range.
+  Otherwise `truncated` is `false`.
+- `cursor` is the shared event cursor captured before the read.
+
+Missing, repeated, or malformed `from`, `to`, or `timeZone`, `from >= to`, or a range over 100
+days return `400 invalid_request`. Other query fields are ignored.
+
+#### Permanent history and restoration
+
+Every creation, edit, timing or recurrence change, deletion, and return to active atomically
+stores the event's complete new snapshot as an immutable revision, alongside the current event
+and its durable notification intent. Publication to the shared event journal follows commit.
+A revision is `{ "event": {...}, "actor": { "userId": null, "agentId": null },
+"source": "api" }`. Its snapshot holds every field of the event: title, notes, location, timing
+kind with its start and end or dates and time zone, the full recurrence rule, status, the
+tombstone timestamp, the author, and the version. `actor` and `source` follow the todo revision
+rules exactly. They come from trusted execution context, never from a request body, and are
+independent of `authorUserId`. A no-op stores neither a revision nor an event. Revisions are
+permanent: deletion, later edits, applying an earlier state, restart, and event-journal retention
+never remove or change one. All operations participate in a caller's transaction and notify only
+after commit.
+
+There is no restore, revert, or undelete route or tool. Any earlier state can be restored exactly
+with the ordinary update. To restore one, read a revision and send its `title`, `notes`,
+`location`, `timing`, `recurrence`, and `status` through `PATCH` with the current version in
+`If-Match`. Every field a revision holds can be set this way. Sending `status: "active"`
+undeletes a deleted event. `title: ""` empties the title, and `notes: null` and
+`location: null` clear them. `recurrence: null` removes a rule, and a full rule replaces one.
+`timing` switches freely between timed and all-day.
+A revision's `recurrence` is accepted verbatim. The result equals that revision in every editable
+field. Server-owned fields stay server-owned: `id`, `surfaceId`, `authorUserId`, and `createdAt`
+never change, `updatedAt` and `version` are new, and a restored deleted state gets a new
+`deletedAt`. Applying an earlier state appends exactly one new revision and never rewrites the
+revision it came from. Applying a state equal to the current one is a no-op.
+
+All mutations of existing events require `If-Match` with the current event version. Missing or
+malformed headers return `400 invalid_request`. A stale one returns `409 conflict` with
+`currentVersion` and the authoritative `event`, including when it is deleted. Unknown event IDs
+return `404 not_found`. Invalid bodies, unsupported fields, and malformed paging parameters return
+`400 invalid_request`. Creation does not use `If-Match`.
+
+#### Routes
+
+The prefix is `/v0/surfaces/calendar/:surfaceId`. Every operation checks that the Surface has
+type `calendar` and scopes event and revision lookups to that instance. Unknown Surfaces, a
+Surface of another type, and events or revisions belonging to a different Surface return
+`404 not_found`. Calendar routes given a todo, document, or reference Surface also return
+`404 not_found`, as todo and document routes do for a calendar.
+
+- `GET` is the range read above.
+- `POST` accepts `{ "title": "Team sync", "notes": null, "location": "Room 4", "timing": {...},
+"recurrence": {...}, "id": "...", "mutationId": "..." }`. Only `timing` is required. `title`
+  defaults to `""`, `notes`, `location`, and `recurrence` default to `null`, and `id` and
+  `mutationId` are optional. Creation records the authenticated caller as `authorUserId`
+  (`null` in standalone mode), stores an active event, and returns `201 { "event": {...} }`,
+  emitting shared
+  `calendar_event.created`. A repeated supplied ID returns the current event unchanged with
+  `201`, even after deletion or restart, and emits no event; the other fields are ignored. This
+  ID is the creation retry key, and `mutationId` is only an echo. HTTP bodies cannot supply
+  `authorUserId`, `status`, or timestamps.
+- `GET /:eventId` returns `200 { "event": {...} }`, including deleted tombstones.
+- `PATCH /:eventId` accepts any non-empty subset of `title`, `notes`, `location`, `timing`,
+  `recurrence`, and `status`, plus optional `mutationId`. It requires at least one of those six
+  fields. `status` is `active` or `deleted`. `timing` and `recurrence` replace the whole value;
+  there is no partial merge inside them. The resulting event must be valid as a whole. For
+  example, moving the timing past a rule's `until` returns `400 invalid_request` unless the same
+  request also changes the rule. Fields may be edited in any status. Moving to `deleted` sets a
+  new `deletedAt`. Moving to `active` clears it. Repeating the current status keeps its
+  timestamp. An identical edit is a no-op. The response is `200 { "event": {...} }`, and a
+  change emits `calendar_event.updated`. Dragging an event or an occurrence to a new time is one
+  `PATCH` of `timing`. Resizing it is the same. Because there are no per-occurrence exceptions,
+  a client moving an occurrence of a series applies the same shift to the event's own timing.
+- `DELETE /:eventId` accepts `{}` or `{ "mutationId": "..." }`, marks the event deleted, and
+  returns `200 { "event": {...} }`. Already deleted is a no-op after checking `If-Match`. A
+  change emits `calendar_event.updated`. Deletion never removes a revision.
+- `GET /:eventId/versions` returns `200` with `versions` (immutable revisions, oldest first) and
+  `nextAfterVersion` (a UUIDv7 or `null`). `afterVersion` is an optional exclusive UUIDv7
+  revision cursor belonging to this event, and unknown cursors return `404 not_found`. `limit`
+  is optional, default 100, from 1 through 200. `nextAfterVersion` names this page's last
+  revision when another page exists, otherwise `null`. Appending revisions never changes prior
+  pages.
+- `GET /:eventId/versions/:version` returns `200 { "revision": {...} }` for that immutable
+  revision. Unknown versions return `404 not_found`.
+
+#### Events
+
+`calendar_event.created` carries the full `event` and optional `mutationId`.
+`calendar_event.updated` carries `surfaceId`, `eventId`, `previousVersion`, `version`, `changes`,
+and optional `mutationId`. `changes` holds the changed fields among `title`, `notes`,
+`location`, `timing`, `recurrence`, `status`, and `deletedAt`, always with `updatedAt`. `timing`
+and `recurrence` appear whole. Both events are shared. Consumers follow normal version-chain
+reconciliation and refetch an event on a gap. Events carry series records, not occurrences: a
+client showing a range reads that range again after a `calendar_event.*` event for its calendar,
+and never derives occurrences from a payload. Calendar events, occurrences, and history are not
+part of desktop bootstrap; opening a calendar reads its visible range with that read's cursor.
+
+#### Agent tools
+
+Every ordinary agent model receives fixed common tools `list_calendar_events`,
+`create_calendar_event`, `update_calendar_event`, `delete_calendar_event`, and
+`list_calendar_event_versions`. They call the same typed operations as the API. Tools state times
+as ISO 8601 text instead of epoch milliseconds, so models never convert instants themselves:
+
+- A tool **timed** timing is `{ "kind": "timed", "start": "2026-10-20T09:00",
+"end": "2026-10-20T10:00", "timeZone": "Europe/Berlin" }`. `start` and `end` are local
+  wall-clock date-times in `timeZone`, written `YYYY-MM-DDTHH:mm`, with optional `:ss` and
+  `.sss`. An optional trailing offset (`+02:00`, `-05:00`, or `Z`) must equal `timeZone`'s
+  offset at that wall-clock time, or the call is invalid. The offset selects between the two
+  instants of a repeated hour. Without an offset, the daemon applies the expansion rule: a
+  skipped time moves forward, and a repeated time uses the earlier instant. **All-day** timing
+  is the API form, with `endDate` exclusive. Recurrence rules are the API form.
+- Tool output writes every timed value as a local date-time with its offset, such as
+  `2026-10-20T09:00:00+02:00`, so any tool output can be passed back as tool input. An event's
+  and a revision's timing is written in the event's own `timeZone`.
+
+The tools are:
+
+- `list_calendar_events` accepts `surfaceId`, `from`, `to`, and `timeZone`. `from` and `to` are
+  local dates (`YYYY-MM-DD`, meaning midnight) or local date-times in `timeZone`, with `from`
+  before `to` and at most 100 days apart. It returns `timeZone`, the occurrences overlapping the
+  range, the active events they belong to (with versions for guarded edits), and `truncated`.
+  Occurrence times are written in the requested `timeZone`, the zone the person thinks in. Each
+  occurrence names its `eventId` and `index`. At most 200 occurrences are returned, in the range
+  read's order. When more exist, `truncated` is `true` and the description tells the model to
+  narrow the range. It is the same daemon expansion as the range read.
+- `create_calendar_event` accepts `surfaceId`, optional `title` (default `""`, which may be
+  blank), optional `notes` and `location`, `timing`, optional `recurrence`, and a required
+  explicit `authorUserId`, with the exact semantics, validation, and replay of `create_todo`'s
+  `authorUserId`.
+- `update_calendar_event` accepts `surfaceId`, `eventId`, the `version` it read, and any of
+  `title`, `notes` (string or `null`), `location` (string or `null`), `timing`, `recurrence`
+  (rule or `null`), and `status` (`active` or `deleted`). Its description tells models that
+  edits change the whole series, and that restoring means reading a revision with
+  `list_calendar_event_versions` and passing its fields here with the current version.
+  `status: "active"` undeletes.
+- `delete_calendar_event` accepts `surfaceId`, `eventId`, and `version`, and tombstones the whole
+  series while keeping every revision.
+- `list_calendar_event_versions` accepts `surfaceId`, `eventId`, optional `afterVersion`, and
+  optional `limit` from 1 through 20, default 10. It returns full revisions oldest first, with
+  their actors and with timing in the tool form, and `nextAfterVersion`. Like todos, there is no
+  separate single-revision tool. Each page entry is the complete snapshot.
+
+Mutation tools supply the version they read and receive an explicit conflict on a stale version.
+Read tools require no review. Mutation tools are durable and transactional, own ordinary
+shared-data Auto review, and run within the current permission boundary without filesystem
+elevation. Durable replay of a creation reuses its call-stable event ID. Every replay returns
+the committed result without appending another revision or event. Reading or modifying events
+never joins anyone to the Surface.
+
+Active admin bots additionally receive `create_calendar_surface`, accepting `name`, required
+explicit `creatorUserId`, and optional absolute `imagePath`. Its authority, attribution, creator
+join rules, image handling, durable replay, and permission boundaries match
+`create_todo_surface`.
+
 ### Reference Surfaces
 
 An `artifact`, `bot`, or `task` Surface points to exactly one existing entity. It does not clone
@@ -7008,7 +8157,8 @@ The reference never joins anyone to the target's own task list or changes its ex
 
 ### Shared Surface chats
 
-The chat-enabled types are `todo`, `document`, `artifact`, `bot`, and `task`. Each may own exactly
+The chat-enabled types are `todo`, `document`, `calendar`, `artifact`, `bot`, and
+`task`. Each may own exactly
 one shared persistent conversation, created lazily when a person explicitly opens its chat.
 Unsupported types have no chat: their ensure operation returns `409 conflict` and leaves
 `chatAgentId` null. A reference Surface's contextual chat is separate from the target
@@ -7075,7 +8225,8 @@ archive, reorder, and child creation; and attaching another root agent all retur
 Surface membership changes never stop the chat, delete its folder, or discard history, even
 when nobody remains joined. Since Surfaces have no deletion route, their chats and folders
 remain for the Surface's lifetime. The agent's context names its Surface ID, type, and stored
-label, and tells it to use ordinary Surface tools, plus document tools for document content.
+label, and tells it to use ordinary Surface tools, plus document tools for document content and
+calendar tools for calendar events. A calendar chat's context calls its Surface a calendar.
 It receives no admin role, no new subtask-creation eligibility, and no implicit join, creation,
 or target permissions. Ensuring or using the chat never joins anyone to a Surface or task list.
 
@@ -7456,10 +8607,20 @@ Authors are extensible in the same way; a client shows an unrecognized `kind` as
 files, its author, its source, and when it was made. A new version starts from the files of the
 latest one and adds, replaces, or removes individual files, so files that did not change carry over
 without being sent again; it may also replace every file at once. An update that changes only the
-title makes a new version holding the same files. The artifact object mirrors its latest version in
-`latestVersion`, `title`, `entry`, `fileCount`, and `size`, records its creation in `source`,
-`createdBy`, and `createdAt`, and its latest change in `updatedBy`, `updatedSource`, and
-`updatedAt`.
+title or the background makes a new version holding the same files. The artifact object mirrors
+its latest version in `latestVersion`, `title`, `entry`, `fileCount`, `size`, and `background`,
+records its creation in `source`, `createdBy`, and `createdAt`, and its latest change in
+`updatedBy`, `updatedSource`, and `updatedAt`.
+
+**Backgrounds.** A client shows an artifact on a transparent slot, so the surface around it — a
+desktop pane, a chat card — shows through, in light and dark. A version may instead name a
+`background`, a colour the client paints behind its content. It is for content that needs one
+fixed canvas, such as a print-like document or a visualization drawn for one palette; most
+artifacts leave it `null`. It is a hexadecimal colour, `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`,
+accepted in either case and stored in lowercase, and nothing else: no colour names, functions,
+variables, or other CSS. A new version keeps the latest version's background unless the change
+names another or clears it. A client uses it only as the slot's background colour and checks the
+pattern again before it does.
 
 **Deletion.** Deleting leaves a tombstone. `status` becomes `"deleted"`, `deletedBy`,
 `deletedSource`, and `deletedAt` record the deletion, which is also the artifact's latest change,
@@ -7492,6 +8653,7 @@ updating or deleting an artifact requires `If-Match` with it.
     },
     "fileCount": 3,
     "size": 412870,
+    "background": null,
     "source": {
         "kind": "workspace",
         "workspaceId": "w5v4u3t2s1r0q9p8o7n6m5l4",
@@ -7521,6 +8683,7 @@ Fields:
 - `entry` — the latest version's entry, as a file object.
 - `fileCount`, `size` — how many files the latest version holds, and their bytes together. The
   files themselves are listed by the version.
+- `background` — the latest version's background, or `null` for a transparent slot.
 - `source` — where the artifact was created, or `null`.
 - `createdBy`, `createdAt` — who created the artifact, and when.
 - `updatedBy`, `updatedSource`, `updatedAt` — who made the latest change, where, and when. After
@@ -7543,6 +8706,7 @@ Fields:
     "files": [
         /* file objects, in path order */
     ],
+    "background": null,
     "createdBy": { "kind": "user", "userId": "u1x2y3z4a5b6c7d8e9f0g1h2" },
     "source": null,
     "createdAt": 1755400000000
@@ -7552,6 +8716,7 @@ Fields:
 - `artifactId`, `number` — the artifact and the version's number within it, from 1.
 - `title`, `entry`, `files` — the artifact as this version left it. `files` is the version's whole
   manifest, ordered by `path` in Unicode code point order; `entry` is one of them.
+- `background` — the colour behind this version's content, or `null` for a transparent slot.
 - `createdBy`, `source`, `createdAt` — who made this version, where, and when.
 
 ### The file object
@@ -7788,10 +8953,13 @@ Request:
   the workspace. A source naming a bot, task, project, workspace, or agent that does not exist is
   `400`.
 - `files` — required, 1–256 version files, as described above: every file of the first version.
+- `background` — optional; the first version's background, as described above. Omitted or `null`
+  means none. Leave it out unless the content needs one fixed canvas.
 
-Files that break the type's rules — a missing entry, too many or too few files, a media type the
-type does not accept, a file or total over its limit, an entry that is not valid UTF-8, an invalid
-path, or a path that is also a folder — are `400 invalid_request`. An upload that does not exist,
+A `background` that is not such a colour is `400 invalid_request`. Files that break the type's
+rules — a missing entry, too many or too few files, a media type the type does not accept, a file
+or total over its limit, an entry that is not valid UTF-8, an invalid path, or a path that is also
+a folder — are `400 invalid_request`. An upload that does not exist,
 has expired, or was already used is `404`, and nothing is created.
 
 Repeating `id` returns the current artifact unchanged with `201`, including after updates or
@@ -7817,13 +8985,15 @@ Request:
 }
 ```
 
-Every field is optional, but at least one of `title`, `files`, `remove`, and `replaceAll` is
-required. The new version starts from the latest version's files, or from none when `replaceAll`
-is `true`. `files`, up to 256 version files, then adds each path or replaces the
+Every field is optional, but at least one of `title`, `background`, `files`, `remove`, and
+`replaceAll` is required. The new version starts from the latest version's files, or from none
+when `replaceAll` is `true`. `files`, up to 256 version files, then adds each path or replaces the
 file already there, and `remove`, up to 256 paths, takes files out. A path both written and
 removed, or removed but not present, is `400`, and the result must satisfy the type's rules just
-as a creation does. An omitted `title` keeps the current title. `source` says where this change is
-being made; it becomes the new version's `source` and the artifact's `updatedSource`.
+as a creation does. An omitted `title` keeps the current title. A `background` colour sets the
+new version's background, `null` clears it, and omitting it keeps the latest version's; anything
+else is `400`. `source` says where this change is being made; it becomes the new version's
+`source` and the artifact's `updatedSource`.
 
 Response — `200`: `{ "artifact": { ... } }` with the new `latestVersion`, and an `artifact.updated`
 event after commit, echoing `mutationId`. File errors are `400` and upload errors `404`, as in
@@ -8793,8 +9963,9 @@ agent's change carries none.
     - `artifact` (full artifact object).
 - `artifact.updated` — a new version was made.
     - `artifactId` (ID string), `previousVersion`, `version`, `changes`.
-    - `changes` always holds `latestVersion`, `title`, `entry`, `fileCount`, `size`, `updatedBy`,
-      `updatedSource`, and `updatedAt`. Read the new version's files through the version routes.
+    - `changes` always holds `latestVersion`, `title`, `entry`, `fileCount`, `size`, `background`,
+      `updatedBy`, `updatedSource`, and `updatedAt`. Read the new version's files through the
+      version routes.
 - `artifact.deleted` — the artifact was deleted and is now a tombstone.
     - `artifactId` (ID string), `previousVersion`, `version`, `changes`.
     - `changes` holds `status`, `deletedBy`, `deletedSource`, `deletedAt`, `updatedBy`,
@@ -9048,6 +10219,14 @@ version rules. Snapshot-to-stream cursor and version-gap recovery rules remain u
   reconciling snapshots for the same owner. Team clients never receive another owner's event or
   an unowned installation-wide integration event.
     - `integration` (full Happy integration object).
+
+**Mobile connector**
+
+- `mobile_connector.updated` — the caller's mobile connector changed: its socket status, pairing,
+  or paired phones. This is a complete replacement rather than a version-chain diff; clients keep
+  the snapshot with the greater `version`. In team mode only its owner receives it, in journal
+  pulls, replay, and live delivery, and the payload never names the owner.
+    - `mobileConnector` (the complete mobile connector object).
 
 **User settings**
 
@@ -9337,6 +10516,8 @@ Response — `200`:
 - `surfaces` — exactly the catalog with nested members from `GET /v0/surfaces`. Additive and
   absent on daemons without Surface support. Follow shared `surface.updated` from the bootstrap cursor.
   Todo data and revision history are loaded on demand through the Todo Surface endpoints.
+  Calendar events, occurrences, and revision history are likewise loaded on demand through the
+  Calendar Surface endpoints.
 - `archivedAgents` — the archived agents that would otherwise belong to the included projects'
   and workspaces' `agents` series, as full agent objects, newest `archivedAt` first with the
   agent ID as the tie-breaker. Each carries the `workspaceId` of its owner, which is the

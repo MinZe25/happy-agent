@@ -50,6 +50,10 @@ that contract and is the right choice for almost every page.
    (`votes/<userId>`). Use `happy.kv.update` for anything genuinely shared, such as a counter.
 7. Unconfirmed writes live only in the page's memory and are dropped if the page closes; the
    daemon's store is the source of truth.
+8. Leave `html` and `body` without a background and set `color-scheme: light dark`, so the page
+   sits on the surface of whatever shows it, in light and dark. Keep the layout flat: no card
+   inside a card, and no coloured stripe down a card's left edge. The Happy design system in
+   `../DESIGN.md` has the rest.
 
 ## The SDK
 
@@ -101,6 +105,9 @@ holds exactly this:
         <title>Shared to-dos</title>
         <script src="/api/v1/client.js"></script>
         <style>
+            :root {
+                color-scheme: light dark;
+            }
             body {
                 font:
                     15px/1.4 system-ui,
@@ -118,14 +125,14 @@ holds exactly this:
                 font-size: 12px;
                 padding: 2px 8px;
                 border-radius: 99px;
-                background: #eee;
+                background: color-mix(in srgb, currentColor 10%, transparent);
             }
             #status[data-status="online"] {
-                background: #d7f5dd;
+                background: color-mix(in srgb, green 20%, transparent);
             }
             #status[data-status="offline"],
             #status[data-status="unavailable"] {
-                background: #fde2e2;
+                background: color-mix(in srgb, red 20%, transparent);
             }
             form {
                 display: flex;
@@ -148,7 +155,7 @@ holds exactly this:
             }
             li.done .title {
                 text-decoration: line-through;
-                color: #888;
+                opacity: 0.6;
             }
             .title {
                 flex: 1;
@@ -158,11 +165,11 @@ holds exactly this:
                 height: 22px;
                 border-radius: 50%;
                 object-fit: cover;
-                background: #ccc;
+                background: color-mix(in srgb, currentColor 20%, transparent);
             }
             .meta {
                 font-size: 12px;
-                color: #888;
+                opacity: 0.7;
             }
             ul {
                 padding: 0;

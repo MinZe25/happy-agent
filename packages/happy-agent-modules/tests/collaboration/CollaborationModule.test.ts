@@ -18,6 +18,7 @@ import {
     DEFAULT_BOT_SETTINGS,
 } from "../../sources/botSettings/index.js";
 import {
+    archiveAgentTool,
     CollaborationModule,
     createAgentTool,
     interruptAgentTool,
@@ -179,6 +180,7 @@ async function started(
     hooks: AgentModuleHooks;
     ctx: Context;
     history: HistoryModule;
+    releasedMachines: string[];
 }> {
     const abort = abortModule();
     vi.spyOn(abort, "abort").mockImplementation(
@@ -187,7 +189,12 @@ async function started(
     const history = new HistoryModule();
     vi.spyOn(history, "toolSpawnPresentation").mockResolvedValue(undefined);
     vi.spyOn(history, "recordToolSpawnPresentation").mockResolvedValue(undefined);
-    const module = new CollaborationModule(config, abort, history, botSettings?.module);
+    const compute = computeModule();
+    const releasedMachines: string[] = [];
+    vi.spyOn(compute, "archiveAgent").mockImplementation(async (_ctx, agentId) => {
+        releasedMachines.push(agentId);
+    });
+    const module = new CollaborationModule(config, abort, history, compute, botSettings?.module);
     botSettings?.module.beforeStart(botSettings.ctx, collection.asRef());
     const base = botSettings?.ctx ?? createRootContext().named("collaboration-test");
     const ctx = withAgentConfig(base, {
@@ -201,11 +208,15 @@ async function started(
         metadata: { title: "Parent agent" },
     });
     const hooks = await resolveModuleHooks(ctx, module, collection.asRef());
-    return { module, hooks, ctx, history };
+    return { module, hooks, ctx, history, releasedMachines };
+}
+
+function computeModule(): ComputeModule {
+    return new ComputeModule(testConfig, new SecretsModule());
 }
 
 function abortModule(): AbortModule {
-    return new AbortModule(new ComputeModule(testConfig, new SecretsModule()));
+    return new AbortModule(computeModule());
 }
 
 /** A stand-in run store; the module only ever keeps one note in it. */
@@ -515,6 +526,95 @@ describe("collaboration", () => {
         });
         expect(collection.created).toHaveLength(0);
         expect(collection.delivered).toHaveLength(1);
+    });
+
+    it("frees a collaborator slot when the creator archives a collaborator that cannot work", async () => {
+        const collection = new Collection();
+        for (const id of ["c1", "c2", "c3", "c4", "c5"]) collection.seed(id, "parent");
+        const { module, ctx } = await started(collection);
+        await expect(module.createToolAgent(ctx, "parent", TASK, "c6")).rejects.toThrow(
+            "free a place by archiving one that can no longer work with archive_agent",
+        );
+
+        await module.archiveAgent(ctx, "parent", "c1");
+
+        await expect(module.createToolAgent(ctx, "parent", TASK, "c6")).resolves.toEqual({
+            agentId: "c6",
+        });
+        expect(collection.created).toEqual([{ id: "c6", parent: "parent" }]);
+    });
+
+    it("still counts the collaborators below an archived collaborator", async () => {
+        const collection = new Collection();
+        collection.seed("c1", "parent", { metadata: { archivedAt: 1 } });
+        for (const id of ["c2", "c3", "c4", "c5", "c6"]) collection.seed(id, "c1");
+        const { module, ctx } = await started(collection);
+
+        await expect(module.createToolAgent(ctx, "parent", TASK, "c7")).rejects.toThrow(
+            "limited to 5 collaborators",
+        );
+    });
+
+    it("archives a collaborator by stopping it, marking only it archived, and releasing its machine", async () => {
+        const collection = new Collection();
+        collection.seed("child", "parent", { metadata: { title: "Reviewer", version: 3 } });
+        collection.seed("grandchild", "child");
+        const { module, ctx, releasedMachines } = await started(collection);
+
+        await module.archiveAgent(ctx, "parent", "child");
+
+        expect(collection.aborted).toEqual(["child"]);
+        expect(collection.configs.get("child")?.metadata).toMatchObject({
+            title: "Reviewer",
+            archivedAt: expect.any(Number),
+            version: 4,
+        });
+        expect(collection.configs.get("grandchild")?.metadata?.["archivedAt"]).toBeUndefined();
+        await vi.waitFor(() => expect(releasedMachines).toEqual(["child"]));
+        await expect(
+            module.sendMessage(ctx, "parent", { toAgentId: "child", text: "Hi." }, "m1"),
+        ).rejects.toThrow("archived");
+    });
+
+    it("treats a repeated archival as already done while still releasing the machine", async () => {
+        const collection = new Collection();
+        collection.seed("child", "parent", { metadata: { archivedAt: 1, version: 2 } });
+        const { module, ctx, releasedMachines } = await started(collection);
+
+        await module.archiveAgent(ctx, "parent", "child");
+
+        expect(collection.aborted).toEqual([]);
+        expect(collection.configs.get("child")?.metadata).toEqual({ archivedAt: 1, version: 2 });
+        await vi.waitFor(() => expect(releasedMachines).toEqual(["child"]));
+    });
+
+    it("archives only ordinary collaborators the acting agent created", async () => {
+        const collection = new Collection();
+        collection.seed("child", "parent");
+        collection.seed("grandchild", "child");
+        collection.seed("stranger", null);
+        collection.seed("sub", "parent", { metadata: { subtask: true } });
+        collection.seed("flow", "parent", { metadata: { workflow: { runId: "run" } } });
+        const { module, ctx, releasedMachines } = await started(collection);
+
+        for (const [acting, target] of [
+            ["parent", "grandchild"],
+            ["parent", "stranger"],
+            ["parent", "missing"],
+            ["child", "parent"],
+        ] as const) {
+            await expect(module.archiveAgent(ctx, acting, target)).rejects.toThrow(
+                "may archive only collaborators it created",
+            );
+        }
+        await expect(module.archiveAgent(ctx, "parent", "sub")).rejects.toThrow(
+            "use archive_subtask",
+        );
+        await expect(module.archiveAgent(ctx, "parent", "flow")).rejects.toThrow(
+            "belongs to a workflow",
+        );
+        expect(collection.aborted).toEqual([]);
+        expect(releasedMachines).toEqual([]);
     });
 
     it("limits collaborator depth to three agents including the root", async () => {
@@ -1499,7 +1599,7 @@ describe("collaboration", () => {
         ).rejects.toThrow("parent inbox unavailable");
     });
 
-    it("exposes the fixed three-tool surface with the intended durability and review policy", async () => {
+    it("exposes the fixed four-tool surface with the intended durability and review policy", async () => {
         const collection = new Collection();
         const { module, hooks, ctx } = await started(collection);
         const tools = await hooks.tools!(ctx, { agent: { id: "parent" } } as never);
@@ -1508,17 +1608,50 @@ describe("collaboration", () => {
             "create_agent",
             "send_agent_message",
             "interrupt_agent",
+            "archive_agent",
         ]);
-        expect(tools.map((tool) => tool.durable)).toEqual([true, true, false]);
+        expect(tools.map((tool) => tool.durable)).toEqual([true, true, false, true]);
         expect(tools.map((tool) => tool.requiresAutoOrFullAccess)).toEqual([
+            undefined,
             undefined,
             undefined,
             undefined,
         ]);
     });
 
+    it("archives through the real transactional tool and keeps it reviewable", async () => {
+        const collection = new Collection();
+        collection.seed("child", "parent");
+        const { module, ctx } = await started(collection);
+        const archive = archiveAgentTool(module, "parent");
+
+        expect(archive.transactional).toBe(true);
+        expect(archive.shouldReviewInAutoMode({ targetAgentId: "child" }, ctx)).toBe(true);
+        expect(archive.shouldRunInFullAccessInAutoMode).toBeUndefined();
+        expect(archive.describeAutoPermissionAction!({ targetAgentId: "child" }, ctx)).toContain(
+            '"child"',
+        );
+        await expect(
+            archive.execute(ctx, { targetAgentId: "child" }, toolCall("archive")),
+        ).resolves.toBeUndefined();
+        expect(collection.configs.get("child")?.metadata?.["archivedAt"]).toEqual(
+            expect.any(Number),
+        );
+        expect(archive.toLLM(undefined)).toEqual([
+            {
+                type: "text",
+                text: "Archived the collaborator. Its place in the collaborator limit is free, its conversation history is preserved, and running descendants were stopped, not archived.",
+            },
+        ]);
+    });
+
     it("describes the offered model/provider pairs without a dynamic capacity lookup", () => {
-        const module = new CollaborationModule(testConfig, abortModule(), new HistoryModule());
+        const module = new CollaborationModule(
+            testConfig,
+            abortModule(),
+            new HistoryModule(),
+            computeModule(),
+        );
         const create = createAgentTool(module, "parent", "codex", MODELS, 5, 3);
         const empty = createAgentTool(module, "parent", "codex", [], 5, 3);
 
@@ -1604,9 +1737,12 @@ describe("collaboration", () => {
         // applied migrations to remain a prefix of the declared ones — drop one of these and
         // every database that ran an earlier build refuses to open.
         expect(
-            new CollaborationModule(testConfig, abortModule(), new HistoryModule()).migrations.map(
-                ([key]) => key,
-            ),
+            new CollaborationModule(
+                testConfig,
+                abortModule(),
+                new HistoryModule(),
+                computeModule(),
+            ).migrations.map(([key]) => key),
         ).toEqual([
             "001-collaboration",
             "002-drop-collaboration-receipts",
@@ -1616,7 +1752,12 @@ describe("collaboration", () => {
     });
 
     it("refuses to work before the agent collection is available", async () => {
-        const module = new CollaborationModule(testConfig, abortModule(), new HistoryModule());
+        const module = new CollaborationModule(
+            testConfig,
+            abortModule(),
+            new HistoryModule(),
+            computeModule(),
+        );
         const ctx = createRootContext().named("unstarted");
 
         await expect(module.createAgent(ctx, "parent", TASK, "child")).rejects.toThrow(

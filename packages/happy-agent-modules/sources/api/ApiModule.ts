@@ -32,10 +32,15 @@ import {
     ensureSurfaceChatRequestSchema,
     createTodoRequestSchema,
     updateTodoRequestSchema,
-    updateSurfaceDocumentRequestSchema,
+    sendSurfaceDocumentUpdateRequestSchema,
+    surfaceDocumentSubscriptionRequestSchema,
+    sendSurfaceDocumentPresenceRequestSchema,
     reorderTodoRequestSchema,
     todoMutationRequestSchema,
     todoListScopeSchema,
+    createCalendarEventRequestSchema,
+    updateCalendarEventRequestSchema,
+    calendarEventMutationRequestSchema,
     WORKSPACE_BRIDGE_MAX_BINARY_MESSAGE_BYTES,
     createLiveSessionRequestSchema,
     closeLiveSessionRequestSchema,
@@ -96,7 +101,7 @@ import { MAX_RUNNER_FRAME_BYTES, RunnerUnavailableError } from "@slopus/happy-ag
 import { WebSocketServer } from "ws";
 
 import { AbortModule } from "../abort/index.js";
-import { SurfacesModule, SurfaceError, SurfaceDocumentConflictError } from "../surfaces/index.js";
+import { SurfacesModule, SurfaceError } from "../surfaces/index.js";
 import type { SchedulingModule } from "../scheduling/index.js";
 import {
     ArtifactConflictError,
@@ -172,6 +177,7 @@ import { GitModule } from "../git/index.js";
 import { HappyIntegrationRequestError, HappyModule } from "../happy/index.js";
 import {
     HistoryModule,
+    type HistoryMessage,
     type HistoryPendingMessage,
     type HistoryRunState,
 } from "../history/index.js";
@@ -316,6 +322,10 @@ import {
 } from "./ApiSchemas.js";
 import { WorkspaceProxy } from "./WorkspaceProxy.js";
 import { requestedAgentMode } from "./requestedAgentMode.js";
+import {
+    projectEventDiagnostics,
+    projectMessageDiagnostics,
+} from "./projectCredentialDiagnostics.js";
 import { SubtaskInputError, SubtasksModule } from "../subtasks/index.js";
 
 const API_PROTOCOL_VERSION = 26;
@@ -345,6 +355,7 @@ const MAX_TERMINAL_WIRE_MESSAGE_BYTES = 4 * 1024 * 1024 + 20;
 const MAX_ANNOUNCED_PENDING_MESSAGES = 10_000;
 const MAX_ANNOUNCED_AGENT_CREATIONS = 10_000;
 const MAX_ANNOUNCED_TERMINAL_RUNS = 10_000;
+const MAX_ANNOUNCED_EXECUTION_CONFIGURATIONS = 512 * 64;
 const DRAIN_MUTATION_LOG_INTERVAL_MS = 5_000;
 /** What `artifact.updated` and `artifact.deleted` always carry in `changes`. */
 const ARTIFACT_UPDATED_FIELDS = [
@@ -570,6 +581,8 @@ export class ApiModule implements AgentModule {
     readonly #services: ServicesModule | undefined;
     readonly #unsubscribe: (() => void)[] = [];
     readonly #streams = new Set<SseWriter>();
+    /** Event streams that live document frames can address, with the person who opened each. */
+    readonly #eventStreams = new Map<string, { writer: SseWriter; userId: string | undefined }>();
     readonly #shutdownListeners = new Set<() => void | Promise<void>>();
     readonly #drainSources = new Map<string, ApiDrainSource>();
     readonly #runningDrains = new Map<string, ApiRunningDrain>();
@@ -577,6 +590,7 @@ export class ApiModule implements AgentModule {
     readonly #apiMutations = new Map<symbol, ApiAdmittedMutation>();
     readonly #announcedPendingMessages = new Set<string>();
     readonly #apiPendingMessageIds = new Set<string>();
+    readonly #announcedExecutionConfigurations = new Map<string, string>();
     readonly #announcedAgentCreations = new Set<string>();
     readonly #pendingAgentCreations = new Set<string>();
     readonly #announcedTerminalRuns = new Set<string>();
@@ -787,6 +801,7 @@ export class ApiModule implements AgentModule {
         this.#streams.clear();
         this.#announcedPendingMessages.clear();
         this.#apiPendingMessageIds.clear();
+        this.#announcedExecutionConfigurations.clear();
         this.#announcedAgentCreations.clear();
         this.#pendingAgentCreations.clear();
         this.#acceptedMessageBatches.clear();
@@ -2437,23 +2452,41 @@ export class ApiModule implements AgentModule {
                 });
             }),
             this.#history.onAppend((_ctx, agentId, messages) => {
-                for (const message of messages) {
-                    if (
-                        messageHiddenFromUser(message) ||
-                        message.blocks.some((block) => block.type === "compaction") ||
-                        message.role === "user" ||
-                        message.senderAgentId !== undefined ||
-                        message.provider !== undefined ||
-                        message.model !== undefined
-                    ) {
-                        continue;
-                    }
-                    this.#journal.append("message.created", {
-                        agentId,
-                        runId: message.runId ?? null,
-                        message: messageResource(message),
-                    });
-                }
+                const eligible = messages.filter(
+                    (message) =>
+                        !(
+                            messageHiddenFromUser(message) ||
+                            message.blocks.some((block) => block.type === "compaction") ||
+                            message.role === "user" ||
+                            message.senderAgentId !== undefined ||
+                            message.provider !== undefined ||
+                            message.model !== undefined
+                        ),
+                );
+                if (eligible.length === 0) return;
+                // All eligible service appends share the provider conversion queue. Otherwise
+                // a committed row can overtake a streamed assistant block still awaiting delivery.
+                const queued = this.#queueAgentWork(
+                    ctx,
+                    agentId,
+                    this.#mutationIds.getStore(),
+                    async () => {
+                        for (const message of eligible) {
+                            // Reserved is not announced. Only a successfully journaled creation may
+                            // suppress this durable fallback; a failed conversion leaves it eligible.
+                            if (this.#announcedExecutionConfigurations.delete(message.recordId))
+                                continue;
+                            this.#journal.append("message.created", {
+                                agentId,
+                                runId: message.runId ?? null,
+                                message: messageResource(message),
+                            });
+                        }
+                    },
+                );
+                void queued.catch(() => {
+                    ctx.log.warn("The API could not announce committed messages.", { agentId });
+                });
             }),
             this.#permissions.onEvent(async (eventCtx, event) => {
                 await this.#convertPermissionEvent(eventCtx, event);
@@ -2539,6 +2572,14 @@ export class ApiModule implements AgentModule {
                             event.payload.mutationId,
                         );
                     this.#journal.append(event.type, event.payload);
+                }),
+                // Live document frames bypass the journal: no id, no cursor, one stream each.
+                this.#surfaces.onDocumentFrame((streamId, frame) => {
+                    this.#eventStreams
+                        .get(streamId)
+                        ?.writer.write(
+                            `event: ${frame.type}\ndata: ${JSON.stringify(frame.data)}\n\n`,
+                        );
                 }),
             );
         if (this.#userSettings !== undefined)
@@ -2922,11 +2963,36 @@ export class ApiModule implements AgentModule {
     #enqueueAgentEvent(ctx: Context, event: AgentEvent): void {
         const key = event.agentId ?? "\u0000daemon";
         const mutationId = this.#mutationIds.getStore();
+        let configurations: readonly HistoryMessage[] = [];
+        const payload = recordValue(event.payload);
+        const rigEvent = recordValue(payload?.["rigEvent"]);
+        const inferenceId = stringValue(rigEvent?.["messageId"]);
+        if (
+            event.agentId !== undefined &&
+            event.type === "provider.event" &&
+            rigEvent?.["type"] === "block_start" &&
+            inferenceId !== undefined
+        ) {
+            // Events publishes synchronously. Capture before the Promise chain can fall behind
+            // a different attempt or completion; no database or other I/O belongs at this edge.
+            try {
+                configurations = this.#history.pendingExecutionConfigurations(
+                    event.agentId,
+                    inferenceId,
+                );
+            } catch {
+                this.#history.invalidateExecutionConfigurations(event.agentId, inferenceId);
+                ctx.log.warn("The execution configuration snapshot is unavailable.", {
+                    agentId: event.agentId,
+                    inferenceId,
+                });
+            }
+        }
         const queued = this.#queueAgentWork(
             ctx,
             key,
             mutationId,
-            async () => await this.#convertAgentEvent(ctx, event),
+            async () => await this.#convertAgentEvent(ctx, event, configurations),
         );
         void queued.catch((error: unknown) => {
             ctx.log.error(
@@ -2964,7 +3030,11 @@ export class ApiModule implements AgentModule {
         return result;
     }
 
-    async #convertAgentEvent(ctx: Context, event: AgentEvent): Promise<void> {
+    async #convertAgentEvent(
+        ctx: Context,
+        event: AgentEvent,
+        configurations: readonly HistoryMessage[],
+    ): Promise<void> {
         const agentId = event.agentId;
         if (agentId === undefined) return;
         const payload = recordValue(event.payload);
@@ -3060,6 +3130,9 @@ export class ApiModule implements AgentModule {
         }
         if (event.type === "loop.settled") {
             await this.#flushAcceptedMessages(ctx, agentId);
+            for (const [recordId, owner] of this.#announcedExecutionConfigurations) {
+                if (owner === agentId) this.#announcedExecutionConfigurations.delete(recordId);
+            }
             this.#streamingAssistantBlocks.delete(agentId);
             this.#streamingDeltaOffsets.delete(agentId);
             const runId = stringValue(payload?.["runId"]);
@@ -3084,22 +3157,18 @@ export class ApiModule implements AgentModule {
             const errorText =
                 stringValue(payload?.["error"]) ?? stringValue(payload?.["errorMessage"]);
             if (errorText !== undefined) {
-                // History records the failure as the run's error message; clients watching live
-                // hear about it the same way they hear about any message coming into being.
-                this.#journal.append(
-                    "message.created",
-                    {
-                        agentId,
-                        runId: run.id,
-                        message: {
-                            id: `${run.id}-error`,
-                            role: "service",
-                            createdAt: event.occurredAt,
-                            content: [{ type: "text", text: errorText }],
+                const failure = await this.#history.runFailure(ctx, agentId, run.id);
+                if (failure !== undefined) {
+                    this.#journal.append(
+                        "message.created",
+                        {
+                            agentId,
+                            runId: run.id,
+                            message: messageResource(failure),
                         },
-                    },
-                    event.occurredAt,
-                );
+                        event.occurredAt,
+                    );
+                }
             }
             if (!this.#announcedTerminalRuns.has(run.id)) {
                 boundedAdd(this.#announcedTerminalRuns, run.id, MAX_ANNOUNCED_TERMINAL_RUNS);
@@ -3148,7 +3217,7 @@ export class ApiModule implements AgentModule {
             return;
         }
         if (event.type === "provider.event" || event.type === "tool.completed") {
-            await this.#convertProviderMessageEvent(ctx, event, payload);
+            await this.#convertProviderMessageEvent(ctx, event, payload, configurations);
         }
         const status = statusForAgentEvent(event.type, payload);
         await this.#appendAgentUpdate(ctx, event, {
@@ -3243,6 +3312,7 @@ export class ApiModule implements AgentModule {
         ctx: Context,
         event: AgentEvent,
         payload: Readonly<Record<string, unknown>> | undefined,
+        configurations: readonly HistoryMessage[],
     ): Promise<void> {
         if (payload?.["recovered"] === true) return;
         const agentId = event.agentId;
@@ -3292,6 +3362,25 @@ export class ApiModule implements AgentModule {
                 : { modelId: stringValue(payload?.["model"]) }),
         };
         if (type === "block_start") {
+            for (const configuration of configurations) {
+                this.#journal.append(
+                    "message.created",
+                    {
+                        agentId,
+                        runId: configuration.runId ?? runId,
+                        message: messageResource(configuration),
+                    },
+                    configuration.at,
+                );
+                this.#announcedExecutionConfigurations.set(configuration.recordId, agentId);
+                while (
+                    this.#announcedExecutionConfigurations.size >
+                    MAX_ANNOUNCED_EXECUTION_CONFIGURATIONS
+                ) {
+                    const oldest = this.#announcedExecutionConfigurations.keys().next();
+                    if (!oldest.done) this.#announcedExecutionConfigurations.delete(oldest.value);
+                }
+            }
             // The provider streams one block at a time, but the API message accumulates them:
             // a later block joins the message instead of restarting it.
             if (streaming !== undefined && streaming.messageId === messageId) {
@@ -4524,7 +4613,12 @@ export class ApiModule implements AgentModule {
                         costUsd: usage.costUsd,
                         messages: run.messages
                             .filter((message) => !messageHiddenFromUser(message))
-                            .map((message) => messageResource(message, { omitToolData })),
+                            .map((message) =>
+                                projectMessageDiagnostics(
+                                    messageResource(message, { omitToolData }),
+                                    this.#canDiscloseCredentialSource(ctx),
+                                ),
+                            ),
                     };
                 }),
             );
@@ -4952,9 +5046,11 @@ export class ApiModule implements AgentModule {
         }
         sendJson(response, 200, {
             ...replay,
-            events: replay.events.filter((event) =>
-                this.#journal.visibleTo(event, teamUser(ctx)?.id),
-            ),
+            events: replay.events
+                .filter((event) => this.#journal.visibleTo(event, teamUser(ctx)?.id))
+                .map((event) =>
+                    projectEventDiagnostics(event, this.#canDiscloseCredentialSource(ctx)),
+                ),
         });
     }
 
@@ -4982,12 +5078,20 @@ export class ApiModule implements AgentModule {
             maxWritableBytes: MAX_SSE_BUFFER_BYTES,
         });
         this.#streams.add(writer);
+        // Live document frames address a stream by this name; journal events never use it.
+        const streamId = this.#surfaces === undefined ? undefined : createId();
+        if (streamId !== undefined)
+            this.#eventStreams.set(streamId, { writer, userId: teamUser(ctx)?.id });
         let heartbeat: NodeJS.Timeout | undefined;
         let unsubscribe = (): void => undefined;
         void writer.done.then(() => {
             if (heartbeat !== undefined) clearInterval(heartbeat);
             unsubscribe();
             this.#streams.delete(writer);
+            if (streamId !== undefined) {
+                this.#eventStreams.delete(streamId);
+                this.#surfaces?.closeDocumentStream(streamId);
+            }
         });
         unsubscribe = this.#journal.subscribe((event) => {
             if (writer.closed) return;
@@ -4996,7 +5100,11 @@ export class ApiModule implements AgentModule {
                 pending.push(event);
                 return;
             }
-            writer.write(sseEventFrame(event));
+            writer.write(
+                sseEventFrame(
+                    projectEventDiagnostics(event, this.#canDiscloseCredentialSource(ctx)),
+                ),
+            );
         });
         const current = this.#journal.cursor();
         const gap = after !== undefined && !this.#journal.hasCursor(after);
@@ -5014,6 +5122,7 @@ export class ApiModule implements AgentModule {
                     daemonId: this.#daemonId,
                     daemonStartedAt: this.#daemonStartedAt,
                     draining: this.#draining,
+                    ...(streamId === undefined ? {} : { streamId }),
                 })}\n\n`,
             )
         ) {
@@ -5021,11 +5130,26 @@ export class ApiModule implements AgentModule {
         }
         for (const event of replay) {
             if (!this.#journal.visibleTo(event, teamUser(ctx)?.id)) continue;
-            if (!writer.write(sseEventFrame(event))) return;
+            if (
+                !writer.write(
+                    sseEventFrame(
+                        projectEventDiagnostics(event, this.#canDiscloseCredentialSource(ctx)),
+                    ),
+                )
+            )
+                return;
         }
         replaying = false;
         for (const event of pending) {
-            if (event.cursor > current && !writer.write(sseEventFrame(event))) return;
+            if (
+                event.cursor > current &&
+                !writer.write(
+                    sseEventFrame(
+                        projectEventDiagnostics(event, this.#canDiscloseCredentialSource(ctx)),
+                    ),
+                )
+            )
+                return;
         }
         pending.splice(0);
         heartbeat = setInterval(() => {
@@ -5516,22 +5640,77 @@ export class ApiModule implements AgentModule {
                 return true;
             }
             const documentMatch =
-                /^\/v0\/surfaces\/document\/([a-z][a-z0-9]*)(?:\/(versions)(?:\/([^/]+))?)?$/.exec(
+                /^\/v0\/surfaces\/document\/([a-z][a-z0-9]*)(?:\/(state|updates|versions|subscribe|unsubscribe|presence)(?:\/([^/]+))?)?$/.exec(
                     url.pathname,
                 );
             if (documentMatch !== null) {
                 const surfaceId = documentMatch[1]!;
                 if (!Value.Check(surfaceIdSchema, surfaceId)) return false;
-                const history = documentMatch[2] !== undefined;
+                const route = documentMatch[2];
                 const selectedVersion = documentMatch[3];
-                if (request.method === "GET") {
-                    if (!history) {
-                        const cursor = this.#journal.cursor();
-                        sendJson(response, 200, {
-                            document: await surfaces.getDocument(ctx, surfaceId),
-                            cursor,
-                        });
-                    } else if (selectedVersion !== undefined) {
+                if (selectedVersion !== undefined && route !== "versions") return false;
+                if (route === undefined && request.method === "PUT") {
+                    // Older clients saved Markdown here; they stop on 405 instead of retrying.
+                    response.setHeader("allow", "GET");
+                    throw new ApiError(
+                        405,
+                        "method_not_allowed",
+                        "Editing this document needs a newer Happy.",
+                    );
+                }
+                if (route === undefined && request.method === "GET") {
+                    const { seq } = documentQuery(url, ["seq"]);
+                    const cursor = this.#journal.cursor();
+                    const { document } = await surfaces.document(ctx, surfaceId, seq);
+                    sendJson(response, 200, { document, cursor });
+                    return true;
+                }
+                if (route === "state" && request.method === "GET") {
+                    const { seq, stateVector } = documentQuery(url, ["seq", "stateVector"]);
+                    sendJson(
+                        response,
+                        200,
+                        await surfaces.documentState(ctx, surfaceId, {
+                            ...(seq === undefined ? {} : { seq }),
+                            ...(stateVector === undefined ? {} : { stateVector }),
+                        }),
+                    );
+                    return true;
+                }
+                if (route === "updates" && request.method === "POST") {
+                    const body = await bodyAs(
+                        request,
+                        sendSurfaceDocumentUpdateRequestSchema,
+                        "document change",
+                        2 * 1024 * 1024,
+                    );
+                    sendJson(
+                        response,
+                        200,
+                        await surfaces.changeDocument(
+                            ctx,
+                            surfaceId,
+                            body.update,
+                            { userId: await surfaces.owner(ctx), agentId: null },
+                            body.mutationId,
+                        ),
+                    );
+                    return true;
+                }
+                if (route === "updates" && request.method === "GET") {
+                    const { afterSeq, limit } = documentQuery(url, ["afterSeq", "limit"]);
+                    if (limit !== undefined && (limit < 1 || limit > 200))
+                        throw invalidRequest("The document change page is invalid.");
+                    sendJson(
+                        response,
+                        200,
+                        await surfaces.documentChanges(ctx, surfaceId, afterSeq ?? 0, limit ?? 100),
+                    );
+                    return true;
+                }
+                if (route === "versions" && request.method === "GET") {
+                    if (selectedVersion !== undefined) {
+                        documentQuery(url, []);
                         sendJson(response, 200, {
                             revision: await surfaces.getDocumentVersion(
                                 ctx,
@@ -5539,49 +5718,77 @@ export class ApiModule implements AgentModule {
                                 decodePathSegment(selectedVersion, "document revision"),
                             ),
                         });
-                    } else {
-                        const after = url.searchParams.getAll("afterVersion");
-                        const limits = url.searchParams.getAll("limit");
-                        const limit = limits[0] === undefined ? 100 : Number(limits[0]);
-                        if (
-                            after.length > 1 ||
-                            limits.length > 1 ||
-                            (limits[0] !== undefined &&
-                                !Value.Check(
-                                    Type.String({ pattern: "^[1-9][0-9]*$" }),
-                                    limits[0],
-                                )) ||
-                            !Value.Check(Type.Integer({ minimum: 1, maximum: 200 }), limit)
-                        )
-                            throw invalidRequest("The document history page is invalid.");
+                        return true;
+                    }
+                    const after = url.searchParams.getAll("afterVersion");
+                    const limits = url.searchParams.getAll("limit");
+                    const limit = limits[0] === undefined ? 100 : Number(limits[0]);
+                    if (
+                        [...url.searchParams.keys()].some(
+                            (key) => key !== "afterVersion" && key !== "limit",
+                        ) ||
+                        after.length > 1 ||
+                        limits.length > 1 ||
+                        (limits[0] !== undefined &&
+                            !Value.Check(Type.String({ pattern: "^[1-9][0-9]*$" }), limits[0])) ||
+                        !Value.Check(Type.Integer({ minimum: 1, maximum: 200 }), limit)
+                    )
+                        throw invalidRequest("The document history page is invalid.");
+                    sendJson(
+                        response,
+                        200,
+                        await surfaces.documentVersions(ctx, surfaceId, after[0], limit),
+                    );
+                    return true;
+                }
+                if (route === "presence" && request.method === "POST") {
+                    const body = await bodyAs(
+                        request,
+                        sendSurfaceDocumentPresenceRequestSchema,
+                        "document presence",
+                        2 * 1024 * 1024,
+                    );
+                    this.#requireOwnEventStream(ctx, body.streamId);
+                    await surfaces.shareDocumentPresence(
+                        ctx,
+                        surfaceId,
+                        body.streamId,
+                        body.awarenessClientId,
+                        body.update,
+                    );
+                    sendJson(response, 200, {});
+                    return true;
+                }
+                if (
+                    (route === "subscribe" || route === "unsubscribe") &&
+                    request.method === "POST"
+                ) {
+                    const body = await bodyAs(
+                        request,
+                        surfaceDocumentSubscriptionRequestSchema,
+                        "document subscription",
+                    );
+                    this.#requireOwnEventStream(ctx, body.streamId);
+                    if (route === "subscribe")
                         sendJson(
                             response,
                             200,
-                            await surfaces.documentVersions(ctx, surfaceId, after[0], limit),
+                            await surfaces.subscribeDocument(ctx, surfaceId, body.streamId),
                         );
+                    else {
+                        await surfaces.unsubscribeDocument(ctx, surfaceId, body.streamId);
+                        sendJson(response, 200, {});
                     }
                     return true;
                 }
-                if (request.method !== "PUT" || history) return false;
-                const current = await surfaces.getDocument(ctx, surfaceId);
-                const version = requireIfMatch(request, current.version, {
-                    currentVersion: current.version,
-                    document: current,
-                });
-                const body = await bodyAs(
-                    request,
-                    updateSurfaceDocumentRequestSchema,
-                    "document update",
-                    2 * 1024 * 1024,
-                );
-                sendJson(response, 200, {
-                    document: await surfaces.updateDocument(ctx, surfaceId, version, body, {
-                        userId: await surfaces.owner(ctx),
-                        agentId: null,
-                    }),
-                });
-                return true;
+                return false;
             }
+            const calendarMatch =
+                /^\/v0\/surfaces\/calendar\/([a-z][a-z0-9]*)(?:\/([a-z][a-z0-9]*)(?:\/(versions)(?:\/([^/]+))?)?)?$/.exec(
+                    url.pathname,
+                );
+            if (calendarMatch !== null)
+                return await this.#handleCalendarRoute(ctx, request, response, url, calendarMatch);
             const match =
                 /^\/v0\/surfaces\/todo\/([a-z][a-z0-9]*)(?:\/([a-z][a-z0-9]*)(?:\/(reorder|versions)(?:\/([^/]+))?)?)?$/.exec(
                     url.pathname,
@@ -5704,11 +5911,6 @@ export class ApiModule implements AgentModule {
             sendJson(response, 200, { todo });
             return true;
         } catch (error) {
-            if (error instanceof SurfaceDocumentConflictError)
-                throw new ApiError(409, "conflict", error.message, {
-                    currentVersion: error.document.version,
-                    document: error.document,
-                });
             if (!(error instanceof SurfaceError)) throw error;
             throw new ApiError(
                 error.code === "not_found"
@@ -5722,11 +5924,163 @@ export class ApiModule implements AgentModule {
                           : 400,
                 error.code,
                 error.message,
-                error.todo === undefined
+                error.current === undefined
                     ? {}
-                    : { todo: error.todo, currentVersion: error.todo.version },
+                    : {
+                          ...error.current,
+                          currentVersion: ("todo" in error.current
+                              ? error.current.todo
+                              : error.current.event
+                          ).version,
+                      },
             );
         }
+    }
+
+    /** `/v0/surfaces/calendar/:surfaceId` routes; Surface errors map in the caller's handler. */
+    async #handleCalendarRoute(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        url: URL,
+        match: RegExpExecArray,
+    ): Promise<boolean> {
+        const surfaces = this.#surfaces!;
+        const surfaceId = match[1]!;
+        if (!Value.Check(surfaceIdSchema, surfaceId)) return false;
+        const eventId = match[2];
+        const action = match[3];
+        const selectedVersion = match[4];
+        const actor = { userId: await surfaces.owner(ctx), agentId: null };
+        if (eventId === undefined) {
+            if (request.method === "GET") {
+                const single = (name: string) => {
+                    const values = url.searchParams.getAll(name);
+                    if (values.length !== 1)
+                        throw invalidRequest(`The calendar range needs exactly one ${name}.`);
+                    return values[0]!;
+                };
+                const instant = (name: string) => {
+                    const value = single(name);
+                    if (!/^(?:0|[1-9][0-9]{0,15})$/.test(value))
+                        throw invalidRequest(`The calendar range ${name} is invalid.`);
+                    return Number(value);
+                };
+                const range = {
+                    from: instant("from"),
+                    to: instant("to"),
+                    timeZone: single("timeZone"),
+                };
+                const cursor = this.#journal.cursor();
+                sendJson(response, 200, {
+                    ...(await surfaces.listCalendar(ctx, surfaceId, range)),
+                    cursor,
+                });
+                return true;
+            }
+            if (request.method === "POST") {
+                const body = await bodyAs(
+                    request,
+                    createCalendarEventRequestSchema,
+                    "calendar event creation",
+                );
+                sendJson(response, 201, {
+                    event: await surfaces.createCalendarEvent(
+                        ctx,
+                        surfaceId,
+                        body,
+                        actor,
+                        actor.userId,
+                    ),
+                });
+                return true;
+            }
+            return false;
+        }
+        if (request.method === "GET") {
+            if (action === undefined) {
+                sendJson(response, 200, {
+                    event: await surfaces.getCalendarEvent(ctx, surfaceId, eventId),
+                });
+                return true;
+            }
+            if (selectedVersion !== undefined) {
+                sendJson(response, 200, {
+                    revision: await surfaces.getCalendarEventVersion(
+                        ctx,
+                        surfaceId,
+                        eventId,
+                        decodePathSegment(selectedVersion, "calendar event revision"),
+                    ),
+                });
+                return true;
+            }
+            const after = url.searchParams.getAll("afterVersion");
+            const limits = url.searchParams.getAll("limit");
+            const limit = limits[0] === undefined ? 100 : Number(limits[0]);
+            if (
+                after.length > 1 ||
+                limits.length > 1 ||
+                (limits[0] !== undefined &&
+                    !Value.Check(Type.String({ pattern: "^[1-9][0-9]*$" }), limits[0])) ||
+                !Value.Check(Type.Integer({ minimum: 1, maximum: 200 }), limit)
+            )
+                throw invalidRequest("The calendar event history page is invalid.");
+            sendJson(
+                response,
+                200,
+                await surfaces.calendarEventVersions(ctx, surfaceId, eventId, after[0], limit),
+            );
+            return true;
+        }
+        if (action !== undefined) return false;
+        const current = await surfaces.getCalendarEvent(ctx, surfaceId, eventId);
+        const version = requireIfMatch(request, current.version, {
+            currentVersion: current.version,
+            event: current,
+        });
+        let event;
+        if (request.method === "PATCH") {
+            const body = await bodyAs(
+                request,
+                updateCalendarEventRequestSchema,
+                "calendar event update",
+            );
+            event = await surfaces.mutateCalendarEvent(
+                ctx,
+                surfaceId,
+                eventId,
+                version,
+                body,
+                actor,
+                body.mutationId,
+            );
+        } else if (request.method === "DELETE") {
+            const body = await optionalBodyAs(
+                request,
+                calendarEventMutationRequestSchema,
+                "calendar event deletion",
+                2048,
+            );
+            event = await surfaces.mutateCalendarEvent(
+                ctx,
+                surfaceId,
+                eventId,
+                version,
+                "delete",
+                actor,
+                body.mutationId,
+            );
+        } else return false;
+        sendJson(response, 200, { event });
+        return true;
+    }
+
+    /** Only the person who opened an event stream may route live document frames to it. */
+    #requireOwnEventStream(ctx: Context, streamId: string): void {
+        const stream = this.#eventStreams.get(streamId);
+        if (stream === undefined || stream.writer.closed || stream.userId !== teamUser(ctx)?.id)
+            throw new ApiError(404, "not_found", "The event stream was not found.");
     }
 
     async #handleTaskRoute(
@@ -6158,6 +6512,11 @@ export class ApiModule implements AgentModule {
         const user = teamUser(ctx);
         if (user === undefined) return false;
         return user.isOwner || (task.ownerUserId !== undefined && task.ownerUserId === user.id);
+    }
+
+    /** Standalone API bearer possession is authority; team disclosure requires the proven owner. */
+    #canDiscloseCredentialSource(ctx: Context): boolean {
+        return !this.#team.enabled || teamUser(ctx)?.isOwner === true;
     }
 
     async #taskResource(ctx: Context, task: TaskRecord): Promise<Record<string, unknown>> {
@@ -7860,6 +8219,9 @@ export class ApiModule implements AgentModule {
                 ...(this.#live === undefined
                     ? {}
                     : { desktopLiveCapabilities: [...this.#live.desktopCapabilities] }),
+                ...(this.#surfaces === undefined
+                    ? {}
+                    : { collaborativeDocuments: true, calendarSurfaces: true }),
             },
             version: {
                 protocol: API_PROTOCOL_VERSION,
@@ -8390,6 +8752,33 @@ const runtimeConfigPatchSchema = Type.Object(
     },
     { additionalProperties: false, minProperties: 1 },
 );
+
+/**
+ * A document route's query: only the named fields, each at most once. Positions are non-negative
+ * integers and state vectors are base64.
+ */
+function documentQuery<const Key extends "seq" | "afterSeq" | "limit" | "stateVector">(
+    url: URL,
+    allowed: readonly Key[],
+): { seq?: number; afterSeq?: number; limit?: number; stateVector?: string } {
+    const query: { seq?: number; afterSeq?: number; limit?: number; stateVector?: string } = {};
+    for (const key of new Set(url.searchParams.keys())) {
+        const values = url.searchParams.getAll(key);
+        const value = values[0]!;
+        if (!allowed.includes(key as Key) || values.length > 1)
+            throw invalidRequest("The document query is invalid.");
+        if (key === "stateVector") {
+            if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value))
+                throw invalidRequest("The state vector must be base64.");
+            query.stateVector = value;
+        } else {
+            if (!/^(0|[1-9][0-9]{0,15})$/.test(value) || !Number.isSafeInteger(Number(value)))
+                throw invalidRequest("The document query is invalid.");
+            query[key as "seq" | "afterSeq" | "limit"] = Number(value);
+        }
+    }
+    return query;
+}
 
 async function bodyAs<Schema extends TSchema>(
     request: IncomingMessage,

@@ -381,6 +381,8 @@ function exactToolDescription(
             return targetDescription("Sending a message to", args.toAgentId);
         case "interrupt_agent":
             return targetDescription("Interrupting", args.targetAgentId);
+        case "archive_agent":
+            return targetDescription("Archiving collaborator", args.targetAgentId);
         case "read_agent_history":
             return targetDescription("Reading history for", args.target ?? args.agent_id);
         case "create_goal":

@@ -79,6 +79,13 @@ import type {
 import type {
     CreateSurfaceRequest,
     CreateTodoRequest,
+    CalendarEventMutationRequest,
+    CalendarEventResponse,
+    CalendarEventVersionListResponse,
+    CalendarEventVersionResponse,
+    CalendarRangeResponse,
+    CreateCalendarEventRequest,
+    UpdateCalendarEventRequest,
     EnsureSurfaceChatRequest,
     ReorderSurfaceRequest,
     ReorderTodoRequest,
@@ -176,6 +183,7 @@ import {
     type UserSettingResponse,
     type UserSettingsResponse,
 } from "./protocol/userSettings.js";
+import type { MobileConnectorResponse } from "./protocol/mobileConnector.js";
 import type {
     ArchiveProjectRequest,
     CloneProjectRequest,
@@ -1012,6 +1020,73 @@ export class HappyAgentClient {
         });
     }
 
+    // Mobile connector
+
+    /**
+     * `GET /v0/mobile-connector` — the caller's connector socket, pairing, and paired phones.
+     * Daemons older than protocol 27 answer `404`.
+     */
+    async getMobileConnector(options: RequestOptions = {}): Promise<MobileConnectorResponse> {
+        return await this.#json({
+            method: "GET",
+            path: "v0/mobile-connector",
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * `POST /v0/mobile-connector/pairing` — replaces any earlier pairing and returns once its QR
+     * code is ready, or with a `failed` pairing when the socket could not open.
+     */
+    async startMobilePairing(options: RequestOptions = {}): Promise<MobileConnectorResponse> {
+        return await this.#json({
+            method: "POST",
+            path: "v0/mobile-connector/pairing",
+            signal: options.signal,
+        });
+    }
+
+    /** `POST /v0/mobile-connector/pairing/confirm` — the person at the desktop says the emoji match. */
+    async confirmMobilePairing(
+        pairingId: string,
+        options: RequestOptions = {},
+    ): Promise<MobileConnectorResponse> {
+        return await this.#json({
+            method: "POST",
+            path: "v0/mobile-connector/pairing/confirm",
+            json: { pairingId },
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * `POST /v0/mobile-connector/pairing/cancel` — ends an active pairing or dismisses a finished
+     * one; any other ID changes nothing.
+     */
+    async cancelMobilePairing(
+        pairingId: string,
+        options: RequestOptions = {},
+    ): Promise<MobileConnectorResponse> {
+        return await this.#json({
+            method: "POST",
+            path: "v0/mobile-connector/pairing/cancel",
+            json: { pairingId },
+            signal: options.signal,
+        });
+    }
+
+    /** `DELETE /v0/mobile-connector/devices/:deviceId` — removes a phone and closes its connections. */
+    async removeMobileDevice(
+        deviceId: string,
+        options: RequestOptions = {},
+    ): Promise<MobileConnectorResponse> {
+        return await this.#json({
+            method: "DELETE",
+            path: `v0/mobile-connector/devices/${encodeURIComponent(deviceId)}`,
+            signal: options.signal,
+        });
+    }
+
     // Onboarding
 
     /** `GET /v0/onboarding` — what a fresh installation still needs. */
@@ -1705,6 +1780,108 @@ export class HappyAgentClient {
         return await this.#json({
             method: "GET",
             path: `v0/surfaces/todo/${encodeURIComponent(surfaceId)}/${encodeURIComponent(todoId)}/versions/${encodeURIComponent(version)}`,
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * Every occurrence overlapping `[from, to)` with the events it belongs to, expanded by the
+     * daemon. `timeZone` places all-day dates against the instant range.
+     */
+    async listCalendarEvents(
+        surfaceId: SurfaceId,
+        range: { readonly from: number; readonly to: number; readonly timeZone: string },
+        options: RequestOptions = {},
+    ): Promise<CalendarRangeResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}`,
+            query: { from: range.from, to: range.to, timeZone: range.timeZone },
+            signal: options.signal,
+        });
+    }
+
+    /** A supplied ID safely resolves an uncertain creation outcome. */
+    async createCalendarEvent(
+        surfaceId: SurfaceId,
+        request: CreateCalendarEventRequest,
+        options: RequestOptions = {},
+    ): Promise<CalendarEventResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** Deleted tombstones remain readable by ID. */
+    async getCalendarEvent(
+        surfaceId: SurfaceId,
+        eventId: Cuid2,
+        options: RequestOptions = {},
+    ): Promise<CalendarEventResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}`,
+            signal: options.signal,
+        });
+    }
+
+    /** Changes the whole series; applying a revision's fields restores that state. */
+    async updateCalendarEvent(
+        surfaceId: SurfaceId,
+        eventId: Cuid2,
+        request: UpdateCalendarEventRequest,
+        options: VersionedRequestOptions,
+    ): Promise<CalendarEventResponse> {
+        return await this.#json({
+            method: "PATCH",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}`,
+            json: request,
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Deletion tombstones the whole series and keeps every immutable revision. */
+    async deleteCalendarEvent(
+        surfaceId: SurfaceId,
+        eventId: Cuid2,
+        options: VersionedRequestOptions & CalendarEventMutationRequest,
+    ): Promise<CalendarEventResponse> {
+        return await this.#json({
+            method: "DELETE",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}`,
+            json: bodyOf(options),
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Permanent revisions, oldest first; the cursor belongs to this event's version history. */
+    async listCalendarEventVersions(
+        surfaceId: SurfaceId,
+        eventId: Cuid2,
+        options: RequestOptions & { readonly afterVersion?: string; readonly limit?: number } = {},
+    ): Promise<CalendarEventVersionListResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}/versions`,
+            query: { afterVersion: options.afterVersion, limit: options.limit },
+            signal: options.signal,
+        });
+    }
+
+    async getCalendarEventVersion(
+        surfaceId: SurfaceId,
+        eventId: Cuid2,
+        version: string,
+        options: RequestOptions = {},
+    ): Promise<CalendarEventVersionResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}/versions/${encodeURIComponent(version)}`,
             signal: options.signal,
         });
     }

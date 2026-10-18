@@ -264,7 +264,10 @@ directory listing legitimately contains it.
 
 `gym.restart()` closes the daemon and starts another one on the same folder. Use it for durability:
 history, installation identity, the root chat, event ordering, and unfinished work after a crash.
-The scripted model and its log survive the restart, so a script may span both processes.
+Each daemon start receives fresh scripted provider instances, as it would in a new process. The
+script, its cursor, models, and log survive the restart, and each provider's run and compaction
+call indexes continue. A script may therefore span both processes without retaining provider
+decorations from the previous daemon. Configured routes share that start's provider set.
 
 ## Waiting
 

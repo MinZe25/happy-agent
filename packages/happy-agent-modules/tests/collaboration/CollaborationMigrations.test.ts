@@ -36,6 +36,7 @@ describe("collaboration migrations", () => {
                 testConfig,
                 new AbortModule(new ComputeModule(testConfig, new SecretsModule())),
                 new HistoryModule(),
+                new ComputeModule(testConfig, new SecretsModule()),
             ).migrations[3]![1];
             await remove(database.context, database.database);
             await remove(database.context, database.database);

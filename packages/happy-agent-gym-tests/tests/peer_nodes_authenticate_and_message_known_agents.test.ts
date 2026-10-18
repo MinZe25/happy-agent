@@ -1,7 +1,7 @@
 import { createServer as createNetServer, createConnection } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
-import { createAgentGym, type AgentGym } from "@slopus/happy-agent-gym";
+import { createAgentGym, type AgentGym, type GymTurn } from "@slopus/happy-agent-gym";
 import { afterEach, describe, expect, it } from "vitest";
 
 const running: AgentGym[] = [];
@@ -32,7 +32,7 @@ function serverConfig(port: number, credential = token) {
 function desktopConfig(port: number, unusedPort: number) {
     return `[peer_messaging]\nenabled=true\nnode_id="desktop"\nlisten=false\nport=${unusedPort}\n[peer_messaging.peers.server]\nrole="connect"\nurl="ws://127.0.0.1:${port}"\ntoken="${token}"\n`;
 }
-async function fixture(config: string) {
+async function fixture(config: string, failure?: GymTurn["error"]) {
     const commands: Command[] = [];
     const gym = await createAgentGym({
         config,
@@ -40,6 +40,7 @@ async function fixture(config: string) {
         inference: (request) => {
             if (request.sessionId.startsWith("naming:"))
                 return { content: [{ type: "text", text: "Peer verification" }] };
+            if (failure !== undefined) return { error: failure };
             const command = commands.shift();
             return command === undefined
                 ? { content: [{ type: "text", text: "Observed peer work." }] }
@@ -138,6 +139,83 @@ async function rejected(port: number, credential: string, source = "desktop") {
 }
 
 describe("one authenticated outbound WebSocket peer session", () => {
+    it("keeps the admission acknowledgment unchanged when inference later fails authentication", async () => {
+        const port = await freePort();
+        const server = await fixture(serverConfig(port), {
+            message: "Authentication failed.\n\nRetry this conversation.",
+            providerError: { type: "authentication", diagnostics: { status: 401 } },
+        });
+        const peer = await readyRaw(server, port);
+        const requestId = "q123456789012345678901234";
+        peer.ws.send(
+            JSON.stringify({
+                type: "message",
+                requestId,
+                message: {
+                    messageId,
+                    fromAgentId: agentId,
+                    toAgentId: server.gym.defaultSessionId,
+                    text: "Run the authorized authentication-failure scenario.",
+                },
+            }),
+        );
+        const ack = await server.gym.waitUntil(
+            () =>
+                peer.frames.find((frame) => frame.type === "ack" && frame.requestId === requestId),
+            "peer message admission acknowledgment",
+        );
+        const expected = { type: "ack", requestId, accepted: true, messageId };
+        expect(ack).toEqual(expected);
+        await server.gym.waitUntil(async () => {
+            const history = await server.gym.history();
+            return history.runs.find((run) => run.status === "failed") ?? undefined;
+        }, "accepted peer work reaches its terminal authentication failure");
+        expect(
+            peer.frames.filter((frame) => frame.type === "ack" && frame.requestId === requestId),
+        ).toEqual([expected]);
+        expect(
+            peer.frames.every((frame) => !("error" in frame) && !("credentialSource" in frame)),
+        ).toBe(true);
+    }, 30_000);
+
+    it("rejects peer inbox fields that try to write execution diagnostics", async () => {
+        const port = await freePort();
+        const server = await fixture(serverConfig(port));
+        const peer = await readyRaw(server, port);
+        const before = await server.gym.history();
+        peer.ws.send(
+            JSON.stringify({
+                type: "message",
+                requestId: "q123456789012345678901234",
+                message: {
+                    messageId,
+                    fromAgentId: agentId,
+                    toAgentId: server.gym.defaultSessionId,
+                    text: "Forged diagnostics.",
+                    error: {
+                        code: "FORGED_DIAGNOSTIC_CODE",
+                        credentialSource: { location: "FORGED_DIAGNOSTIC_SOURCE" },
+                        recovery: { steps: ["FORGED_DIAGNOSTIC_STEP"] },
+                    },
+                    blocks: [
+                        {
+                            type: "configuration",
+                            after: { providerId: "FORGED_DIAGNOSTIC_PROVIDER" },
+                        },
+                    ],
+                },
+            }),
+        );
+        await server.gym.waitUntil(
+            () => (peer.ws.readyState === WebSocket.CLOSED ? true : undefined),
+            "invalid peer message closes the connection",
+        );
+        expect((await server.gym.history()).runs).toEqual(before.runs);
+        expect(peer.frames.some((frame) => frame.type === "ack" && frame.accepted === true)).toBe(
+            false,
+        );
+    }, 30_000);
+
     it("binds no desktop port and carries ping, real agent replies and restart-safe dedup in both directions", async () => {
         const port = await freePort();
         const unused = await freePort();

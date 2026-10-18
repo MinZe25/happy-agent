@@ -112,16 +112,10 @@ describe("Surface chats are shared lazy conversations", () => {
         expect(gym.errors).toEqual([]);
     });
 
-    it("refuses chats for separators and keeps the chat's lifecycle owned by its Surface", async () => {
+    it("refuses chats for unknown Surfaces and keeps the chat's lifecycle owned by its Surface", async () => {
         const gym = await createAgentGym();
         running.push(gym);
         const client = gym.client;
-        const separator = (await client.createSurface({ type: "separator", name: "Work" })).surface;
-        await expect(client.ensureSurfaceChat(separator.id)).rejects.toMatchObject({
-            status: 409,
-            code: "conflict",
-        });
-        expect((await client.listSurfaces()).surfaces).toContainEqual(separator);
         await expect(client.ensureSurfaceChat("abcdefghijklmnopqrstuvwx")).rejects.toMatchObject({
             status: 404,
         });

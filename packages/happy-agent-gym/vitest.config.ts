@@ -5,6 +5,7 @@ export default defineConfig({
         setupFiles: [
             "../../scripts/windowsSandboxTestSetup.ts",
             "../../scripts/isolateHappyTestEnvironment.ts",
+            "../../scripts/exitOrphanedTestWorker.ts",
         ],
         include: ["tests/**/*.test.ts"],
         // A gym starts a daemon, two databases and a socket. Files run one at a time so a slow

@@ -17,11 +17,13 @@ import {
     todoVersionListResponseSchema,
     surfaceNameSchema,
     surfaceDocumentSchema,
+    surfaceDocumentSeqSchema,
     surfaceDocumentTextSchema,
-    surfaceDocumentVersionListResponseSchema,
+    surfaceDocumentChangeListResponseSchema,
     resourceVersionSchema,
 } from "@slopus/happy-agent-client";
 import type { SurfacesModule } from "../SurfacesModule.js";
+import { calendarTools } from "./calendarTools.js";
 
 const identity = { surfaceId: surfaceIdSchema, todoId: cuid2Schema };
 const guard = { ...identity, version: resourceVersionSchema };
@@ -30,6 +32,26 @@ const page = {
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
 };
 const textResult = (result: unknown) => [{ type: "text" as const, text: JSON.stringify(result) }];
+/** A document as an agent reads it: Markdown, the version it is at, and what Markdown leaves out. */
+const documentReadingSchema = Type.Object({
+    document: Type.Object({ ...surfaceDocumentSchema.properties, seq: surfaceDocumentSeqSchema }),
+    omitted: Type.Optional(Type.String()),
+});
+const documentWriteSchema = Type.Object({
+    ...documentReadingSchema.properties,
+    changed: Type.Boolean(),
+});
+/** Name what the Markdown leaves out, so the agent knows the document holds more than it sees. */
+const omittedNote = (omitted: readonly string[]) =>
+    omitted.length === 0
+        ? {}
+        : {
+              omitted: `Markdown cannot show this document's ${list(omitted)}. They stay in place when you edit other text, and on the unchanged start and end of text you edit.`,
+          };
+const list = (items: readonly string[]) =>
+    items.length < 3
+        ? items.join(" and ")
+        : `${items.slice(0, -1).join(", ")}, and ${items.at(-1)}`;
 const imagePath = Type.Optional(
     Type.String({
         minLength: 1,
@@ -65,7 +87,7 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             capabilities: ["Find shared Surfaces and their members."],
             searchKeywords: ["list surfaces", "shared todo lists", "sidebar members"],
             description:
-                "List shared Surface instances, their IDs, names, types, and joined people. Artifact, bot, and task Surfaces include their target's live name and ID while it is available, or an unavailable state without them. Each todo or document tool requires a Surface ID. Results are paged.",
+                "List shared Surface instances, their IDs, names, types, and joined people. Artifact, bot, and task Surfaces include their target's live name and ID while it is available, or an unavailable state without them. Each todo, document, or calendar tool requires a Surface ID. Results are paged.",
             parameters: Type.Object(page, { additionalProperties: false }),
             returnType: Type.Object({
                 surfaces: Type.Array(surfaceSchema),
@@ -265,29 +287,35 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         defineAgentTool({
             name: "read_document",
             defer: true,
-            capabilities: ["Read a shared Surface's Markdown document or a permanent revision."],
+            capabilities: [
+                "Read a shared document Surface as Markdown, now or at an earlier version.",
+            ],
             searchKeywords: ["read document", "surface markdown", "previous document text"],
             description:
-                "Read a document Surface's current Markdown and version, or the immutable snapshot at an optional historical version. Text is preserved verbatim. Keep the current version for a guarded update; reading history does not change the document.",
+                "Read a document Surface as Markdown with the seq it was read at, or as of an optional earlier seq. People may be editing it at the same time. Keep the seq: update_document needs the seq your edit is based on. The result says when the document holds content Markdown cannot show, such as comments or colors.",
             parameters: Type.Object(
-                { surfaceId: surfaceIdSchema, version: Type.Optional(resourceVersionSchema) },
+                {
+                    surfaceId: surfaceIdSchema,
+                    seq: Type.Optional(
+                        Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+                    ),
+                },
                 { additionalProperties: false },
             ),
-            returnType: surfaceDocumentSchema,
+            returnType: documentReadingSchema,
             durable: false,
             shouldReviewInAutoMode: () => false,
-            execute: async (ctx, input) =>
-                input.version === undefined
-                    ? surfaces.getDocument(ctx, input.surfaceId)
-                    : (await surfaces.getDocumentVersion(ctx, input.surfaceId, input.version))
-                          .document,
+            execute: async (ctx, input) => {
+                const reading = await surfaces.document(ctx, input.surfaceId, input.seq);
+                return { document: reading.document, ...omittedNote(reading.omitted) };
+            },
             toLLM: textResult,
         }),
         defineAgentTool({
             name: "update_document",
             defer: true,
             capabilities: [
-                "Replace a shared document's Markdown while preserving permanent history.",
+                "Edit a shared document's Markdown alongside the people editing it, keeping permanent history.",
             ],
             searchKeywords: [
                 "update document",
@@ -296,55 +324,61 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
                 "restore document revision",
             ],
             description:
-                "Replace a document Surface's entire Markdown using its current version. Empty text clears content without deleting history. Identical text is a no-op only when the version matches. On conflict, read the latest document before editing. To restore a revision, read its text and write it with the current version.",
+                "Edit a document Surface by giving its entire new Markdown and the seq of the version you read. Happy compares your Markdown with that version block by block and applies only what you changed, so edits people made since then are kept. Unchanged Markdown changes nothing. Empty text clears the content; history keeps every version. To restore an earlier version, read it with read_document and write its text with the latest seq. Use seq 0 only for a document you read as empty.",
             parameters: Type.Object(
                 {
                     surfaceId: surfaceIdSchema,
-                    version: resourceVersionSchema,
+                    seq: surfaceDocumentSeqSchema,
                     text: surfaceDocumentTextSchema,
                 },
                 { additionalProperties: false },
             ),
-            returnType: surfaceDocumentSchema,
+            returnType: documentWriteSchema,
             durable: true,
             transactional: true,
             requiresAutoOrFullAccess: true,
             shouldReviewInAutoMode: () => true,
             describeAutoPermissionAction: ({ surfaceId }) =>
-                `replacing the shared document in Surface ${JSON.stringify(surfaceId)} while preserving history. Access: shared data write; no filesystem access`,
-            execute: async (ctx, input) =>
-                surfaces.updateDocument(
+                `editing the shared document in Surface ${JSON.stringify(surfaceId)} while preserving history. Access: shared data write; no filesystem access`,
+            execute: async (ctx, input) => {
+                const result = await surfaces.changeDocumentFromMarkdown(
                     ctx,
                     input.surfaceId,
-                    input.version,
-                    { text: input.text },
+                    input.seq,
+                    input.text,
                     await actor(ctx),
-                ),
+                );
+                return {
+                    document: result.document,
+                    changed: result.changed,
+                    ...omittedNote(result.omitted),
+                };
+            },
             toLLM: textResult,
         }),
         defineAgentTool({
             name: "list_document_versions",
             defer: true,
-            capabilities: ["Read a shared document's permanent revision summaries and authors."],
+            capabilities: ["List a shared document's permanent changes and who made them."],
             searchKeywords: ["document history", "document versions", "markdown revision authors"],
             description:
-                "Read permanent document revision summaries, oldest first, without loading Markdown text. Returns up to 20 entries, default 10. Continue with nextAfterVersion; use read_document with a selected version for its text.",
+                "List a document Surface's permanent changes, oldest first: each seq with who made it, when, and whether a person, an agent, or the one-time conversion of an older document. Returns up to 20 entries, default 10; continue with nextAfterSeq. Read any version's Markdown with read_document and its seq.",
             parameters: Type.Object(
                 {
                     surfaceId: surfaceIdSchema,
-                    afterVersion: Type.Optional(resourceVersionSchema),
+                    afterSeq: Type.Optional(surfaceDocumentSeqSchema),
                     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
                 },
                 { additionalProperties: false },
             ),
-            returnType: surfaceDocumentVersionListResponseSchema,
+            returnType: surfaceDocumentChangeListResponseSchema,
             durable: false,
             shouldReviewInAutoMode: () => false,
             execute: async (ctx, input) =>
-                surfaces.documentVersions(
+                surfaces.documentChanges(
                     ctx,
                     input.surfaceId,
-                    input.afterVersion,
+                    input.afterSeq ?? 0,
                     input.limit ?? 10,
                 ),
             toLLM: textResult,
@@ -423,6 +457,42 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
                     input.creatorUserId,
                     scope.agent.id,
                     await actor(ctx),
+                ),
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "create_calendar_surface",
+            defer: true,
+            capabilities: ["Create a named shared calendar Surface as an admin bot."],
+            searchKeywords: ["create calendar surface", "new shared calendar", "calendar image"],
+            description:
+                "Admin bots only: create a distinct named shared calendar Surface, empty at first. Explicitly supply creatorUserId as a local Happy user ID or null; only null is allowed in standalone mode. The creator is immutable. A named creator joins at the end of their sidebar; null joins nobody in team mode and the local person in standalone mode. Optionally supply an absolute PNG, JPEG, or WebP image path (8 MiB maximum).",
+            parameters: Type.Object(
+                {
+                    name: surfaceNameSchema,
+                    creatorUserId: surfaceMemberSchema.properties.userId,
+                    imagePath,
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: (input, ctx) =>
+                surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath),
+            describeAutoPermissionAction: (input) =>
+                `creating a shared calendar Surface${fromImage(input.imagePath)}. ${imageAccess}`,
+            execute: async (ctx, input, call) =>
+                surfaces.create(
+                    ctx,
+                    {
+                        ...(await creation(ctx, call, input.imagePath)),
+                        type: "calendar",
+                        name: input.name,
+                    },
+                    input.creatorUserId,
+                    scope.agent.id,
                 ),
             toLLM: textResult,
         }),
@@ -538,39 +608,6 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             toLLM: textResult,
         }),
         defineAgentTool({
-            name: "create_separator_surface",
-            defer: true,
-            capabilities: ["Create a named sidebar separator Surface as an admin bot."],
-            searchKeywords: ["create separator surface", "sidebar section", "named divider"],
-            description:
-                "Admin bots only: create a named, contentless sidebar separator. It does not contain or own other Surfaces and has no image. Explicitly supply creatorUserId as a local Happy user ID or null; only null is allowed in standalone mode. The creator joins at the end of their sidebar; null joins nobody in team mode and the local person in standalone mode.",
-            parameters: Type.Object(
-                { name: surfaceNameSchema, creatorUserId: surfaceMemberSchema.properties.userId },
-                { additionalProperties: false },
-            ),
-            returnType: surfaceSchema,
-            durable: true,
-            transactional: true,
-            requiresAutoOrFullAccess: true,
-            shouldReviewInAutoMode: () => true,
-            describeAutoPermissionAction: ({ name }) =>
-                `creating sidebar separator Surface ${JSON.stringify(name)}. Access: shared data write; no filesystem access`,
-            execute: async (ctx, input, call) => {
-                await surfaces.requireAdmin(ctx, scope.agent.id);
-                return surfaces.create(
-                    ctx,
-                    {
-                        type: "separator",
-                        name: input.name,
-                        id: await call.kv.getOrCreate(ctx, "surfaceId", createId),
-                    },
-                    input.creatorUserId,
-                    scope.agent.id,
-                );
-            },
-            toLLM: textResult,
-        }),
-        defineAgentTool({
             name: "add_surface_user",
             defer: true,
             capabilities: ["Add a person to a Surface as an admin bot."],
@@ -619,5 +656,8 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
             toLLM: textResult,
         }),
     ];
-    return admin ? [...ordinary, ...documents, ...administration] : [...ordinary, ...documents];
+    const calendars = calendarTools(surfaces, actor);
+    return admin
+        ? [...ordinary, ...documents, ...calendars, ...administration]
+        : [...ordinary, ...documents, ...calendars];
 }

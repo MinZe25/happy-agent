@@ -25,11 +25,13 @@ Generic model creation hid differences between feature types. Active admin bots 
 `create_todo_surface`, with a name and optional image, and add/remove-user tools. Execution
 rechecks authority; ordinary todo use cannot grant membership administration or create lists.
 
-## Separators are independent contentless Surfaces
+## Sections live inside a todo list, not in the sidebar
 
-A sidebar section does not own the Surfaces beneath it. A separator uses the same membership,
-ordering, creator attribution, and events as every Surface, but accepts neither an image nor todo
-content. Its dedicated admin tool needs shared-data review only, with no filesystem access.
+A `separator` Surface type was built as a contentless sidebar section. That misread the request:
+the happy-list `#` separator is a heading row inside a todo list, which todos already support with
+the `# ` prefix. The type and its admin tool are withdrawn. Rows an earlier daemon stored are kept
+unchanged rather than rewritten, but the catalog read filters them out, so every list, route, and
+chat treats their IDs as not found and creation with one of their IDs is refused.
 
 ## References resolve their target on every read
 
@@ -51,7 +53,7 @@ The daemon, not the HTTP request, makes the folder; the agent, its indexes, and 
 `chatAgentId` commit together only afterwards. The caller waits a bounded time and otherwise
 gets `503 not_initialized`, never a partial association. The chat's agent is announced after its
 initial slash-command discovery and before the `surface.updated` that names it, like bot and task
-agents. Separators have no content and get no chat. The Surface owns the chat's lifetime, so agent
+agents. The Surface owns the chat's lifetime, so agent
 and workspace archive, reorder, rename, child creation, and attaching another agent all conflict.
 The agent works for each message's sender, holds no admin role, and never joins anyone.
 
@@ -85,18 +87,79 @@ Markdown syntax. Creation, editing, ordering, state changes, and permanent histo
 todo operations. Clients edit the full text so removing the prefix returns the row to an ordinary
 task; historical row styling remains a client choice.
 
-## Document content has its own version and permanent audit history
+## Documents are collaborative, not guarded Markdown
 
-A document Surface is shared Markdown, not a workspace file or an artifact. Content edits use
-their own guarded version without changing the Surface's catalog version or sidebar state.
-The full snapshot, immutable revision, bounded history summary, and notification intent commit
-together. Authors remain the explicit creator; editors and audit actors come from trusted callers.
+Documents first stored whole Markdown replaced under `If-Match`, so two people editing at once
+had one save rejected and had to redo it. The request was a WYSIWYG editor with real-time editing
+on a good CRDT. A document is now a Yjs document edited with BlockNote. Changes merge, every
+accepted change is a permanent log entry with its `seq`, actor, source, and mutation ID, and any
+version is the log replayed to that entry. A repeated mutation ID returns its original `seq`,
+which is how a client recovers a change whose response was lost. Nothing is deleted or restored:
+reverting writes an old version's content as a new change. Live changes and presence ride the
+existing event stream as frames that never enter the journal, so a desktop opens no extra
+connection and a reconnect's cursor is unaffected.
 
-Each revision keeps the request's mutation ID verbatim, or null when absent. Text equality could
-not identify a save whose response was lost after a collaborator edited again; the revision's
-immutable correlation metadata can. This is not a deduplication key, and no-ops or conflicts do
-not append or overwrite revisions. Reading an old version and performing an ordinary guarded
-replacement restores its text while retaining every intermediate version.
+Presence sent through a stream that does not follow the document relays nothing and is not an
+error. A window's throttled presence can land just after it closed the document, and answering
+with a conflict would only produce noise while relaying it would bring that presence back.
+
+## The daemon reads documents through the editor's exact schema
+
+Markdown, agent writes, and the content check all convert the Yjs fragment through BlockNote's
+schema, so the daemon and the desktop editor must run the same BlockNote. A unit test fails when
+the installed or declared `@blocknote/core` differs from the version the desktop pins (0.51.4);
+upgrade both together. Conversion runs on a private copy because y-prosemirror deletes nodes it
+cannot place, and any such delete marks content outside the model. That content is still stored
+and relayed unchanged and left out of Markdown, and an agent's Markdown write to such a document
+is refused with an error saying why, because rewriting from Markdown would delete what Markdown
+cannot see.
+
+## Agent writes are differences from the version the agent read
+
+An agent sends full Markdown and the `seq` it read. Replacing the content outright would erase
+whatever people typed since, and would drop block IDs, comments, colors, and nesting that
+Markdown cannot express. The write instead aligns blocks between that version and the agent's
+Markdown, keeps unchanged blocks and their invisible attributes, and applies only the computed
+difference to the current document in the write transaction. Unchanged Markdown appends nothing.
+
+## Markdown escapes only what would change the meaning
+
+Escaping every punctuation character made `a_snake_name` read back as `a\_snake\_name`, which
+agents then copied into their writes. Escaping is now decided by context: intraword underscores,
+lone asterisks, and ordinary punctuation stay literal, and each formatted run is checked by
+parsing the result back, falling back to plainer output when the parse would differ.
+
+## Calendars expand recurrence on the daemon, from series records
+
+A calendar keeps one record per series and no stored occurrences, because there are no
+per-occurrence exceptions: editing or deleting changes the whole series. The daemon expands
+occurrences for every range read and tool, and clients never compute repeats, so desktop and
+models cannot disagree with the daemon about month ends, leap days, or daylight saving. Timed
+series repeat the start's wall-clock time in the event's own zone, using Temporal's
+`compatible` rule for skipped and repeated hours; index 0 is always the event's own timing, so a
+start outside a weekly rule's weekdays still occurs once. Range reads stay cheap by keeping the
+current record in its own table with padded instant bounds, filtering in SQL before decoding.
+
+## Calendar history restores through ordinary update
+
+Steve asked that event history allow anything to be restored, like todos. Every create, edit,
+recurrence change, and deletion appends a full immutable snapshot, and update can set every
+field a snapshot holds: blank titles, cleared notes, location, and rules, timed or all-day
+timing, and active status to undelete. Restoring is reading a revision and sending its fields
+with the current version, which appends exactly one revision and rewrites none.
+
+## Calendar titles may be blank
+
+Steve chose Google Calendar's behavior: an event may have an empty or blank title, and clients
+show their own placeholder. The title is always a string, never null, so a revision restores it
+exactly, and it is stored without trimming.
+
+## Older documents convert once, on first touch
+
+Documents an earlier daemon stored as Markdown become collaborative the first time they are read
+or written, in that transaction, as entry 1 with source `conversion` and no actor. Their Markdown
+revisions stay readable as history and are never written again. The withdrawn `PUT` returns
+`405` without reading its body, so an older client stops instead of retrying a save forever.
 
 ## Nothing historical is destroyed
 

@@ -25,6 +25,15 @@ restoring command. Todo access never joins the caller.
 Follow shared `todo.created` and `todo.updated` from the list cursor, refetching on a version gap.
 The client exposes these events without adding an automatic Todo store to `HappyReducer`.
 
+Calendar Surfaces are served at `/v0/surfaces/calendar/:surfaceId` when health reports
+`capabilities.calendarSurfaces`. `listCalendarEvents(surfaceId, { from, to, timeZone })` reads at
+most 100 days of daemon-expanded occurrences with the events they belong to; never expand
+recurrence in the client. `createCalendarEvent()`, `updateCalendarEvent()`, and
+`deleteCalendarEvent()` change whole series, and mutations of existing events take `ifMatch`.
+`listCalendarEventVersions()` and `getCalendarEventVersion()` expose permanent full snapshots;
+restore one by sending its fields through ordinary update. After `calendar_event.created` or
+`calendar_event.updated` for a shown calendar, read the visible range again.
+
 `HappyAgentClient` is built from an endpoint and a bearer token. The token may be a function called
 for every request, so refreshed credentials apply without a new client; it may be omitted only to
 call `getAuthentication()` before signing in.
@@ -150,6 +159,14 @@ returns an unset entry, never `404`. Invalid keys throw before any request, and 
 changes. An absent bootstrap field, or `404` from `getUserSettings()`, means the daemon has no user
 settings, so keep those preferences on the device. Through `connection(id)`, settings belong to the
 remote daemon and the person it authenticates.
+
+The mobile connector pairs a phone with this daemon over its own Tailcat socket. The client covers
+only the desktop's side: `getMobileConnector()` reads the caller's snapshot, `startMobilePairing()`
+returns it with a `happy://direct?…` QR code to show and never log, `confirmMobilePairing(id)` and
+`cancelMobilePairing(id)` answer the emoji comparison, and `removeMobileDevice(id)` removes a paired
+phone. Every call returns the complete snapshot, and `mobile_connector.updated` delivers it to its
+owner only; keep the one with the greater `version`. Phones implement their side natively from the
+specification. `404` from `getMobileConnector()` means a daemon older than protocol 27.
 
 The global secrets surface exposes only safe metadata: descriptions, environment-variable names,
 availability, attachments, versions, and timestamps. Raw values appear only in typed create and
@@ -340,6 +357,12 @@ new version from the latest one's files, adding, replacing, or removing paths, a
 `deleteArtifact()` leaves a tombstone; both take the artifact's `version` as `ifMatch`.
 `listArtifactVersions()` reads the history. Follow `artifact.created`, `artifact.updated`, and
 `artifact.deleted`.
+
+Show an artifact on a transparent slot unless its version names `background`, a lowercase hex
+colour (`#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`) to paint behind the content; check
+`artifactBackgroundSchema` again before using it, and only as a background colour. Older daemons
+omit the field. `createArtifact()` takes an optional `background`, and in `updateArtifact()` a
+colour sets it, `null` clears it, and omitting it keeps the latest version's.
 
 `MessageMode.account` is optional server-resolved provenance only in configuration/error execution
 snapshots, not an account selector. It is absent from user-message/composer modes and drafts.

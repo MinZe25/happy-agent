@@ -4,6 +4,8 @@ import {
     agentSpawnPresentationSchema,
     clientMetadataSchema,
     clientMetadataValueSchema,
+    configurationBlockSchema,
+    messageErrorSchema,
     toolCallRequestBlockSchema,
     userIdSchema,
     type ClientMetadata,
@@ -434,6 +436,7 @@ export const historyBlockSchema = Type.Union([
     historyToolCallBlockSchema,
     historyToolResultBlockSchema,
     historyCompactionBlockSchema,
+    configurationBlockSchema,
 ]);
 
 /** The TypeScript type inferred from {@link historyBlockSchema}. */
@@ -451,6 +454,8 @@ const historyMessageFields = {
      */
     senderAgentId: Type.Optional(historyAgentIdSchema),
     blocks: Type.Array(historyBlockSchema, { maxItems: MAX_HISTORY_BLOCKS_PER_MESSAGE }),
+    /** Display-only diagnostics, never part of model input or caller-authored message content. */
+    error: Type.Optional(messageErrorSchema),
     /** Stable identity for this archive record. Reuse is a storage conflict. */
     recordId: historyRecordIdSchema,
     /** The accepted run this message belongs to. */

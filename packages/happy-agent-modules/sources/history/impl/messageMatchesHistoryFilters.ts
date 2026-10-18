@@ -39,7 +39,7 @@ export function historyMessageSearchParts(message: HistoryMessage): readonly str
             parts.push(block.name, stringify(block.arguments ?? null));
         } else if (block.type === "tool_result") {
             parts.push(block.toolName, block.display ?? "", block.output ?? "");
-        } else {
+        } else if (block.type === "compaction") {
             parts.push("compaction", block.trigger, block.status, block.failureReason ?? "");
         }
     }

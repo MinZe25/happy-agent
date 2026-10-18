@@ -21,6 +21,7 @@ import {
 import type { Agent, AgentDraftSnapshot, AgentProfile } from "./agents.js";
 import {
     artifactAuthorSchema,
+    artifactBackgroundSchema,
     artifactFileSchema,
     artifactSchema,
     artifactSourceSchema,
@@ -47,6 +48,13 @@ import {
     surfaceOrderKeySchema,
     surfaceSchema,
     surfaceDocumentSchema,
+    calendarEventSchema,
+    calendarEventLocationSchema,
+    calendarEventNotesSchema,
+    calendarEventStatusSchema,
+    calendarEventTitleSchema,
+    calendarRecurrenceSchema,
+    calendarTimingSchema,
     todoSchema,
     todoTextSchema,
     type SurfaceDocumentLiveFrame,
@@ -56,6 +64,7 @@ import type { Terminal } from "./terminals.js";
 import type { AgentContextUsage } from "./usage.js";
 import type { Workspace } from "./workspaces.js";
 import { storedUserSettingSchema } from "./userSettings.js";
+import { mobileConnectorSchema } from "./mobileConnector.js";
 import type { SlashCommand } from "./slashCommands.js";
 import { connectionListResponseSchema } from "./connections.js";
 import { runnerListResponseSchema } from "./runners.js";
@@ -244,6 +253,35 @@ export const todoUpdatedPayloadSchema = Type.Object({
 });
 export type TodoUpdatedPayload = Static<typeof todoUpdatedPayloadSchema>;
 
+export const calendarEventCreatedPayloadSchema = Type.Object({
+    event: calendarEventSchema,
+    mutationId: Type.Optional(mutationIdSchema),
+});
+export type CalendarEventCreatedPayload = Static<typeof calendarEventCreatedPayloadSchema>;
+
+/**
+ * Only the fields that changed, always with `updatedAt`; timing and recurrence appear whole.
+ * Payloads describe the series record, never occurrences: reread the visible range instead.
+ */
+export const calendarEventUpdatedPayloadSchema = Type.Object({
+    changes: Type.Object({
+        deletedAt: Type.Optional(Nullable(timestampSchema)),
+        location: Type.Optional(Nullable(calendarEventLocationSchema)),
+        notes: Type.Optional(Nullable(calendarEventNotesSchema)),
+        recurrence: Type.Optional(Nullable(calendarRecurrenceSchema)),
+        status: Type.Optional(calendarEventStatusSchema),
+        timing: Type.Optional(calendarTimingSchema),
+        title: Type.Optional(calendarEventTitleSchema),
+        updatedAt: timestampSchema,
+    }),
+    eventId: cuid2Schema,
+    mutationId: Type.Optional(mutationIdSchema),
+    previousVersion: resourceVersionSchema,
+    surfaceId: surfaceIdSchema,
+    version: resourceVersionSchema,
+});
+export type CalendarEventUpdatedPayload = Static<typeof calendarEventUpdatedPayloadSchema>;
+
 /**
  * Emitted only by daemons without collaborative documents; current daemons deliver document
  * changes as live frames to subscribed streams instead.
@@ -266,6 +304,8 @@ export type ArtifactCreatedPayload = Static<typeof artifactCreatedPayloadSchema>
 
 /** The artifact's fields mirroring its new latest version, and who made it, where, and when. */
 export const artifactUpdatedChangesSchema = Type.Object({
+    /** Absent on older daemons. */
+    background: Type.Optional(Nullable(artifactBackgroundSchema)),
     entry: artifactFileSchema,
     fileCount: Type.Integer({ minimum: 1 }),
     latestVersion: Type.Integer({ minimum: 1 }),
@@ -464,6 +504,15 @@ export const userSettingsUpdatedPayloadSchema = Type.Object({
 });
 export type UserSettingsUpdatedPayload = Static<typeof userSettingsUpdatedPayloadSchema>;
 
+/**
+ * The caller's mobile connector changed: its socket, pairing, or paired phones. A complete
+ * replacement delivered only to its owner; keep the snapshot with the greater `version`.
+ */
+export const mobileConnectorUpdatedPayloadSchema = Type.Object({
+    mobileConnector: mobileConnectorSchema,
+});
+export type MobileConnectorUpdatedPayload = Static<typeof mobileConnectorUpdatedPayloadSchema>;
+
 /** One event on the journal. */
 export interface EventEnvelope<TType extends string, TPayload> {
     /** This event's place in the journal; never a resource identity. */
@@ -496,6 +545,8 @@ export type HappyAgentEvent =
     | EventEnvelope<"surface.created", SurfaceCreatedPayload>
     | EventEnvelope<"todo.created", TodoCreatedPayload>
     | EventEnvelope<"todo.updated", TodoUpdatedPayload>
+    | EventEnvelope<"calendar_event.created", CalendarEventCreatedPayload>
+    | EventEnvelope<"calendar_event.updated", CalendarEventUpdatedPayload>
     | EventEnvelope<"surface.document.updated", SurfaceDocumentUpdatedPayload>
     | EventEnvelope<"artifact.created", ArtifactCreatedPayload>
     | EventEnvelope<"artifact.updated", ArtifactUpdatedPayload>
@@ -536,7 +587,8 @@ export type HappyAgentEvent =
     | EventEnvelope<"profile.updated", ProfileUpdatedPayload>
     | EventEnvelope<"cloud.updated", CloudUpdatedPayload>
     | EventEnvelope<"happy.integration.updated", HappyIntegrationUpdatedPayload>
-    | EventEnvelope<"user_settings.updated", UserSettingsUpdatedPayload>;
+    | EventEnvelope<"user_settings.updated", UserSettingsUpdatedPayload>
+    | EventEnvelope<"mobile_connector.updated", MobileConnectorUpdatedPayload>;
 
 /** The name of an event this client build knows. */
 export type HappyAgentEventType = HappyAgentEvent["type"];

@@ -37,7 +37,7 @@ export function formatHistoryPage(
     const selected = selectBounded(formatted, options.fromEnd === true);
     return {
         consumedMessages: selected.messages.length,
-        history: selected.messages.join("\n\n"),
+        history: selected.messages.filter((message) => message !== "").join("\n\n"),
         startIndex: selected.startIndex,
         stats: summarizeHistory(
             page.messages

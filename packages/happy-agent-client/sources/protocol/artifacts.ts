@@ -46,6 +46,20 @@ export const artifactPathSchema = Type.String({
 });
 export type ArtifactPath = Static<typeof artifactPathSchema>;
 
+/**
+ * The colour a client paints behind a version's content instead of a transparent slot: a lowercase
+ * hexadecimal `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`, never other CSS. Most artifacts have none.
+ */
+export const artifactBackgroundSchema = Type.String({
+    pattern: "^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$",
+});
+export type ArtifactBackground = Static<typeof artifactBackgroundSchema>;
+
+/** A background as a request names it: the same colours in either case, or `null` for none. */
+export const artifactBackgroundInputSchema = Nullable(
+    Type.String({ pattern: "^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$" }),
+);
+
 /** A lowercase hexadecimal SHA-256 digest. */
 export const artifactSha256Schema = Type.String({ pattern: "^[0-9a-f]{64}$" });
 
@@ -132,6 +146,8 @@ export type ArtifactAuthorKind = ArtifactAuthor["kind"];
 
 /** The artifact as its latest version and lifecycle leave it. */
 export const artifactSchema = Type.Object({
+    /** The latest version's background; `null` for a transparent slot, absent on older daemons. */
+    background: Type.Optional(Nullable(artifactBackgroundSchema)),
     createdAt: timestampSchema,
     createdBy: artifactAuthorSchema,
     deletedAt: Nullable(timestampSchema),
@@ -162,6 +178,8 @@ export type Artifact = Static<typeof artifactSchema>;
 /** One immutable version and its whole manifest. */
 export const artifactVersionSchema = Type.Object({
     artifactId: cuid2Schema,
+    /** The colour behind this version's content; `null` for a transparent slot, absent on older daemons. */
+    background: Type.Optional(Nullable(artifactBackgroundSchema)),
     createdAt: timestampSchema,
     createdBy: artifactAuthorSchema,
     /** One of `files`: the file a client opens to show this version. */
@@ -282,6 +300,8 @@ export type ArtifactFileInput = Static<typeof artifactFileInputSchema>;
 
 /** `POST /v0/artifacts` */
 export const createArtifactRequestSchema = Type.Object({
+    /** The first version's background. Leave it out unless the content needs one fixed canvas. */
+    background: Type.Optional(artifactBackgroundInputSchema),
     /** Every file of the first version, in any order. */
     files: Type.Array(artifactFileInputSchema, { maxItems: 256, minItems: 1 }),
     /** The retry key: repeating it returns the existing artifact unchanged. */
@@ -294,11 +314,13 @@ export const createArtifactRequestSchema = Type.Object({
 export type CreateArtifactRequest = Static<typeof createArtifactRequestSchema>;
 
 /**
- * `PATCH /v0/artifacts/:artifactId` — requires `If-Match` and at least one of `title`, `files`,
- * `remove`, and `replaceAll`. The new version starts from the latest one's files, or from none
+ * `PATCH /v0/artifacts/:artifactId` — requires `If-Match` and at least one of `title`,
+ * `background`, `files`, `remove`, and `replaceAll`. The new version starts from the latest one's files, or from none
  * with `replaceAll`; `files` adds or replaces paths and `remove` takes paths out.
  */
 export const updateArtifactRequestSchema = Type.Object({
+    /** A colour sets the new version's background, `null` clears it, and absent keeps it. */
+    background: Type.Optional(artifactBackgroundInputSchema),
     files: Type.Optional(Type.Array(artifactFileInputSchema, { maxItems: 256 })),
     mutationId: Type.Optional(mutationIdSchema),
     remove: Type.Optional(Type.Array(artifactPathSchema, { maxItems: 256 })),

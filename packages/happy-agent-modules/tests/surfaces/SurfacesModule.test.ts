@@ -80,167 +80,57 @@ async function fixture(teamEnabled = true) {
 }
 
 describe("installation-owned Surface state", () => {
-    it("rolls document heads, full revisions, summaries, and notification intent back together", async () => {
+    it("withdraws separators an earlier daemon stored without rewriting them", async () => {
         const f = await fixture();
         const ctx = f.db.context;
-        const actor = { userId: "alice", agentId: null };
-        const surface = await f.surfaces.create(
-            ctx,
-            { type: "document", name: "Atomic", mutationId: "initial" },
-            "bob",
-            undefined,
-            actor,
-        );
-        const initial = await f.surfaces.getDocument(ctx, surface.id);
-        expect(initial).toMatchObject({ authorUserId: "bob", lastEditorUserId: "alice" });
-        const pending = () =>
-            agentDatabaseRows<{ id: string }>(
-                f.db.database,
-                sql`SELECT id FROM durable_function_calls ORDER BY id`,
-            );
-        const before = await pending();
-        let rolledBackVersion = "";
-        await expect(
-            ctx.inTx(async (tx) => {
-                const changed = await f.surfaces.updateDocument(
-                    tx,
-                    surface.id,
-                    initial.version,
-                    { text: "Temporary", mutationId: "rollback" },
-                    { userId: "bob", agentId: "admin" },
-                );
-                rolledBackVersion = changed.version;
-                expect(await f.surfaces.getDocument(tx, surface.id)).toEqual(changed);
-                expect((await f.surfaces.documentVersions(tx, surface.id)).versions).toHaveLength(
-                    2,
-                );
-                expect(
-                    (await f.surfaces.getDocumentVersion(tx, surface.id, changed.version))
-                        .mutationId,
-                ).toBe("rollback");
-                throw new Error("rollback");
-            }),
-        ).rejects.toThrow("rollback");
-        expect(await f.surfaces.getDocument(ctx, surface.id)).toEqual(initial);
-        expect((await f.surfaces.documentVersions(ctx, surface.id)).versions).toMatchObject([
-            { version: initial.version, mutationId: "initial" },
-        ]);
-        await expect(
-            f.surfaces.getDocumentVersion(ctx, surface.id, rolledBackVersion),
-        ).rejects.toMatchObject({ code: "not_found" });
-        expect(await pending()).toEqual(before);
-        await expect(
-            ctx.inTx(async (tx) => {
-                const created = await f.surfaces.create(
-                    tx,
-                    { type: "document", name: "Rolled back" },
-                    "bob",
-                    undefined,
-                    actor,
-                );
-                expect((await f.surfaces.documentVersions(tx, created.id)).versions).toHaveLength(
-                    1,
-                );
-                throw new Error("rollback creation");
-            }),
-        ).rejects.toThrow("rollback creation");
-        expect(await f.surfaces.list(ctx)).toEqual([surface]);
-        expect(await pending()).toEqual(before);
-    });
-
-    it("gives every document tool discovery metadata and its own actual permission boundary", async () => {
-        const f = await fixture();
-        const ctx = f.db.context;
-        const kv = f.kv.scoped("document-agent");
-        await kv.write(ctx, "owner", "alice");
-        const tools = await f.hooks.tools!(ctx, { agent: { id: "admin" }, kv } as AgentModuleScope);
-        for (const name of [
-            "read_document",
-            "update_document",
-            "list_document_versions",
-            "create_document_surface",
-        ]) {
-            const tool = tools.find((entry) => entry.name === name)!;
-            expect(tool.defer, name).toBe(true);
-            expect(tool.capabilities?.length, name).toBeGreaterThan(0);
-            expect(tool.searchKeywords?.length, name).toBeGreaterThan(0);
-            const write = name === "update_document" || name === "create_document_surface";
-            expect(tool.shouldReviewInAutoMode!({}, ctx), name).toBe(write);
-            if (write)
-                expect(tool.describeAutoPermissionAction!({}, ctx)).toContain("shared data write");
-            if (name !== "create_document_surface")
-                expect(tool.shouldRunInFullAccessInAutoMode).toBeUndefined();
-        }
-        const create = tools.find((entry) => entry.name === "create_document_surface")!;
-        expect(Value.Check(create.parameters, { name: "Missing creator" })).toBe(false);
-        expect(await create.shouldRunInFullAccessInAutoMode!({}, ctx)).toBe(false);
-        f.compute.shouldReviewPath.mockResolvedValue(true);
-        expect(
-            await create.shouldRunInFullAccessInAutoMode!({ imagePath: "/outside/image.png" }, ctx),
-        ).toBe(true);
-        const call = { kv: f.kv.scoped("document-creation") } as never;
-        const input = { name: "For Bob", creatorUserId: "bob", text: "First" };
-        const surface = (await create.execute(ctx, input, call)) as Awaited<
-            ReturnType<SurfacesModule["create"]>
-        >;
-        expect(await create.execute(ctx, { ...input, text: "Retry" }, call)).toEqual(surface);
-        const document = await f.surfaces.getDocument(ctx, surface.id);
-        expect(document).toMatchObject({
-            text: "First",
-            authorUserId: "bob",
-            lastEditorUserId: "alice",
-        });
-        expect((await f.surfaces.documentVersions(ctx, surface.id)).versions).toMatchObject([
-            { actor: { userId: "alice", agentId: "admin" }, source: "tool", mutationId: null },
-        ]);
-        f.revoke();
-        await expect(create.execute(ctx, input, call)).rejects.toMatchObject({ code: "forbidden" });
-    });
-
-    it("discovers separator administration without granting filesystem access or ordinary-agent authority", async () => {
-        const f = await fixture();
-        const ctx = f.db.context;
-        const ordinary = await f.hooks.tools!(ctx, {
-            agent: { id: "ordinary" },
-        } as AgentModuleScope);
-        expect(ordinary.some((tool) => tool.name === "create_separator_surface")).toBe(false);
-        const tools = await f.hooks.tools!(ctx, { agent: { id: "admin" } } as AgentModuleScope);
-        const tool = tools.find((item) => item.name === "create_separator_surface")!;
-        expect(tool).toMatchObject({
-            defer: true,
-            durable: true,
-            transactional: true,
-            requiresAutoOrFullAccess: true,
-            capabilities: [expect.stringContaining("separator")],
-            searchKeywords: expect.arrayContaining(["create separator surface", "sidebar section"]),
-        });
-        expect(tool.shouldReviewInAutoMode!({}, ctx)).toBe(true);
-        expect(tool.shouldRunInFullAccessInAutoMode).toBeUndefined();
-        expect(tool.describeAutoPermissionAction!({ name: "Work" }, ctx)).toContain(
-            "no filesystem access",
-        );
-        expect(Value.Check(tool.parameters, { name: "Work" })).toBe(false);
-        expect(
-            Value.Check(tool.parameters, {
-                name: "Work",
-                creatorUserId: "bob",
-                imagePath: "/tmp/image.png",
-            }),
-        ).toBe(false);
-        const call = { kv: f.kv.scoped("separator-call") } as never;
-        const input = { name: "Work", creatorUserId: "bob" };
-        const created = await tool.execute(ctx, input, call);
-        expect(created).toMatchObject({
+        const list = await f.surfaces.create(ctx, { type: "todo", name: "Inbox" }, "alice");
+        const separatorId = "separatorsurface00000001";
+        const separator = {
+            id: separatorId,
             type: "separator",
+            name: "Work",
+            creatorUserId: "alice",
+            chatAgentId: null,
             image: null,
-            creatorUserId: "bob",
-            members: [{ userId: "bob" }],
+            members: [
+                {
+                    userId: "alice",
+                    joinedAt: 1,
+                    orderKey: `${list.members[0]!.orderKey}5`,
+                },
+            ],
+            updatedAt: 1,
+            version: "01890a5d-ac96-774b-bcce-b302099a8057",
+        };
+        await f.kv.write(ctx, `surface.${separatorId}`, separator);
+        expect(await f.surfaces.list(ctx)).toEqual([list]);
+        await expect(
+            f.surfaces.create(ctx, { type: "separator", name: "Again" } as never, "alice"),
+        ).rejects.toMatchObject({ code: "invalid_request" });
+        await expect(
+            f.surfaces.create(ctx, { type: "todo", id: separatorId, name: "Taken" }, "alice"),
+        ).rejects.toMatchObject({ code: "not_found" });
+        for (const action of ["join", "leave", "reorder"] as const)
+            await expect(
+                f.surfaces.changeMember(ctx, separatorId, "alice", action),
+            ).rejects.toMatchObject({ code: "not_found" });
+        await expect(
+            f.surfaces.changeMember(ctx, list.id, "alice", "reorder", separatorId),
+        ).rejects.toMatchObject({ code: "conflict" });
+        await expect(f.surfaces.listTodos(ctx, separatorId)).rejects.toMatchObject({
+            code: "not_found",
         });
-        expect(await tool.execute(ctx, input, call)).toEqual(created);
-        expect(await f.surfaces.list(ctx)).toEqual([created]);
-        f.revoke();
-        await expect(tool.execute(ctx, input, call)).rejects.toMatchObject({ code: "forbidden" });
-        expect(f.compute.resolve).not.toHaveBeenCalled();
+        await expect(f.surfaces.image(ctx, separatorId)).rejects.toMatchObject({
+            code: "not_found",
+        });
+        await expect(f.surfaces.document(ctx, separatorId)).rejects.toMatchObject({
+            code: "not_found",
+        });
+        const next = await f.surfaces.create(ctx, { type: "todo", name: "Next" }, "alice");
+        expect(next.members[0]!.orderKey > list.members[0]!.orderKey).toBe(true);
+        expect(await f.kv.read(ctx, `surface.${separatorId}`)).toEqual(separator);
+        const tools = await f.hooks.tools!(ctx, { agent: { id: "admin" } } as AgentModuleScope);
+        expect(tools.some((tool) => tool.name.includes("separator"))).toBe(false);
     });
 
     it("keeps each person's ordering independent and validates administrative targets", async () => {
@@ -332,6 +222,11 @@ describe("installation-owned Surface state", () => {
             "read_document",
             "update_document",
             "list_document_versions",
+            "list_calendar_events",
+            "create_calendar_event",
+            "update_calendar_event",
+            "delete_calendar_event",
+            "list_calendar_event_versions",
         ]);
         for (const tool of ordinary) {
             const read = tool.name.startsWith("list_") || tool.name === "read_document";

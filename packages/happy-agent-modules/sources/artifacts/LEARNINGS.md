@@ -81,3 +81,12 @@ records it with the call, so live and reloaded history agree. The reply tells th
 already sees the card, and only in this chat, so a sub-agent's artifact must be mentioned again
 by the agent the user talks to. A repeated update after an interruption reports the artifact's
 latest version, which differs only if someone changed it in between.
+
+## Artifacts sit on the host's surface
+
+Kirill saw a white strip flash beside an HTML artifact while the desktop pane resized: the viewer
+painted its own paper behind the page, and the page set no background. An artifact's slot now
+paints nothing, so the surface around it shows through, and the writing tools tell agents to leave
+`html` and `body` transparent with `color-scheme: light dark` and to keep pages flat — no card
+inside a card, no coloured stripe down a card's left edge. Those two patterns read as generated
+filler; the full rules live in `docs/DESIGN.md`.

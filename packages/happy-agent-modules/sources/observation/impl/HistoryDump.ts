@@ -98,7 +98,11 @@ export class HistoryDump {
  */
 function encodeRecord(agentId: string, message: HistoryMessage): string | undefined {
     try {
-        const record = { agentId, ...message };
+        const { error: _diagnostics, ...rest } = message;
+        const { blocks } = message;
+        const visibleBlocks = blocks.filter((block) => block.type !== "configuration");
+        if (blocks.length > 0 && visibleBlocks.length === 0) return undefined;
+        const record = { agentId, ...rest, blocks: visibleBlocks };
         record.agentId = agentId;
         return JSON.stringify(record);
     } catch {

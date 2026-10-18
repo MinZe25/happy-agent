@@ -1,8 +1,9 @@
 # Surfaces
 
-Shared typed feature instances, including todo lists, Markdown documents, contentless sidebar
-separators, and references to artifacts, bots, and tasks, with each person's sidebar order on the
-nested member record. All heads and immutable revisions live in module-owned AgentKV storage.
+Shared typed feature instances, including todo lists, collaborative documents, calendars, and
+references to artifacts, bots, and tasks, with each person's sidebar order on the nested member record. Heads and
+immutable revisions live in module-owned AgentKV storage; document change logs live in their own
+tables beside it.
 
 ```text
 HTTP / model tools -> SurfacesModule -> one composing database transaction
@@ -16,14 +17,33 @@ Agent Base's transactional settlement; image creation retains a call-stable ID a
 The admin tools check active admin authority at selection and execution. Images pass through
 Compute's filesystem boundary and bounded managed normalization, never an arbitrary served path.
 
-Separators reuse catalog creation, members, ordering, and durable events. They never accept an
-image or todo content, and the admin-only `create_separator_surface` tool has no filesystem access.
+Separators are withdrawn. Rows an earlier daemon stored stay untouched, but the catalog read
+filters them out, so listing, membership, ordering, content routes, and chats all treat their IDs
+as not found, and a creation request reusing one is refused rather than echoing it back.
 
-Document Surfaces keep a separately versioned current snapshot and permanent full revisions.
-Guarded replacements, including clearing or applying historical text, never change the catalog
-version. History listing reads a bounded range of separately stored metadata summaries, not full
-document text. Every revision retains its actor, source, and immutable mutation ID for uncertain-save
-recovery. Ordinary models can read, update, and list versions; only active admin bots create them.
+Document Surfaces are Yjs documents edited with BlockNote. `documents/` owns them: every accepted
+change is appended to a permanent log with its `seq`, actor, source, and mutation ID, and the head
+and periodic snapshots let any version be rebuilt by replaying from the nearest snapshot. Changes
+merge, so writes need no version guard; a repeated mutation ID returns its first `seq`. Markdown
+is a read-only projection made by converting the Yjs fragment through BlockNote's schema on a
+private copy, so content outside that schema is detected and left out instead of deleted. Agent
+writes compare their Markdown with the version they read, block by block, and apply only the
+difference to the current document inside the write transaction. A document stored as Markdown
+by an earlier daemon converts on first touch; its Markdown revisions stay readable.
+
+Live changes and presence ride the API's existing event stream as unjournaled frames. The module
+keeps which streams follow which documents in memory and publishes a change only after its
+transaction commits; the API checks that a stream belongs to the caller before routing to it.
+Ordinary models can read, update, and list changes; only active admin bots create documents.
+
+Calendar Surfaces hold series records, never stored occurrences. `calendar/` owns them: each
+event's current record lives in its own table with conservative instant bounds of everything the
+series can cover, so a range read filters in SQL before decoding and expands only those events.
+Expansion walks local dates in the event's own zone through `Intl`, keeps the wall-clock start
+across daylight-saving changes, skips months without the start's day, and numbers occurrences
+from the event's own timing. Every change also appends an immutable full revision, and an
+earlier state is restored by sending its fields through ordinary update. Tools speak local ISO
+8601 date-times with an IANA zone, so models never convert instants or expand repeats.
 
 Reference Surfaces store only an immutable binding to their target beside the shared record.
 Every read resolves it against the owning Artifacts, Bots, or Tasks module, so the live name,
@@ -32,7 +52,7 @@ target reads as unavailable without its ID. Shared events carry the stored recor
 the resolved projection. The three admin creation tools share the image and replay handling of
 the other typed creation tools.
 
-Every Surface type except separators can own one shared chat, created only when a person opens
+Every Surface type can own one shared chat, created only when a person opens
 it. The request reserves the agent ID, workspace ID, and folder path in `chat.*` and invokes the
 durable `surfaces.prepareChat` function in the same transaction. Preparation belongs to the
 daemon's lifetime: it makes the folder under Configuration's `Surfaces` root on the task-layout
