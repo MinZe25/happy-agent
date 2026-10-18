@@ -8,6 +8,7 @@ import {
     computePermissions,
     createHostCompute,
     createRunnerChannelPair,
+    RUNNER_PROTOCOL_VERSION,
     RunnerHost,
 } from "@slopus/happy-agent-compute";
 import { Value } from "@sinclair/typebox/value";
@@ -142,7 +143,8 @@ describe("runners", () => {
         expect(online.version > before.version).toBe(true);
         expect(online.runners[0]).toMatchObject({
             status: "connected",
-            protocol: 1,
+            // A runner from the same SDK speaks its newest protocol.
+            protocol: RUNNER_PROTOCOL_VERSION,
             reason: null,
             machine: {
                 version: "9.9.9",
