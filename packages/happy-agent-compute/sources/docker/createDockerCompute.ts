@@ -5,6 +5,7 @@ import type { Compute } from "../Compute.js";
 import { EMPTY_COMPUTE_HOST_POLICY, type ComputeHostPolicy } from "../ComputeHostPolicy.js";
 import { runCleanupSteps } from "../sandbox/impl/runCleanupSteps.js";
 import { createDockerFileSystem } from "./createDockerFileSystem.js";
+import { createDockerNetwork } from "./createDockerNetwork.js";
 import { createDockerShell } from "./createDockerShell.js";
 import { DockerEnvironment } from "./DockerEnvironment.js";
 import type { DockerExecutionConfig } from "./DockerExecutionConfig.js";
@@ -29,12 +30,12 @@ export interface DockerComputeOptions {
 
 /**
  * Creates a Docker compute: one filesystem and shell inside a container, with the working directory
- * fixed at construction.
+ * fixed at construction, and connections made from the container's own network.
  *
  * The container is resolved lazily on first use, so building a compute never blocks on the daemon.
  * Every operation brings its own immutable permission value. Disposing the compute stops every
- * command it left running and releases its container ownership; the last owner removes a managed
- * container, while a container the caller attached remains untouched.
+ * command it left running, aborts its open connections, and releases its container ownership; the
+ * last owner removes a managed container, while a container the caller attached remains untouched.
  */
 export function createDockerCompute(options: DockerComputeOptions): Compute {
     const hostPolicy = snapshotDockerHostPolicy(
@@ -52,18 +53,24 @@ export function createDockerCompute(options: DockerComputeOptions): Compute {
             : { parseNetworkConfig: options.parseNetworkConfig }),
     });
 
+    const network = createDockerNetwork(environment);
+
     return {
         id: "docker",
         kind: "docker",
         cwd: environment.config.workingDirectory,
         fs: createDockerFileSystem(environment, hostPolicy),
         shell,
+        network: { connect: network.connect },
         async dispose(_ctx: Context) {
             shell.setSessionExitListener?.(undefined);
             shell.setActiveSessionCountListener?.(undefined);
             await runCleanupSteps("Docker compute", [
                 async () => {
                     await shell.killAllSessions?.();
+                },
+                async () => {
+                    network.close();
                 },
                 () => environment.release(),
             ]);

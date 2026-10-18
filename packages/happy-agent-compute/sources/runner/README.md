@@ -126,12 +126,24 @@ A runner compute carries the filesystem and shell, plus `processes` (pipes or a 
 Git, terminals, and stdio MCP servers), `watcher`, and `network` (connections the runner makes, for
 previewing web apps it serves, and loopback listeners) over streams. A compute created with
 `docker: { image }` runs the agent's files and commands in a container of that image on the
-runner, with the folder mounted at the same path; its processes, watches, and connections still
-run on the runner itself, over the same folder. Strict services need cgroup delegation on the runner
-and are a later, additive protocol version; until then a runner compute has no `services`
-capability, and callers refuse service startup rather than falling back to an ordinary shell.
-Commands that select attached secrets are refused until the daemon can resolve them for a single
-command on the runner.
+runner, with the folder mounted at the same path. Its outbound connections are made from inside
+that container, so a preview reaches what the agent started there; its processes, watches, and
+loopback listeners still run on the runner itself, over the same folder, which is where Git and its
+credential proxy need them.
+
+Protocol version 2 changes no message: it is the promise that `net.connect` on a Docker compute
+connects inside the container. A version 1 runner connects from its own network instead, so the
+daemon refuses such a connection with `ENOTSUP` before sending anything, checking the version of the
+very connection that would carry the request. Ordinary machines connect on either version.
+
+A connection's daemon side is a half-open duplex. When both directions have finished cleanly, the
+runner is left to deliver the last bytes and end the stream itself, within thirty seconds; an error
+or an earlier destroy closes it at once.
+
+Strict services need cgroup delegation on the runner and are a later, additive protocol version;
+until then a runner compute has no `services` capability, and callers refuse service startup
+rather than falling back to an ordinary shell. Commands that select attached secrets are refused
+until the daemon can resolve them for a single command on the runner.
 
 ## Runner side
 

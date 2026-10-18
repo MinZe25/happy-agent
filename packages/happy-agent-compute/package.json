@@ -27,7 +27,7 @@
         "build": "node --eval \"import('node:fs/promises').then(({ rm }) => rm('dist', { force: true, recursive: true }))\" && tsc -p tsconfig.build.json",
         "check": "tsc --noEmit",
         "test": "vitest run --passWithNoTests",
-        "test:bun": "bun --bun node_modules/vitest/vitest.mjs run tests/host/createHostProcesses.test.ts tests/runner",
+        "test:bun": "bun --bun node_modules/vitest/vitest.mjs run tests/host/createHostProcesses.test.ts tests/runner tests/docker/impl/DockerConnection.test.ts tests/docker/createDockerNetwork.test.ts",
         "test:live": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live",
         "test:live:docker": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live/dockerBackend.live.test.ts",
         "test:live:host": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live/hostSandbox.live.test.ts",
@@ -37,7 +37,7 @@
     "dependencies": {
         "@lydell/node-pty": "1.2.0-beta.15",
         "@sinclair/typebox": "^0.34.49",
-        "@slopus/happy-agent-supervisor": "0.0.13",
+        "@slopus/happy-agent-supervisor": "0.0.16",
         "@steve.kite/stdlib": "0.0.12",
         "dockerode": "^5.0.1",
         "just-bash": "^3.0.2"
@@ -49,11 +49,11 @@
         "vitest": "^3.2.4"
     },
     "optionalDependencies": {
-        "@slopus/happy-agent-supervisor-darwin-arm64": "npm:@slopus/happy-agent-supervisor@0.0.13-darwin-arm64",
-        "@slopus/happy-agent-supervisor-darwin-x64": "npm:@slopus/happy-agent-supervisor@0.0.13-darwin-x64",
-        "@slopus/happy-agent-supervisor-linux-arm64": "npm:@slopus/happy-agent-supervisor@0.0.13-linux-arm64",
-        "@slopus/happy-agent-supervisor-linux-x64": "npm:@slopus/happy-agent-supervisor@0.0.13-linux-x64",
-        "@slopus/happy-agent-supervisor-win32-x64": "npm:@slopus/happy-agent-supervisor@0.0.13-win32-x64"
+        "@slopus/happy-agent-supervisor-darwin-arm64": "npm:@slopus/happy-agent-supervisor@0.0.16-darwin-arm64",
+        "@slopus/happy-agent-supervisor-darwin-x64": "npm:@slopus/happy-agent-supervisor@0.0.16-darwin-x64",
+        "@slopus/happy-agent-supervisor-linux-arm64": "npm:@slopus/happy-agent-supervisor@0.0.16-linux-arm64",
+        "@slopus/happy-agent-supervisor-linux-x64": "npm:@slopus/happy-agent-supervisor@0.0.16-linux-x64",
+        "@slopus/happy-agent-supervisor-win32-x64": "npm:@slopus/happy-agent-supervisor@0.0.16-win32-x64"
     },
     "engines": {
         "node": ">=22.19.0"

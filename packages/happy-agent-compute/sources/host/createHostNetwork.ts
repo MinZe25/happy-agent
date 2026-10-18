@@ -10,12 +10,21 @@ const HOST_CONNECT_TIMEOUT_MS = 30_000;
 /** Connections a listener holds for a caller that has not subscribed yet. */
 const MAX_HELD_CONNECTIONS = 64;
 
-/** Connections from this machine's own network. */
+/**
+ * Connections from this machine's own network.
+ *
+ * Connections are half-open, like TCP itself: the remote end finishing its replies does not end
+ * what the caller is still sending, and the caller ending its side still receives every reply.
+ */
 export function createHostNetwork(): ComputeNetwork {
     return {
         connect: (_ctx: Context, options: ComputeConnectOptions) =>
             new Promise<Duplex>((resolve, reject) => {
-                const socket = connect({ host: options.host, port: options.port });
+                const socket = connect({
+                    host: options.host,
+                    port: options.port,
+                    allowHalfOpen: true,
+                });
                 const timer = setTimeout(() => {
                     socket.destroy();
                     reject(

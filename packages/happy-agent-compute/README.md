@@ -107,15 +107,19 @@ machine is a runner, it has to happen there too. Three optional capabilities car
   `signal` reaches the whole process group.
 - `watcher.watch(ctx, { path, ignore })` reports changed paths in batches. A batch marked
   `overflow` means some changes were not itemized and the reader should rescan.
-- `network.connect(ctx, { host, port })` opens a TCP connection from the compute's machine, so a
-  web app listening on a runner's loopback can be proxied from the daemon. `network.listen(ctx)`
-  goes the other way: a loopback port on the compute's machine whose connections arrive at the
-  caller, which is how Git on a runner reaches a credential proxy that never leaves the daemon.
+- `network.connect(ctx, { host, port })` opens a TCP connection from the compute's own network, so
+  a web app listening on a runner's or a container's loopback can be proxied from the daemon. The
+  connection is half-open like TCP: ending the writable side sends a half-close while replies keep
+  arriving, and the remote end's half-close ends the readable side while writes continue.
+  `network.listen(ctx)` goes the other way: a loopback port on the compute's machine whose
+  connections arrive at the caller, which is how Git on a runner reaches a credential proxy that
+  never leaves the daemon.
 
 These are the product's actions, not the agent's: they take no permissions, and the agent sandbox
 does not apply to them. Callers must not hand them commands an agent chose. The host backend and
-the runner backend provide all three; a backend without one leaves it undefined, and callers
-refuse the feature rather than routing it somewhere else.
+the runner backend provide all three, and the Docker backend provides `network.connect`; a backend
+without one leaves it undefined, and callers refuse the feature rather than routing it somewhere
+else.
 
 ## The backends
 
@@ -188,6 +192,16 @@ nested namespace setup. A managed container can select an administrator-installe
 Compute never installs profiles or disables AppArmor. Missing or incompatible profiles fail closed,
 and reusing a managed container with a different requested profile is refused. Attached containers
 must already have their required profile selected at creation time.
+
+`network.connect` reaches the container's own network: its loopback, its resolver, and its Docker
+network aliases. Each connection runs the mounted supervisor's `--connect` mode with `docker exec`,
+so the image needs no network tools and no port is published. It runs outside every command
+sandbox, as the product's connection, but never outside the container. Destroying the connection
+stops the helper at once, even while the name is still resolving or the remote end ignores the
+half-close. A connection that finished cleanly in both directions keeps delivering its last bytes
+for up to thirty seconds, as TCP lingers after a close; disposing the compute stops it immediately.
+Connections need the verified read-only supervisor mount but not the nested namespaces restricted
+commands need. A container whose supervisor predates `--connect` is refused with `ENOTSUP`.
 
 ```ts
 const compute = await dockerComputeProvider.create(ctx, {
@@ -304,7 +318,7 @@ pnpm test:live         # live tests against the real host, Docker, and just-bash
 pnpm test:live:host    # one backend at a time
 pnpm test:live:docker
 pnpm test:live:just-bash
-pnpm test:bun          # processes and runners under Bun, the runtime Happy Agent ships on
+pnpm test:bun          # processes, runners, and Docker connections under Bun, which Happy Agent ships on
 ```
 
 Terminals for the product's own programs use Bun's pseudo-terminal, so their tests run only under

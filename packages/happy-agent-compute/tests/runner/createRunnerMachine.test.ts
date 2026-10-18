@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { connect, createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -41,6 +42,52 @@ describe.runIf(process.platform !== "win32")("the machines a runner builds", () 
         });
         await expect(started.exited).resolves.toEqual({ exitCode: 0, signal: null });
         await expect(readFile(join(cwd, "marker"), "utf8")).resolves.toBe("runner\n");
+        await machine.dispose(ctx);
+    });
+});
+
+describe.runIf(process.platform !== "win32")("connections from a container machine", () => {
+    it("never connects from the runner's own network, even when the container is unreachable", async () => {
+        let reachedRunner = false;
+        const server = createServer((socket) => {
+            reachedRunner = true;
+            socket.destroy();
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const port = (server.address() as AddressInfo).port;
+        const machine = createRunnerMachine(ctx, {
+            cwd: await folder(),
+            policy: {},
+            docker: { image: "happy-agent-compute-test.invalid/missing:latest" },
+        });
+
+        // The image does not exist, so the container never starts and the connection must fail
+        // rather than be made from the runner, where this port is a different program.
+        await expect(machine.network!.connect(ctx, { host: "127.0.0.1", port })).rejects.toThrow();
+        expect(reachedRunner).toBe(false);
+        await machine.dispose(ctx);
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+    }, 30_000);
+
+    it("keeps loopback listeners on the runner, where Git runs", async () => {
+        const machine = createRunnerMachine(ctx, {
+            cwd: await folder(),
+            policy: {},
+            docker: { image: "happy-agent-compute-test.invalid/missing:latest" },
+        });
+        const listener = await machine.network!.listen!(ctx);
+        const accepted = new Promise<string>((resolve) =>
+            listener.onConnection((socket) => {
+                socket.once("data", (chunk: Buffer) => resolve(chunk.toString()));
+                // Accepted connections arrive paused until their reader is ready.
+                socket.resume();
+            }),
+        );
+
+        connect({ host: "127.0.0.1", port: listener.port }).end("credential request");
+
+        await expect(accepted).resolves.toBe("credential request");
+        listener.close();
         await machine.dispose(ctx);
     });
 });

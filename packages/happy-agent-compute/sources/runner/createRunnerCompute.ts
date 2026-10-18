@@ -24,14 +24,15 @@ import type {
     RunnerResponse,
     RunnerStream,
 } from "./RunnerLink.js";
-import type {
-    RunnerEvent,
-    RunnerEventParams,
-    RunnerMethod,
-    RunnerMethodParams,
-    RunnerMethodResult,
-    RunnerDocker,
-    RunnerProjectPolicy,
+import {
+    RUNNER_DOCKER_NETWORK_PROTOCOL_VERSION,
+    type RunnerEvent,
+    type RunnerEventParams,
+    type RunnerMethod,
+    type RunnerMethodParams,
+    type RunnerMethodResult,
+    type RunnerDocker,
+    type RunnerProjectPolicy,
 } from "./runnerProtocol.js";
 
 export interface RunnerComputeOptions {
@@ -44,7 +45,8 @@ export interface RunnerComputeOptions {
     readonly policy?: RunnerProjectPolicy;
     /**
      * Run agent work in a container of this image on the runner, with `cwd` mounted at the same
-     * path. The machine's processes, watches, and connections still run on the runner itself.
+     * path. Outbound connections are made from inside the container; the machine's processes,
+     * watches, and loopback listeners still run on the runner itself.
      */
     readonly docker?: RunnerDocker;
     /** How long a call waits for a runner that is away before failing. Defaults to ten seconds. */
@@ -185,6 +187,7 @@ class RunnerRemoteCompute implements RunnerComputeHooks {
                 for (let attempt = 0; ; attempt++) {
                     if (this.#disposed) throw new Error("This runner machine has been disposed.");
                     const connection = await this.#link.connection(this.#reconnectWaitMs);
+                    this.#assertConnectsInside(connection, method);
                     await this.#ensureCreated(connection);
                     let stream!: RunnerStream;
                     const own = handlers(() => stream);
@@ -236,6 +239,23 @@ class RunnerRemoteCompute implements RunnerComputeHooks {
                     .catch((error: unknown) => this.#warn("signal-failed", error));
             },
         };
+    }
+
+    /**
+     * Refuse a connection the runner would make from the wrong machine. A runner older than
+     * protocol version 2 connects from its own network even for a container, so a preview would
+     * reach the runner's loopback instead of the agent's. The check is made on the connection that
+     * then carries the request, so a reconnect cannot slip an older runner in between.
+     */
+    #assertConnectsInside(connection: RunnerConnection, method: string): void {
+        if (method !== "net.connect" || this.#docker === undefined) return;
+        if (connection.protocol >= RUNNER_DOCKER_NETWORK_PROTOCOL_VERSION) return;
+        throw Object.assign(
+            new Error(
+                "This runner is too old to connect from inside the agent's container. Update the runner's Happy Agent.",
+            ),
+            { code: "ENOTSUP" },
+        );
     }
 
     #fileSystem(cwd: string, home: string | undefined): ComputeFileSystem {

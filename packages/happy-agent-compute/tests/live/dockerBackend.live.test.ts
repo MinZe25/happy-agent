@@ -1,9 +1,12 @@
-import { randomUUID } from "node:crypto";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Duplex } from "node:stream";
 
 import Dockerode from "dockerode";
+import { resolveLinuxSupervisorBinary } from "@slopus/happy-agent-supervisor";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -21,6 +24,8 @@ const ctx: Context = createRootContext().named("happy-agent-compute-docker-live-
 const computes = new Set<Compute>();
 const temporaryDirectories = new Set<string>();
 const cleanupContainers = new Set<string>();
+const cleanupNetworks = new Set<string>();
+const cleanupHostServers = new Set<() => Promise<void>>();
 
 describeLive("live Docker compute boundary", () => {
     beforeAll(async () => {
@@ -40,23 +45,7 @@ describeLive("live Docker compute boundary", () => {
         }
     }, 30_000);
 
-    afterEach(async () => {
-        await Promise.all([...computes].map((compute) => compute.dispose(ctx)));
-        computes.clear();
-        await Promise.all(
-            [...cleanupContainers].map((name) =>
-                docker
-                    .getContainer(name)
-                    .remove({ force: true })
-                    .catch(() => undefined),
-            ),
-        );
-        cleanupContainers.clear();
-        await Promise.all(
-            [...temporaryDirectories].map((path) => rm(path, { force: true, recursive: true })),
-        );
-        temporaryDirectories.clear();
-    });
+    afterEach(cleanUp);
 
     it("contains a restricted command while preserving workspace writes", async () => {
         const { compute } = await managedCompute();
@@ -272,6 +261,244 @@ describeLive("live Docker compute boundary", () => {
         await expect(container.inspect()).resolves.toMatchObject({ State: { Running: true } });
     }, 60_000);
 });
+
+// Connections are the product's, not the agent's: they come from inside the container, outside
+// any command sandbox, through the mounted supervisor's `--connect` mode.
+describeLive("live Docker compute connections", () => {
+    afterEach(cleanUp);
+
+    it("reaches the container's own loopback, not the host's on the same port", async () => {
+        const hostPort = await hostSentinel("host");
+        const { compute, hostWorkspace } = await managedCompute();
+        await startContainerServer(compute, hostWorkspace, [
+            "reply",
+            "127.0.0.1",
+            hostPort,
+            "container",
+        ]);
+
+        const socket = await connectWhenListening(compute, "127.0.0.1", hostPort);
+
+        await expect(readAll(socket).then(String)).resolves.toBe("container");
+    }, 60_000);
+
+    it("delivers a large binary reply after the caller finishes sending", async () => {
+        const { compute, hostWorkspace } = await managedCompute();
+        await startContainerServer(compute, hostWorkspace, ["echo", "127.0.0.1", 7101]);
+        const request = randomBytes(6 * 1024 * 1024 + 11);
+
+        const socket = await connectWhenListening(compute, "127.0.0.1", 7101);
+        const replied = readAll(socket);
+        socket.end(request);
+
+        expect(digest(await replied)).toBe(digest(request));
+    }, 60_000);
+
+    it("keeps sending a large binary body after the remote end finishes", async () => {
+        const { compute, hostWorkspace } = await managedCompute();
+        await startContainerServer(compute, hostWorkspace, ["greet", "127.0.0.1", 7102]);
+        const request = randomBytes(6 * 1024 * 1024 + 13);
+
+        const socket = await connectWhenListening(compute, "127.0.0.1", 7102);
+        await expect(readAll(socket).then(String)).resolves.toBe("greeting");
+        socket.end(request);
+
+        const received = await waitFor(async () => {
+            const text = await readFile(join(hostWorkspace, "received-7102"), "utf8").catch(
+                () => "",
+            );
+            return text.length === 64 ? text : undefined;
+        });
+        expect(received).toBe(digest(request));
+    }, 60_000);
+
+    it("stops the helper in the container when aborted while the remote end ignores the half-close", async () => {
+        const { compute, hostWorkspace } = await managedCompute();
+        await startContainerServer(compute, hostWorkspace, ["hold", "127.0.0.1", 7103]);
+
+        const socket = await connectWhenListening(compute, "127.0.0.1", 7103);
+        socket.end("unanswered");
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(await connectHelpers(compute)).toBe(1);
+        socket.destroy();
+
+        await waitFor(async () => ((await connectHelpers(compute)) === 0 ? true : undefined));
+    }, 60_000);
+
+    it("resolves names the container's own DNS knows, such as a network alias", async () => {
+        const network = `happy-compute-net-${randomUUID()}`;
+        await docker.createNetwork({ Name: network });
+        cleanupNetworks.add(network);
+        const peer = `happy-compute-peer-${randomUUID()}`;
+        cleanupContainers.add(peer);
+        const peerContainer = await docker.createContainer({
+            name: peer,
+            Image: image,
+            Entrypoint: ["node", "-e"],
+            Cmd: [
+                'require("node:net").createServer((socket) => socket.end("peer")).listen(8080, "0.0.0.0")',
+            ],
+            HostConfig: { NetworkMode: network },
+            NetworkingConfig: {
+                EndpointsConfig: { [network]: { Aliases: ["peer-service.internal"] } },
+            },
+        });
+        await peerContainer.start();
+        const client = `happy-compute-client-${randomUUID()}`;
+        cleanupContainers.add(client);
+        const architecture = process.arch === "arm64" ? "arm64" : "x64";
+        const clientContainer = await docker.createContainer({
+            name: client,
+            Image: image,
+            Entrypoint: ["/bin/sh", "-c"],
+            Cmd: ["trap : TERM INT; while :; do sleep 3600; done"],
+            HostConfig: {
+                NetworkMode: network,
+                Mounts: [
+                    {
+                        Type: "bind",
+                        Source: resolveLinuxSupervisorBinary(architecture),
+                        Target: "/tools/happy-agent-sandbox",
+                        ReadOnly: true,
+                    },
+                ],
+            },
+            WorkingDir: "/workspace",
+        });
+        await clientContainer.start();
+        const compute = createDockerCompute({
+            client: docker,
+            docker: { container: client, workingDirectory: "/workspace", architecture },
+            sessionId: randomUUID(),
+        });
+        computes.add(compute);
+
+        const socket = await connectWhenListening(compute, "peer-service.internal", 8080);
+
+        await expect(readAll(socket).then(String)).resolves.toBe("peer");
+    }, 60_000);
+});
+
+async function cleanUp(): Promise<void> {
+    await Promise.all([...computes].map((compute) => compute.dispose(ctx)));
+    computes.clear();
+    await Promise.all(
+        [...cleanupContainers].map((name) =>
+            docker
+                .getContainer(name)
+                .remove({ force: true })
+                .catch(() => undefined),
+        ),
+    );
+    cleanupContainers.clear();
+    await Promise.all(
+        [...cleanupNetworks].map((name) =>
+            docker
+                .getNetwork(name)
+                .remove()
+                .catch(() => undefined),
+        ),
+    );
+    cleanupNetworks.clear();
+    await Promise.all([...cleanupHostServers].map((close) => close()));
+    cleanupHostServers.clear();
+    await Promise.all(
+        [...temporaryDirectories].map((path) => rm(path, { force: true, recursive: true })),
+    );
+    temporaryDirectories.clear();
+}
+
+/** One small program for the cases above, run inside the container from the mounted workspace. */
+const CONTAINER_SERVER = `
+import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+
+const [mode, host, port, reply] = process.argv.slice(2);
+createServer({ allowHalfOpen: true }, (socket) => {
+    if (mode === "reply") return void socket.end(reply);
+    if (mode === "hold") return void socket.resume();
+    const chunks = [];
+    socket.on("data", (chunk) => chunks.push(chunk));
+    if (mode === "greet") socket.end("greeting");
+    socket.on("end", () => {
+        const body = Buffer.concat(chunks);
+        if (mode === "echo") socket.end(body);
+        if (mode === "greet") {
+            const digest = createHash("sha256").update(body).digest("hex");
+            writeFileSync("/workspace/received-" + port, digest);
+        }
+    });
+}).listen(Number(port), host);
+`;
+
+async function startContainerServer(
+    compute: Compute,
+    hostWorkspace: string,
+    args: ReadonlyArray<string | number>,
+): Promise<void> {
+    await writeFile(join(hostWorkspace, "server.mjs"), CONTAINER_SERVER);
+    await compute.shell.startSession({
+        command: `node /workspace/server.mjs ${args.map((arg) => shellQuote(String(arg))).join(" ")}`,
+        permissions: computePermissions("full_access"),
+    });
+}
+
+/** Connect once the program inside the container listens; a refusal means not yet. */
+async function connectWhenListening(compute: Compute, host: string, port: number): Promise<Duplex> {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+        try {
+            return await compute.network!.connect(ctx, { host, port });
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            const retry = code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EAI_AGAIN";
+            if (!retry || Date.now() > deadline) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+    }
+}
+
+/** How many `--connect` helpers run in the container. The bracket keeps grep from counting itself. */
+async function connectHelpers(compute: Compute): Promise<number> {
+    const result = await compute.shell.run({
+        command:
+            'for f in /proc/[0-9]*/cmdline; do tr "\\0" " " < "$f"; echo; done 2>/dev/null | grep -c -- "--connec[t]" || true',
+        permissions: computePermissions("full_access"),
+    });
+    return Number(result.stdout.trim());
+}
+
+/** A server on the host's loopback that answers with `reply`, to show which machine was reached. */
+async function hostSentinel(reply: string): Promise<number> {
+    const server = createServer((socket) => socket.end(reply));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanupHostServers.add(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    return (server.address() as AddressInfo).port;
+}
+
+async function waitFor<T>(check: () => Promise<T | undefined>, timeoutMs = 20_000): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const value = await check();
+        if (value !== undefined) return value;
+        if (Date.now() > deadline) throw new Error("The expected state never arrived.");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+}
+
+function readAll(socket: Duplex): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+        socket.once("end", () => resolve(Buffer.concat(chunks)));
+        socket.once("error", reject);
+    });
+}
+
+function digest(bytes: Buffer): string {
+    return createHash("sha256").update(bytes).digest("hex");
+}
 
 async function managedCompute(name = `happy-compute-live-${randomUUID()}`): Promise<{
     compute: Compute;

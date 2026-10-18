@@ -30,6 +30,11 @@ type StreamParams<Method extends StreamMethod> = Omit<
 
 /** Connections a listener holds for a caller that has not subscribed yet. */
 const MAX_HELD_CONNECTIONS = 64;
+/**
+ * How long a connection that finished in both directions may keep delivering what it had already
+ * sent before the runner is told to drop it, as TCP lingers after a close.
+ */
+const RUNNER_SOCKET_LINGER_MS = 30_000;
 
 /** How the stream capabilities reach their runner compute. */
 export interface RunnerStreamStarter {
@@ -304,6 +309,8 @@ class RunnerSocket extends Duplex {
     #handle: (() => RunnerStream) | undefined;
     #unacknowledged = 0;
     #ended = false;
+    #exited = false;
+    #linger: ReturnType<typeof setTimeout> | undefined;
 
     attach(stream: RunnerStream): void {
         this.#stream = stream;
@@ -321,6 +328,7 @@ class RunnerSocket extends Duplex {
                 this.push(null);
             },
             exit: ({ error }) => {
+                this.#finished();
                 if (error !== undefined) {
                     this.destroy(error);
                     return;
@@ -330,7 +338,10 @@ class RunnerSocket extends Duplex {
                     this.push(null);
                 }
             },
-            lost: (reason) => this.destroy(new Error(reason)),
+            lost: (reason) => {
+                this.#finished();
+                this.destroy(new Error(reason));
+            },
         };
     }
 
@@ -359,8 +370,26 @@ class RunnerSocket extends Duplex {
         callback();
     }
 
+    /**
+     * Both directions finishing destroys this side at once, while bytes written last may still be
+     * on their way through the runner's window. Closing the stream then would drop them, so a
+     * connection that finished cleanly is left to end on the runner by itself, within a bound.
+     * Anything else — an error, or a destroy before both sides finished — stops it now.
+     */
     override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-        (this.#stream ?? this.#handle?.())?.close();
+        const stream = this.#stream ?? this.#handle?.();
+        const finishedCleanly = error === null && this.#ended && this.writableFinished;
+        if (!finishedCleanly || this.#exited) {
+            stream?.close();
+        } else {
+            this.#linger = setTimeout(() => stream?.close(), RUNNER_SOCKET_LINGER_MS);
+            this.#linger.unref?.();
+        }
         callback(error);
+    }
+
+    #finished(): void {
+        this.#exited = true;
+        clearTimeout(this.#linger);
     }
 }

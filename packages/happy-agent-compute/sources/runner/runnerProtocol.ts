@@ -8,8 +8,14 @@ import { computePermissionsSchema } from "../ComputePermissions.js";
  * Versions only grow. A daemon and a runner each support a contiguous range and use the highest
  * version both understand; every later version adds optional fields, methods, and events that an
  * older peer never sends and safely ignores. Version 1 carries filesystems and shells.
+ *
+ * Version 2 changes no message. It promises that `net.connect` on a compute created with `docker`
+ * connects from inside that container; a version 1 runner connects from its own network instead,
+ * so a daemon refuses such a connection on a version 1 link rather than reach the wrong machine.
  */
-export const RUNNER_PROTOCOL_VERSION = 1;
+export const RUNNER_PROTOCOL_VERSION = 2;
+/** The first version whose `net.connect` on a Docker compute connects inside the container. */
+export const RUNNER_DOCKER_NETWORK_PROTOCOL_VERSION = 2;
 /** The oldest protocol version this package still speaks. */
 export const MIN_RUNNER_PROTOCOL_VERSION = 1;
 
@@ -70,7 +76,8 @@ export type RunnerStreamChannel = Static<typeof runnerStreamChannelSchema>;
 
 /**
  * Where a compute's agent work runs in a container on the runner: the image, with the compute's
- * folder mounted at the same path. Git, terminals, and connections stay on the runner itself.
+ * folder mounted at the same path. Outbound connections are made from inside the container from
+ * protocol version 2; Git, terminals, watches, and loopback listeners stay on the runner itself.
  */
 export const runnerDockerSchema = Type.Object(
     { image: Type.String({ minLength: 1, maxLength: 512, pattern: "^[^\\u0000-\\u0020]+$" }) },

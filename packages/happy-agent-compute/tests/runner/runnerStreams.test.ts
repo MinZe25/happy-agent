@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import { duplexPair, type Duplex } from "node:stream";
 
 import { createRootContext, type Context } from "@steve.kite/stdlib";
@@ -256,6 +257,67 @@ describe.runIf(process.platform !== "win32")("connections from a runner", () => 
         await expect(reply).resolves.toBe("HELLO FROM THE DAEMON");
     });
 
+    it("keeps sending after the remote end finishes, on the runner's real network", async () => {
+        // Larger than the window, read late: the daemon's side is done long before the runner is.
+        const request = randomBytes(4 * 1024 * 1024 + 7);
+        const received = deferred<Buffer>();
+        const port = await listenOnLoopback((socket) => {
+            socket.end("greeting");
+            socket.pause();
+            setTimeout(() => {
+                void readBytes(socket).then(received.resolve, received.reject);
+                socket.resume();
+            }, 300);
+        });
+        const { compute } = await runner();
+
+        const socket = await compute.network!.connect(ctx, { host: "127.0.0.1", port });
+        await expect(readAll(socket)).resolves.toBe("greeting");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        socket.end(request);
+
+        expect(digest(await received.promise)).toBe(digest(request));
+    });
+
+    it("delivers the whole reply after the daemon finishes sending, on the runner's real network", async () => {
+        const request = randomBytes(1024 * 1024 + 3);
+        const reply = randomBytes(2 * 1024 * 1024 + 11);
+        let received: Buffer | undefined;
+        const port = await listenOnLoopback(async (socket) => {
+            received = await readBytes(socket);
+            socket.end(reply);
+        });
+        const { compute } = await runner();
+
+        const socket = await compute.network!.connect(ctx, { host: "127.0.0.1", port });
+        const replied = readBytes(socket);
+        socket.end(request);
+
+        expect(digest(await replied)).toBe(digest(reply));
+        expect(digest(received!)).toBe(digest(request));
+    });
+
+    it("drops the runner's connection when the daemon aborts it", async () => {
+        const accepted = deferred<Socket>();
+        const port = await listenOnLoopback((socket) => {
+            socket.resume();
+            accepted.resolve(socket);
+        });
+        const { compute } = await runner();
+
+        const socket = await compute.network!.connect(ctx, { host: "127.0.0.1", port });
+        socket.write("partial");
+        const remote = await accepted.promise;
+        socket.destroy();
+
+        // The daemon never ended its side, so the remote end's own writes now meet a closed socket.
+        const closed = new Promise<void>((resolve) => remote.once("close", resolve));
+        remote.on("error", () => undefined);
+        const probe = setInterval(() => remote.write("probe"), 20);
+        await closed;
+        clearInterval(probe);
+    });
+
     it("brings connections the runner accepts back to the daemon", async () => {
         const { compute, dial } = await runner({}, { echo: true });
 
@@ -407,6 +469,36 @@ async function collect(started: ComputeProcess) {
     return { bytes, stdout: bytes.toString(), stderr: Buffer.concat(stderr).toString(), exit };
 }
 
+/** A real TCP server on this machine's loopback, which is also the in-process runner's. */
+async function listenOnLoopback(
+    onConnection: (socket: Socket) => void | Promise<void>,
+): Promise<number> {
+    const sockets = new Set<Socket>();
+    const server = createServer({ allowHalfOpen: true }, (socket) => {
+        sockets.add(socket);
+        socket.once("close", () => sockets.delete(socket));
+        void onConnection(socket);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+        () =>
+            new Promise<void>((resolve) => {
+                for (const socket of sockets) socket.destroy();
+                server.close(() => resolve());
+            }),
+    );
+    return (server.address() as AddressInfo).port;
+}
+
+function readBytes(socket: Duplex): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+        socket.once("end", () => resolve(Buffer.concat(chunks)));
+        socket.once("error", reject);
+    });
+}
+
 function readAll(socket: Duplex): Promise<string> {
     return new Promise((resolve, reject) => {
         let text = "";
@@ -432,4 +524,19 @@ async function waitFor(check: () => boolean, timeoutMs = 5_000): Promise<void> {
 
 function delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A promise settled from outside, as `Promise.withResolvers` does on ES2024. */
+function deferred<T>(): {
+    promise: Promise<T>;
+    resolve(value: T): void;
+    reject(error: unknown): void;
+} {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((done, fail) => {
+        resolve = done;
+        reject = fail;
+    });
+    return { promise, resolve, reject };
 }

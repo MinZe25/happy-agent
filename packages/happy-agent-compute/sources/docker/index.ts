@@ -1,7 +1,8 @@
-/** The Docker compute backend: a filesystem and shell inside a container. */
+/** The Docker compute backend: a filesystem, shell, and connections inside a container. */
 
 export { createDockerCompute, type DockerComputeOptions } from "./createDockerCompute.js";
 export { createDockerFileSystem } from "./createDockerFileSystem.js";
+export { createDockerNetwork, type DockerNetwork } from "./createDockerNetwork.js";
 export { createDockerShell, type DockerShellOptions } from "./createDockerShell.js";
 export { DockerEnvironment } from "./DockerEnvironment.js";
 export {

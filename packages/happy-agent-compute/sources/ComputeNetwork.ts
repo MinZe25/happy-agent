@@ -32,7 +32,14 @@ export interface ComputeListener {
  * applications; it is not an agent tool, and the agent sandbox does not apply.
  */
 export interface ComputeNetwork {
-    /** Open a TCP connection. Resolves once it is established; rejects when it cannot be. */
+    /**
+     * Open a TCP connection. Resolves once it is established; rejects when it cannot be, with a
+     * Node-style code such as `ECONNREFUSED`, `ENOTFOUND`, `ETIMEDOUT`, or `ENOTSUP`.
+     *
+     * The duplex is half-open, as TCP is: ending it sends a half-close while replies keep arriving,
+     * the remote end's half-close ends its readable side while writes continue, and destroying it
+     * aborts the connection.
+     */
     connect(ctx: Context, options: ComputeConnectOptions): Promise<Duplex>;
     /**
      * Listen on the compute's loopback. This is how a program on a remote machine reaches back to

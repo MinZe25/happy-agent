@@ -24,6 +24,15 @@ Run the host lane outside an already restricted process. macOS Seatbelt and the 
 cannot necessarily nest inside an agent or CI runner sandbox. Run the Docker lane where the Docker
 socket is available.
 
+`tests/docker/createDockerNetwork.test.ts` runs the supervisor's real `--connect` helper as a
+local process in place of `docker exec`. It uses the installed supervisor artifact; set
+`HAPPY_AGENT_COMPUTE_SUPERVISOR_BINARY` to a locally built binary to test a supervisor change before
+it is published. Its scripted attach cases deliver READY together with a failure, an ended
+transport, or the remote half-close in one Docker read, before the caller can listen for errors.
+The live Docker lane covers what only a real container proves: the container's
+loopback instead of the host's on the same port, a Docker network alias, both half-close orders
+with large binary bodies, and the helper process leaving the container after an abort.
+
 When the opt-in is absent, live cases are reported as skipped. When it is present, a missing OS
 sandbox, Docker daemon, or Docker image throws from setup and fails the suite. A live prerequisite
 must never turn into a passing assertion.

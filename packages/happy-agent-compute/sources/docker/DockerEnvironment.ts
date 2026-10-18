@@ -43,6 +43,7 @@ export class DockerEnvironment {
     readonly #sessionId: string;
     #containerPromise: Promise<Dockerode.Container> | undefined;
     #supervisorBinaryPromise: Promise<string> | undefined;
+    #supervisorMountPromise: Promise<string> | undefined;
     #managedOwnership: ManagedContainerOwnership | undefined;
     #releasePromise: Promise<void> | undefined;
     #released = false;
@@ -92,6 +93,23 @@ export class DockerEnvironment {
             },
         );
         return this.#supervisorBinaryPromise;
+    }
+
+    /**
+     * Returns the in-container supervisor path after proving it is the read-only mount of the
+     * installed artifact, without proving that it can establish a sandbox. Connections use the
+     * supervisor's `--connect` mode, which runs outside every command sandbox, so they need the
+     * trusted binary but not the nested namespaces restricted commands do.
+     */
+    supervisorMount(): Promise<string> {
+        if (this.#released) {
+            return Promise.reject(new Error("The Docker environment has already been released."));
+        }
+        this.#supervisorMountPromise ??= this.#resolveSupervisorMount().catch((error: unknown) => {
+            this.#supervisorMountPromise = undefined;
+            throw error;
+        });
+        return this.#supervisorMountPromise;
     }
 
     /**
@@ -287,7 +305,7 @@ export class DockerEnvironment {
         return container;
     }
 
-    async #resolveSupervisorBinary(): Promise<string> {
+    async #resolveSupervisorMount(): Promise<string> {
         const container = await this.container();
         const details = await container.inspect();
         const architecture = resolveConfiguredLinuxArchitecture(this.config.architecture);
@@ -303,10 +321,17 @@ export class DockerEnvironment {
             mount.Source !== expectedSource
         ) {
             throw new Error(
-                `Restricted Docker commands require a read-only bind mount at ${DOCKER_SUPERVISOR_PATH}. ` +
+                `Docker computes require a read-only bind mount at ${DOCKER_SUPERVISOR_PATH}. ` +
                     `Restart the container with the ${architecture} static Linux supervisor mounted directly from ${expectedSource}.`,
             );
         }
+        return DOCKER_SUPERVISOR_PATH;
+    }
+
+    async #resolveSupervisorBinary(): Promise<string> {
+        await this.supervisorMount();
+        const container = await this.container();
+        const architecture = resolveConfiguredLinuxArchitecture(this.config.architecture);
         const result = await runDockerExec(container, [
             "/bin/sh",
             "-c",

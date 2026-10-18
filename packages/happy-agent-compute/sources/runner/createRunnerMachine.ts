@@ -26,8 +26,10 @@ export interface RunnerMachineOptions {
  *
  * An ordinary request is the host compute, behind the native supervisor. A request naming a Docker
  * image runs the agent's files and commands in a container of that image with the folder mounted
- * at the same path, while the product's own programs, watches, and connections — Git, terminals,
- * previews — stay on the runner, over the same folder.
+ * at the same path. Outbound connections are made from inside that container, so a preview reaches
+ * what the agent started there. The product's own programs, watches, and loopback listeners — Git,
+ * terminals, and the credential proxy Git reaches back through — stay on the runner, over the same
+ * folder.
  */
 export function createRunnerMachine(
     ctx: Context,
@@ -65,11 +67,14 @@ export function createRunnerMachine(
         sessionId: randomUUID(),
         hostPolicy,
     });
+    const connect = container.network?.connect;
+    if (connect === undefined) throw new Error("Docker computes must make their own connections.");
+    const listen = host.network?.listen;
     return {
         ...container,
         ...(host.processes === undefined ? {} : { processes: host.processes }),
         ...(host.watcher === undefined ? {} : { watcher: host.watcher }),
-        ...(host.network === undefined ? {} : { network: host.network }),
+        network: { connect, ...(listen === undefined ? {} : { listen }) },
         async dispose(disposeCtx: Context) {
             await runCleanupSteps("Runner container machine", [
                 () => container.dispose(disposeCtx),

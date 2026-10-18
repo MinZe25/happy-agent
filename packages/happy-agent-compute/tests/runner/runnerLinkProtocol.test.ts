@@ -128,6 +128,94 @@ describe("the daemon's side of a runner connection", () => {
     });
 });
 
+/**
+ * A runner that speaks only protocol version 1 makes `net.connect` from its own network even for a
+ * container. Previewing an agent's container through it would reach the runner's loopback instead,
+ * so the daemon refuses before sending anything.
+ */
+describe("connections into a container on a runner", () => {
+    it.each([
+        ["refuses a Docker machine on a version 1 runner", 1, true, false],
+        ["connects a Docker machine on a version 2 runner", 2, true, true],
+        ["still connects an ordinary machine on a version 1 runner", 1, false, true],
+    ])("%s", async (_name, protocol, docker, sent) => {
+        const runner = fakeRunner();
+        const daemon = link();
+        const accepted = daemon.accept(runner.daemonEnd);
+        await runner.handshake(protocol);
+        await accepted;
+        runner.answer((request) =>
+            request.method === "compute.create"
+                ? {
+                      cwd: "/work",
+                      kind: docker ? "docker" : "host",
+                      supportsSessionInput: true,
+                      retained: false,
+                  }
+                : {},
+        );
+        const compute = await createRunnerCompute(ctx, {
+            link: daemon,
+            computeId: "agent-1",
+            cwd: "/work",
+            ...(docker ? { docker: { image: "ghcr.io/acme/dev:latest" } } : {}),
+        });
+
+        const connecting = compute.network!.connect(ctx, { host: "localhost", port: 3000 });
+
+        if (sent) {
+            const socket = await connecting;
+            socket.destroy();
+        } else {
+            await expect(connecting).rejects.toMatchObject({ code: "ENOTSUP" });
+        }
+        const methods = runner.received.flatMap((frame) =>
+            frame.type === "request" ? [frame.method] : [],
+        );
+        expect(methods.includes("net.connect")).toBe(sent);
+    });
+
+    it("checks the connection that carries the request, not the one before a reconnect", async () => {
+        const daemon = link();
+        const modern = fakeRunner();
+        const acceptedModern = daemon.accept(modern.daemonEnd);
+        await modern.handshake(2);
+        await acceptedModern;
+        modern.answer(() => ({
+            cwd: "/work",
+            kind: "docker",
+            supportsSessionInput: true,
+            retained: false,
+        }));
+        const compute = await createRunnerCompute(ctx, {
+            link: daemon,
+            computeId: "agent-1",
+            cwd: "/work",
+            docker: { image: "ghcr.io/acme/dev:latest" },
+        });
+
+        // The runner is replaced by an older one before the preview connects.
+        const older = fakeRunner();
+        const acceptedOlder = daemon.accept(older.daemonEnd);
+        await older.handshake(1);
+        await acceptedOlder;
+        older.answer(() => ({
+            cwd: "/work",
+            kind: "docker",
+            supportsSessionInput: true,
+            retained: false,
+        }));
+
+        await expect(
+            compute.network!.connect(ctx, { host: "localhost", port: 3000 }),
+        ).rejects.toMatchObject({ code: "ENOTSUP" });
+        const methods = [...modern.received, ...older.received].flatMap((frame) =>
+            frame.type === "request" ? [frame.method] : [],
+        );
+        expect(methods).not.toContain("net.connect");
+    });
+});
+
 function link(): RunnerLink {
     const created = new RunnerLink(ctx, { name: "Build box", instanceId: "daemon-process" });
     links.push(created);
@@ -157,8 +245,8 @@ function fakeRunner() {
         answer: (respond: (request: { method: string; params: unknown }) => unknown) => {
             answer = respond;
         },
-        async handshake() {
-            send({ type: "hello", protocol: { min: 1, max: 1 }, runner: identity });
+        async handshake(protocol = 1) {
+            send({ type: "hello", protocol: { min: 1, max: protocol }, runner: identity });
             await waitFor(() => received.some((frame) => frame.type === "welcome"));
             send({ type: "ready", epoch: "epoch-1", computes: [], streams: [] });
         },
