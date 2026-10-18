@@ -531,6 +531,7 @@ describe("ClaudeSession", () => {
     it("marks trailing tool results complete before requesting continuation", async () => {
         let capturedPrompt: unknown;
         let capturedEntries: unknown;
+        let capturedResumeSessionAt: string | undefined;
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const session = new ClaudeSession("tool-result-session", {
@@ -543,6 +544,7 @@ describe("ClaudeSession", () => {
                         projectKey: "test",
                         sessionId: parameters.options.resume ?? "tool-result-session",
                     });
+                    capturedResumeSessionAt = parameters.options?.resumeSessionAt;
                     if (typeof parameters.prompt !== "string") {
                         capturedPrompt = (await parameters.prompt[Symbol.asyncIterator]().next())
                             .value;
@@ -605,6 +607,12 @@ describe("ClaudeSession", () => {
             type: "user",
             message: { content: "Continue from the supplied tool result." },
         });
+        // The replay ends on the tool result, so it resumes there and cuts off the synthetic
+        // assistant turn Claude Code would otherwise insert after it.
+        expect(capturedResumeSessionAt).toBe(
+            (capturedEntries as Array<{ uuid: string }> | undefined)?.at(-1)?.uuid,
+        );
+        expect(capturedResumeSessionAt).toEqual(expect.any(String));
     });
 
     it("replays a compaction summary followed only by a system notice", async () => {

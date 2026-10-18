@@ -245,70 +245,101 @@ describe("Claude provider golden", () => {
         }
 
         expect(exchangeIndex).toBe(golden.exchanges.length);
-        expect(requests).toEqual(
-            golden.exchanges.map((exchange: GoldenExchange, index: number) => {
-                const expectedBody = structuredClone(exchange.request.body);
-                // The original capture predates SDK 0.3.251, which now retains the
-                // first assistant's signed thinking when replaying the model switch
-                // and compaction turns. Keep the capture unchanged and require this
-                // exact additional block; all other request fields still match it.
-                if (index === 3 || index === 4) {
-                    expect(expectedBody.messages[1]).toMatchObject({
-                        role: "assistant",
-                        content: [{ type: "tool_use" }],
-                    });
-                    expectedBody.messages[1].content.unshift({
-                        type: "thinking",
-                        thinking: "",
-                        signature: "<SIGNATURE>",
-                    });
-                }
-                // The capture also predates Claude Code 2.1.280, which no longer folds the
-                // current-date reminder into the first user turn. It records environment,
-                // model, session-context, and date attachments after the first prompt and
-                // renders them as one system message directly after that turn: merged plain
-                // text for Opus 4.8, three reminders for Sonnet 5. The first user turn becomes
-                // a bare string and the first cache breakpoint moves onto the system message.
-                // Rig's replay reproduces the same attachments so a rebuilt session sends the
-                // same bytes; the recreation-cache test proves that against the live query.
-                // Keep the capture unchanged and require these exact shapes. A replayed native
-                // compaction summary is sent exactly as captured: Claude Code 2.1.280 appended
-                // a trailing newline and a continuation block to it, and 2.1.284 no longer does.
-                const model =
-                    index < 3 ? golden.scenario.initialModel : golden.scenario.switchedModel;
-                const environmentText = renderClaudeEnvironmentMessage(
-                    claudeSessionAttachments({
-                        cwd: process.cwd(),
-                        env: providerEnv,
-                        model: resolveClaudeModelId(model),
-                    }),
-                    index >= 3,
-                );
-                const firstTurn = expectedBody.messages[0];
-                expect(firstTurn.content[0].text).toContain("# currentDate");
-                firstTurn.content.shift();
-                const breakpointOnFirstTurn = firstTurn.content[0].cache_control !== undefined;
-                delete firstTurn.content[0].cache_control;
-                if (firstTurn.content.length === 1) firstTurn.content = firstTurn.content[0].text;
-                expectedBody.messages.splice(1, 0, {
-                    role: "system",
-                    content: breakpointOnFirstTurn
-                        ? [
-                              {
-                                  type: "text",
-                                  text: environmentText,
-                                  cache_control: { type: "ephemeral" },
-                              },
-                          ]
-                        : environmentText,
+        const expectedRequests = golden.exchanges.map((exchange: GoldenExchange, index: number) => {
+            const expectedBody = structuredClone(exchange.request.body);
+            // The original capture predates SDK 0.3.251, which now retains the
+            // first assistant's signed thinking when replaying the model switch
+            // and compaction turns. Keep the capture unchanged and require this
+            // exact additional block; all other request fields still match it.
+            if (index === 3 || index === 4) {
+                expect(expectedBody.messages[1]).toMatchObject({
+                    role: "assistant",
+                    content: [{ type: "tool_use" }],
                 });
-                // Claude Code ignores its date override for the generated current-date
-                // reminder. Its recovery pass can also attach post-tool assistant text
-                // either side of the tool-result message; normalize that equivalent
-                // transcript shape explicitly.
-                return withOneHourCacheTtl(normalize(expectedBody, cwd));
-            }),
-        );
+                expectedBody.messages[1].content.unshift({
+                    type: "thinking",
+                    thinking: "",
+                    signature: "<SIGNATURE>",
+                });
+            }
+            // The capture also predates Claude Code 2.1.280, which no longer folds the
+            // current-date reminder into the first user turn. It records environment,
+            // model, session-context, and date attachments after the first prompt and
+            // renders them as one system message directly after that turn: merged plain
+            // text for Opus 4.8, three reminders for Sonnet 5. The first user turn becomes
+            // a bare string and the first cache breakpoint moves onto the system message.
+            // Rig's replay reproduces the same attachments so a rebuilt session sends the
+            // same bytes; the recreation-cache test proves that against the live query.
+            // Keep the capture unchanged and require these exact shapes. A replayed native
+            // compaction summary is sent exactly as captured: Claude Code 2.1.280 appended
+            // a trailing newline and a continuation block to it, and 2.1.284 no longer does.
+            const model = index < 3 ? golden.scenario.initialModel : golden.scenario.switchedModel;
+            const environmentText = renderClaudeEnvironmentMessage(
+                claudeSessionAttachments({
+                    cwd: process.cwd(),
+                    env: providerEnv,
+                    model: resolveClaudeModelId(model),
+                }),
+                index >= 3,
+            );
+            const firstTurn = expectedBody.messages[0];
+            expect(firstTurn.content[0].text).toContain("# currentDate");
+            firstTurn.content.shift();
+            const breakpointOnFirstTurn = firstTurn.content[0].cache_control !== undefined;
+            delete firstTurn.content[0].cache_control;
+            if (firstTurn.content.length === 1) firstTurn.content = firstTurn.content[0].text;
+            expectedBody.messages.splice(1, 0, {
+                role: "system",
+                content: breakpointOnFirstTurn
+                    ? [
+                          {
+                              type: "text",
+                              text: environmentText,
+                              cache_control: { type: "ephemeral" },
+                          },
+                      ]
+                    : environmentText,
+            });
+            // The post-compaction replay ends on the summary, a user turn, and Claude Code
+            // spliced its synthetic "No response requested." after it, as the capture shows.
+            // Rig now resumes at the summary, which cuts the placeholder off. Claude Code then
+            // merges the summary and the next prompt into one user turn, joined by a newline,
+            // and its environment message follows as the last message, carrying the breakpoint.
+            if (index === 5) {
+                const [summary, environment, placeholder, prompt] = expectedBody.messages;
+                expect(placeholder).toEqual({
+                    role: "assistant",
+                    content: [{ type: "text", text: "No response requested." }],
+                });
+                expect(typeof summary.content).toBe("string");
+                expect(prompt.content).toHaveLength(1);
+                expectedBody.messages = [
+                    {
+                        role: "user",
+                        content: [
+                            { type: "text", text: `${summary.content}\n` },
+                            { type: "text", text: prompt.content[0].text },
+                        ],
+                    },
+                    {
+                        role: "system",
+                        content: [
+                            {
+                                type: "text",
+                                text: environment.content,
+                                cache_control: prompt.content[0].cache_control,
+                            },
+                        ],
+                    },
+                ];
+            }
+            // Claude Code ignores its date override for the generated current-date
+            // reminder. Its recovery pass can also attach post-tool assistant text
+            // either side of the tool-result message; normalize that equivalent
+            // transcript shape explicitly.
+            return withOneHourCacheTtl(normalize(expectedBody, cwd));
+        });
+        expect(requests).toEqual(expectedRequests);
         expect(golden.source).toEqual({
             capture: "forwarded-live-inference",
             client: "rig-claude-provider",

@@ -168,6 +168,42 @@ first-prompt attachment message described below, and still compares every other 
 Claude Code 2.1.280 also appended a trailing newline and a continuation block to a replayed
 native compaction summary; 2.1.284 sends that summary exactly as captured again.
 
+### Resume placeholder
+
+When Claude Code resumes a transcript whose last message entry is user-role, its loader splices a
+synthetic assistant turn, `No response requested.` with model `<synthetic>`, after it. Attachment
+entries do not count as the end, so a history of only leading notices qualifies too. A replay ends
+that way whenever the prompt continues from tool results ("Continue from the supplied tool
+result."), when a notice or agent message is steered after tool results, after an unanswered user
+message, after a compaction summary, and on a first turn preceded by notices. The model reads the
+line as its own reply and apologizes for it or invents a mistake.
+
+The pinned CLI offers no way to skip the insertion. The hidden `--reply-on-resume` flag reaches
+the CLI, but only the interactive REPL passes it to the loader; the print-mode resume the SDK uses
+never does, so the placeholder still appears. Moving trailing tool results into the prompt is
+worse: the loader answers the now-unresolved `tool_use` with its own "interrupted" error result and
+drops Rig's. The loader's other exits (the interrupted-turn auto-resume environment, deferred-tool
+hook attachments, task notifications) belong to Claude Code's remote-worker machinery and would
+mean fabricating entries.
+
+The loader applies `resumeSessionAt` after that splice, though: it keeps the chain up to and
+including the named entry. So whenever the replayed store entries, attachments aside, end on a user
+entry, `createClaudeSessionReplay.ts` passes the last entry's UUID as `resumeSessionAt`, and the
+placeholder is cut off before any request is built. Claude Code then merges that trailing user turn
+with the prompt, so tool results and the continuation, steered notice, or next user message arrive
+in one user turn. No extra request is made, and nothing is added to the prompt or to Rig's history.
+
+Native `/compact` gets no anchor. Its request never carried the placeholder, and with an anchor the
+compactor dropped every turn after the last assistant reply from what it summarized.
+
+`tests/vendors/claudeReplayUserTail.test.ts` drives the real binary through each case (tool-result
+tail, a notice steered after tool results, an unanswered user message, leading notices before the
+first prompt, an ordinary replay, and compaction) and requires that no placeholder reaches the API
+and that exactly one request is made. A Claude Code release that truncates before splicing fails
+it instead of silently restoring the placeholder. The provider golden test expects the captured
+post-compaction continuation, the one capture that shows the placeholder, without it and with the
+summary and the next prompt as one user turn.
+
 ### First-prompt attachments
 
 Claude Code 2.1.280 no longer folds the current-date reminder into the first user turn. On the

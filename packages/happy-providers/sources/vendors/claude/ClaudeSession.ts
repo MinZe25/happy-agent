@@ -493,6 +493,7 @@ export class ClaudeSession extends BaseSession {
                 // A context Claude cannot replay fails this run like any other error, rather than
                 // escaping the stream before it reports an outcome.
                 const replay = createClaudeSessionReplay({
+                    ...(options.compaction ? { compaction: true } : {}),
                     context: configuredContext,
                     // The replayed environment must name the directory the live query runs in.
                     ...(cwd === undefined ? {} : { cwd }),
