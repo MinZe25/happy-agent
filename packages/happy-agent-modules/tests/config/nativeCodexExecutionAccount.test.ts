@@ -9,11 +9,12 @@ import {
 } from "@slopus/happy-agent-base";
 import { sql } from "drizzle-orm";
 import { createRootContext } from "@steve.kite/stdlib";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { testConfigRootedAt } from "../support/configModule.js";
 
 it("maps the actual native Codex credential to an opaque ID and freezes it when login storage changes", async () => {
     const root = await mkdtemp(join(tmpdir(), "native-codex-account-"));
+    vi.stubEnv("CODEX_HOME", join(root, "codex"));
     const authFile = join(root, "auth.json");
     const auth = async (account: string) =>
         await writeFile(
@@ -122,5 +123,6 @@ it("maps the actual native Codex credential to an opaque ID and freezes it when 
         upstream.closeAllConnections();
         await new Promise<void>((resolve) => upstream.close(() => resolve()));
         await rm(root, { recursive: true, force: true });
+        vi.unstubAllEnvs();
     }
 });
