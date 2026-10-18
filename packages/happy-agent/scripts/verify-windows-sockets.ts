@@ -1,5 +1,5 @@
-import { createServer, request } from "node:http";
-import { connect, type Socket } from "node:net";
+import { createServer, request, type Server } from "node:http";
+import { connect, type AddressInfo, type Socket } from "node:net";
 import { createRequire } from "node:module";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import assert from "node:assert/strict";
@@ -8,6 +8,7 @@ import { checkBinaryKeepAlive } from "./check-binary-keepalive.mjs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { localAgentSocketPath } from "@slopus/happy-agent-compute";
+import { WorkspaceProxy } from "@slopus/happy-agent-modules";
 
 const modulesRequire = createRequire(
     new URL("../../happy-agent-modules/package.json", import.meta.url),
@@ -18,14 +19,16 @@ const WebSocket = modulesRequire(
 );
 if (process.platform !== "win32") throw new Error("This transport check requires Windows.");
 const token = "windows-transport-verifier";
+/** Admitted, but naming no network: the bridge must refuse its tunnels, never connect natively. */
+const routeless = "windows-transport-routeless";
 const home = await mkdtemp(join(tmpdir(), "happy-socket-proof-"));
 const internalAgentSocketPath = (root: string, name: string) => join(root, name + ".sock");
 await writeFile(`${home}/unrelated.txt`, "PRESERVE");
 
-function get(socketPath: string) {
+function get(socketPath: string, path = "/v0/health") {
     return new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
         const req = request(
-            { socketPath, path: "/v0/health", headers: { authorization: `Bearer ${token}` } },
+            { socketPath, path, headers: { authorization: `Bearer ${token}` } },
             (res) => {
                 const chunks: Buffer[] = [];
                 res.on("data", (b) => chunks.push(b));
@@ -126,6 +129,24 @@ function openTunnel(socketPath: string, credential: string): Promise<Socket> {
     });
 }
 
+function closes(socket: Socket): Promise<void> {
+    return new Promise((resolve, reject) => {
+        if (socket.destroyed) return resolve();
+        const timer = setTimeout(() => reject(Error("A refused tunnel stayed open")), 5000);
+        socket.once("close", () => {
+            clearTimeout(timer);
+            resolve();
+        });
+    });
+}
+
+function listening(server: Server): Promise<AddressInfo> {
+    return new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve(server.address() as AddressInfo));
+    });
+}
+
 function exchange(socket: Socket, bytes: string, expected: string): Promise<void> {
     return new Promise((resolve, reject) => {
         let received = "";
@@ -134,6 +155,7 @@ function exchange(socket: Socket, bytes: string, expected: string): Promise<void
             clearTimeout(timer);
             socket.off("data", data);
             socket.off("error", finish);
+            socket.off("close", closed);
             error ? reject(error) : resolve();
         };
         const data = (chunk: Buffer) => {
@@ -141,21 +163,40 @@ function exchange(socket: Socket, bytes: string, expected: string): Promise<void
             if (received.includes(expected)) finish();
             else if (received.length > 65536) finish(Error("Unexpected tunnel response"));
         };
+        // A refusal closes the tunnel at once; report what arrived instead of waiting out the timer.
+        const closed = () => finish(Error(`Tunnel closed after ${JSON.stringify(received)}`));
         socket.on("data", data);
         socket.once("error", finish);
+        socket.once("close", closed);
         socket.write(bytes);
     });
 }
 
 for (let round = 0; round < 2; round++) {
-    const proxy = createServer((_req, res) => res.end("PROXY_OK"));
+    // What the workspace reaches. Only the attachment's route can open these: `example.test` has
+    // no DNS entry, and every connection the route opens is recorded.
+    const site = createServer((_req, res) => res.end("ROUTED_OK"));
     const target = createServer((_req, res) => res.end("TCP_OK"));
-    await new Promise<void>((resolve, reject) => {
-        target.once("error", reject);
-        target.listen(0, "127.0.0.1", resolve);
-    });
-    const targetAddress = target.address();
-    assert.ok(targetAddress && typeof targetAddress !== "string");
+    const [siteAddress, targetAddress] = await Promise.all([listening(site), listening(target)]);
+    const dialed: string[] = [];
+    const workspaceNetwork = async (host: string, port: number): Promise<Socket> => {
+        dialed.push(`${host}:${port}`);
+        const destination =
+            host === "example.test" && port === 80
+                ? siteAddress
+                : host === "127.0.0.1" && port === targetAddress.port
+                  ? targetAddress
+                  : undefined;
+        if (destination === undefined) throw Error(`Unexpected destination ${host}:${port}`);
+        const socket = connect({ host: "127.0.0.1", port: destination.port, allowHalfOpen: true });
+        await new Promise<void>((resolve, reject) => {
+            socket.once("connect", resolve);
+            socket.once("error", reject);
+        });
+        return socket;
+    };
+    // The real internal proxy listener the Bun bridge forwards every tunnel to.
+    const workspaceProxy = new WorkspaceProxy();
     const prepared = {
         context: () => ({}),
         api: {
@@ -171,22 +212,24 @@ for (let round = 0; round < 2; round++) {
             },
             handleUpgrade: async () => false,
             handleConnect: async () => false,
-            listenWorkspaceProxyHttp: async (path: string) =>
-                new Promise<void>((resolve, reject) => {
-                    proxy.once("error", reject);
-                    proxy.listen(path, resolve);
-                }),
+            listenWorkspaceProxyHttp: async (path: string) => await workspaceProxy.listen(path),
             prepareWorkspaceProxySocket: async (
                 _ctx: unknown,
                 _path: string,
                 authorization: string,
             ) =>
                 authorization === `Bearer ${token}`
-                    ? { handled: true }
-                    : {
-                          handled: true,
-                          rejection: { status: 401, code: "unauthorized", message: "Unauthorized" },
-                      },
+                    ? { handled: true, route: workspaceProxy.route(workspaceNetwork) }
+                    : authorization === `Bearer ${routeless}`
+                      ? { handled: true }
+                      : {
+                            handled: true,
+                            rejection: {
+                                status: 401,
+                                code: "unauthorized",
+                                message: "Unauthorized",
+                            },
+                        },
             prepareLiveSocket: async () => ({ handled: false }),
             prepareBridgeSocket: async () => ({ handled: false }),
             prepareRunnerSocket: () => ({ handled: false }),
@@ -212,13 +255,30 @@ for (let round = 0; round < 2; round++) {
         });
         assert.equal((await get(socketPath)).body, "HTTP_OK");
         assert.equal((await get(internalAgentSocketPath(home, "h"))).body, "HTTP_OK");
-        assert.equal((await get(internalAgentSocketPath(home, "p"))).body, "PROXY_OK");
+        // The internal proxy listener answers over AF_UNIX, and refuses a request with no route.
+        assert.equal(
+            (await get(internalAgentSocketPath(home, "p"), "http://example.test/")).status,
+            502,
+        );
         assert.equal((await get(internalAgentSocketPath(home, "w"))).body, "HTTP_OK");
         await checkBinaryKeepAlive(socketPath, token);
         await checkWebSocket(socketPath, "invalid", 401);
         await checkWebSocket(socketPath, token, 101);
         await checkWebSocket(socketPath, token, 101);
         await assert.rejects(openTunnel(socketPath, "invalid"), /401/);
+        for (const first of [
+            "GET http://example.test/ HTTP/1.1\r\nHost: example.test\r\n\r\n",
+            `CONNECT 127.0.0.1:${targetAddress.port} HTTP/1.1\r\nHost: 127.0.0.1:${targetAddress.port}\r\n\r\n`,
+        ]) {
+            const tunnel = await openTunnel(socketPath, routeless);
+            try {
+                await exchange(tunnel, first, "HTTP/1.1 502 ");
+                await closes(tunnel);
+            } finally {
+                tunnel.destroy();
+            }
+        }
+        assert.deepEqual(dialed, []);
         for (const nested of [false, true]) {
             const tunnel = await openTunnel(socketPath, token);
             try {
@@ -232,22 +292,28 @@ for (let round = 0; round < 2; round++) {
                     await exchange(
                         tunnel,
                         `GET ${nested ? "/" : "http://example.test/"} HTTP/1.1\r\nHost: example.test\r\nConnection: keep-alive\r\n\r\n`,
-                        nested ? "TCP_OK" : "PROXY_OK",
+                        nested ? "TCP_OK" : "ROUTED_OK",
                     );
                 }
             } finally {
                 tunnel.destroy();
             }
         }
+        assert.deepEqual(dialed, [
+            "example.test:80",
+            "example.test:80",
+            `127.0.0.1:${targetAddress.port}`,
+        ]);
         console.log(
-            `PASS round ${round + 1}: public named-pipe HTTP keep-alive, internal AF_UNIX HTTP/proxy, authenticated binary WebSocket/reconnect, CONNECT/inner HTTP keep-alive/nested TCP`,
+            `PASS round ${round + 1}: public named-pipe HTTP keep-alive, internal AF_UNIX HTTP/proxy, authenticated binary WebSocket/reconnect, CONNECT/inner HTTP keep-alive/nested TCP through the attachment's route, route-less tunnels refused`,
         );
     } finally {
         await bound?.close();
-        proxy.closeAllConnections();
+        await workspaceProxy.close();
+        site.closeAllConnections();
         target.closeAllConnections();
         await Promise.all(
-            [proxy, target].map(
+            [site, target].map(
                 (server) => new Promise<void>((resolve) => server.close(() => resolve())),
             ),
         );
