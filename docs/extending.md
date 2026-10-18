@@ -500,8 +500,10 @@ page; in a source checkout, see [`packages/happy-agent/API.md`](../packages/happ
 - **Project and workspace files** — `GET`/`PUT` `/projects/{id}/file` and
   `/projects/{id}/workspaces/{id}/file`, with SHA-256 optimistic concurrency, a
   32 MB limit, and Happy Agent's workspace boundary applied.
-- **HTTP proxy** — `CONNECT /projects/{id}/proxy` (and the workspace-scoped form)
-  tunnels ordinary HTTP through the authenticated daemon connection.
+- **HTTP proxy** — `CONNECT /v0/workspaces/{id}/agents/{agentId}/proxy` tunnels ordinary HTTP
+  and nested `CONNECT` through the authenticated daemon connection, opening every connection
+  from that agent's own machine. `CONNECT /v0/workspaces/{id}/proxy` does the same from the
+  workspace folder's machine.
 - **Happy mobile synchronization** — a first-class daemon feature, gated by both
   the embedder's `happyIntegration` option and the user-wide
   `[settings] happy_integration` config value, both fail-closed.

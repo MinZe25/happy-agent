@@ -59,7 +59,7 @@ Reload is graceful. It drains the daemon first: new mutations are rejected and r
 never cancelled. An inference already in flight finishes, and a tool batch already running
 finishes and commits, but no further inference starts. Tool calls that have not started and
 queued messages stay durable for the new daemon. The old daemon then shuts down. That stops
-terminal processes, background shell commands, and workspace services, and disconnects clients.
+terminal processes and background shell commands, and disconnects clients.
 Reload then starts a fresh daemon, which inherits the environment of the shell that ran the
 command. `happy-agent status` reports whether the new daemon is running. A team or
 other supervised deployment restarts through its supervisor instead, such as

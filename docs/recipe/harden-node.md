@@ -216,7 +216,6 @@ What changes for such a bot:
 - Attached secrets are refused for commands that run as a workload user, as on runners, because
   their values stay with the daemon. A bot or project that needs secrets in commands cannot use
   this setup yet.
-- Sandboxed workspace services are not available, as on runners.
 - Live Git state — the changed-file list and branch comparison — is not tracked for folders that
   run as a workload user, exactly as on runners. `GET /v0/workspaces/:workspaceId/git` answers
   `404`.
