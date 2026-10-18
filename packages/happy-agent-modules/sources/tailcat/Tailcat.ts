@@ -39,6 +39,35 @@ export const tailcatTransportTargetSchema = Type.Union([
     ),
 ]);
 
+/** A named exposure's stable identity name; `default` belongs to `[feature.tailcat]`. */
+export const tailcatExposureNameSchema = Type.String({
+    maxLength: 32,
+    minLength: 1,
+    pattern: "^[a-z][a-z0-9-]*$",
+});
+
+/** What a module asks for when it opens its own exposure next to `[feature.tailcat]`. */
+export const tailcatNamedExposureRequestSchema = Type.Object(
+    {
+        name: tailcatExposureNameSchema,
+        port: Type.Integer({ minimum: 1, maximum: 65_535 }),
+        target: tailcatTransportTargetSchema,
+    },
+    { additionalProperties: false },
+);
+
 export type TailcatState = Static<typeof tailcatStateSchema>;
 export type TailcatStatus = Static<typeof tailcatStatusSchema>;
 export type TailcatTransportTarget = Static<typeof tailcatTransportTargetSchema>;
+export type TailcatNamedExposureRequest = Static<typeof tailcatNamedExposureRequestSchema>;
+
+/**
+ * One open named exposure. Its address carries the identity's pre-shared key, so it is a secret.
+ * Closing stops the supervised process and the relay; the identity key stays for the next open.
+ */
+export interface TailcatNamedExposure {
+    readonly address: string;
+    readonly name: string;
+    readonly port: number;
+    close(): Promise<void>;
+}

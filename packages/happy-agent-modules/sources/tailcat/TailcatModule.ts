@@ -12,8 +12,11 @@ import { BotsModule } from "../bots/index.js";
 import { ConfigModule } from "../config/index.js";
 import { DurableFunctionsModule } from "../durableFunctions/index.js";
 import {
+    tailcatNamedExposureRequestSchema,
     tailcatStatusSchema,
     tailcatTransportTargetSchema,
+    type TailcatNamedExposure,
+    type TailcatNamedExposureRequest,
     type TailcatState,
     type TailcatStatus,
     type TailcatTransportTarget,
@@ -44,6 +47,7 @@ export class TailcatModule implements AgentModule {
     #state: TailcatState;
     #target: TailcatTransportTarget | undefined;
     readonly #outbound = new Set<TailcatConnection>();
+    readonly #named = new Map<string, Promise<TailcatExposure>>();
 
     /** Open an outgoing carrier without enabling this installation's inbound exposure. */
     openRemote(address: string): TailcatConnection {
@@ -55,6 +59,73 @@ export class TailcatModule implements AgentModule {
         );
         this.#outbound.add(connection);
         return connection;
+    }
+
+    /**
+     * Open an additional, independently supervised exposure with its own stable identity key,
+     * fixed loopback port, and relay target. It does not depend on `[feature.tailcat]` and never
+     * touches the default exposure. One name has at most one open exposure at a time.
+     */
+    async openExposure(
+        ctx: Context,
+        request: TailcatNamedExposureRequest,
+    ): Promise<TailcatNamedExposure> {
+        if (
+            !Value.Check(tailcatNamedExposureRequestSchema, request) ||
+            request.name === "default"
+        ) {
+            throw new Error("The Tailcat exposure request is invalid.");
+        }
+        if (this.#closed) throw new Error("Tailcat has already stopped.");
+        const { name, port, target } = structuredClone(request);
+        if (this.#named.has(name)) {
+            throw new Error(`The Tailcat exposure "${name}" is already open.`);
+        }
+        const paths = this.#config.tailcatExposurePaths(name);
+        // The supervised process outlives the caller, so it belongs to this module's lifetime.
+        const moduleCtx = this.#moduleContext(ctx);
+        const detached = detach(moduleCtx).named(`tailcat-${name}`);
+        const opening = startTailcatExposure(
+            moduleCtx.lifetime === undefined
+                ? detached
+                : withLifetime(detached, moduleCtx.lifetime),
+            target,
+            paths,
+            port,
+            // The address carries the pre-shared key, so a named exposure never logs it.
+            { redactAddress: true },
+        );
+        this.#named.set(name, opening);
+        let exposure: TailcatExposure;
+        try {
+            exposure = await opening;
+        } catch (error) {
+            this.#named.delete(name);
+            throw error;
+        }
+        if (this.#closed) {
+            // Module shutdown already took this opening and closes it; nothing may outlive it.
+            await exposure.close();
+            throw new Error("Tailcat has already stopped.");
+        }
+        let closing: Promise<void> | undefined;
+        return {
+            get address() {
+                return exposure.address;
+            },
+            name,
+            port: exposure.port,
+            close: () => {
+                closing ??= (async () => {
+                    try {
+                        await exposure.close();
+                    } finally {
+                        if (this.#named.get(name) === opening) this.#named.delete(name);
+                    }
+                })();
+                return closing;
+            },
+        };
     }
 
     constructor(config: ConfigModule, bots: BotsModule, durableFunctions: DurableFunctionsModule) {
@@ -152,6 +223,14 @@ export class TailcatModule implements AgentModule {
             this.#closed = true;
             const outbound = [...this.#outbound];
             await Promise.all(outbound.map((connection) => connection.close()));
+            const named = [...this.#named.values()];
+            this.#named.clear();
+            await Promise.all(
+                named.map(async (opening) => {
+                    const exposure = await opening.catch(() => undefined);
+                    await exposure?.close();
+                }),
+            );
             const exposure = this.#exposure;
             this.#exposure = undefined;
             if (exposure !== undefined) await exposure.close();

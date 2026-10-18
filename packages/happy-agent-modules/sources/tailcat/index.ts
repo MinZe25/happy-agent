@@ -1,8 +1,12 @@
 export {
     tailcatAddressSchema,
+    tailcatExposureNameSchema,
+    tailcatNamedExposureRequestSchema,
     tailcatStateSchema,
     tailcatStatusSchema,
     tailcatTransportTargetSchema,
+    type TailcatNamedExposure,
+    type TailcatNamedExposureRequest,
     type TailcatState,
     type TailcatStatus,
     type TailcatTransportTarget,

@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -88,6 +89,85 @@ describe("TailcatModule", () => {
     });
 });
 
+describe("TailcatModule named exposures", () => {
+    it("opens an independent identity on its own port and target without the default exposure", async () => {
+        const fixture = await createFixture();
+        const target = createServer((_request, response) => response.end("mobile listener"));
+        await new Promise<void>((resolve) =>
+            target.listen({ host: "127.0.0.1", port: 0 }, resolve),
+        );
+        const address = target.address();
+        if (address === null || typeof address === "string") throw new Error("No test port.");
+        const mobilePaths = {
+            address: join(fixture.paths.home, "mobile.address"),
+            key: join(fixture.paths.home, "mobile.private.json"),
+            port: join(fixture.paths.home, "mobile.port"),
+        };
+        try {
+            const request = {
+                name: "mobile",
+                port: 24_786,
+                target: { host: "127.0.0.1", port: address.port },
+            };
+            const exposure = await fixture.tailcat.openExposure(fixture.ctx, request);
+            expect(exposure).toMatchObject({
+                address: "tcMobileTailcatAddress456",
+                name: "mobile",
+                port: 24_786,
+            });
+            await expect((await fetch("http://127.0.0.1:24786/anything")).text()).resolves.toBe(
+                "mobile listener",
+            );
+            expect((await stat(mobilePaths.key)).mode & 0o777).toBe(0o600);
+            await expect(readFile(mobilePaths.port, "utf8")).resolves.toBe("24786\n");
+            await expect(readFile(fixture.paths.keyPath, "utf8")).rejects.toMatchObject({
+                code: "ENOENT",
+            });
+            expect(fixture.tailcat.currentStatus()).toEqual({ enabled: false, state: "disabled" });
+            await expect(fixture.tailcat.openExposure(fixture.ctx, request)).rejects.toThrow(
+                'The Tailcat exposure "mobile" is already open.',
+            );
+
+            await exposure.close();
+            await exposure.close();
+            await expect(readFile(mobilePaths.address, "utf8")).rejects.toMatchObject({
+                code: "ENOENT",
+            });
+            await expect(readFile(mobilePaths.key, "utf8")).resolves.toBe("stable-private-key\n");
+
+            const reopened = await fixture.tailcat.openExposure(fixture.ctx, request);
+            expect(reopened.address).toBe(exposure.address);
+            await fixture.close();
+            await expect(readFile(mobilePaths.address, "utf8")).rejects.toMatchObject({
+                code: "ENOENT",
+            });
+            await expect(fixture.tailcat.openExposure(fixture.ctx, request)).rejects.toThrow(
+                "Tailcat has already stopped.",
+            );
+        } finally {
+            await fixture.close();
+            await new Promise<void>((resolve) => target.close(() => resolve()));
+        }
+    });
+
+    it("refuses the default identity and malformed requests", async () => {
+        const fixture = await createFixture();
+        try {
+            for (const request of [
+                { name: "default", port: 24_787, target: { host: "127.0.0.1", port: 9 } },
+                { name: "Mobile", port: 24_787, target: { host: "127.0.0.1", port: 9 } },
+                { name: "mobile", port: 0, target: { host: "127.0.0.1", port: 9 } },
+            ]) {
+                await expect(fixture.tailcat.openExposure(fixture.ctx, request)).rejects.toThrow(
+                    "The Tailcat exposure request is invalid.",
+                );
+            }
+        } finally {
+            await fixture.close();
+        }
+    });
+});
+
 async function createFixture() {
     const root = await mkdtemp(join(tmpdir(), "happy-tailcat-module-"));
     roots.push(root);
@@ -110,7 +190,9 @@ if (args[0] === "genkey") {
     writeFileSync(key, "stable-private-key\\n", { mode: 0o600 });
     process.exit(0);
 }
-writeFileSync(process.env.TAILCAT_ADDR_FILE, "tcStableTailcatAddress123\\n", { mode: 0o600 });
+const key = args.find((argument) => argument.startsWith("--key="))?.slice(6) ?? "";
+const address = key.endsWith("mobile.private.json") ? "tcMobileTailcatAddress456" : "tcStableTailcatAddress123";
+writeFileSync(process.env.TAILCAT_ADDR_FILE, address + "\\n", { mode: 0o600 });
 process.on("SIGTERM", () => process.exit(0));
 setInterval(() => undefined, 1_000);
 `,
@@ -130,6 +212,12 @@ setInterval(() => undefined, 1_000);
             },
         },
         tailcatPort: 24_784,
+        tailcatExposurePaths: (name: string) => ({
+            addressPath: join(home, `${name}.address`),
+            home,
+            keyPath: join(home, `${name}.private.json`),
+            portPath: join(home, `${name}.port`),
+        }),
         get tailcatEnabled() {
             return enabled;
         },

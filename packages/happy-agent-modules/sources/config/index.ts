@@ -15,6 +15,7 @@ export {
     type HappyAgentConfiguration,
     type HappyAgentConfigurationInput,
     type HappyAgentConfigurationPaths,
+    type TailcatExposurePaths,
 } from "./ConfigModule.js";
 export { DEFAULT_TELEGRAM_API_URL } from "./TelegramConfig.js";
 export {

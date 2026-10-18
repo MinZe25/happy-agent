@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createRootContext } from "@steve.kite/stdlib";
+import { createRootContext, withLogger, type Logger } from "@steve.kite/stdlib";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { startTailcatExposure } from "../../sources/tailcat/impl/startTailcatExposure.js";
@@ -76,6 +76,43 @@ describe("Tailcat exposure", () => {
         expect(exposure.address).toBe("tcStableTailcatAddress123");
 
         await exposure.close();
+    });
+});
+
+describe("Tailcat exposure logging", () => {
+    it("logs the secret address only for the default exposure", async () => {
+        const root = await temporaryRoot();
+        const fake = await fakeTailcat(root);
+        const options = {
+            executable: fake,
+            restartDelayMs: 10,
+            startupTimeoutMs: 5_000,
+            stopGraceMs: 50,
+        };
+        for (const redactAddress of [false, true]) {
+            const lines: string[] = [];
+            const ctx = withLogger(
+                createRootContext().named("tailcat-logging"),
+                recordingLogger(lines),
+            );
+            const exposure = await startTailcatExposure(
+                ctx,
+                { host: "127.0.0.1", port: 9 },
+                tailcatPaths(root),
+                24_789,
+                { ...options, redactAddress },
+            );
+            await exposure.close();
+            const opened = lines.find((line) => line.startsWith("tailcat:open "));
+            if (redactAddress) {
+                expect(opened).toMatch(/^tailcat:open port=24789 pid=\d+$/u);
+                expect(lines.join("\n")).not.toContain("tcStableTailcatAddress123");
+            } else {
+                expect(opened).toMatch(
+                    /^tailcat:open address=tcStableTailcatAddress123 port=24789 pid=\d+$/u,
+                );
+            }
+        }
     });
 });
 
@@ -181,4 +218,11 @@ async function waitFor(condition: () => Promise<boolean>): Promise<void> {
         await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error("Tailcat did not reach the expected state in time.");
+}
+
+function recordingLogger(lines: string[]): Logger {
+    const write = (_context: unknown, ...args: readonly unknown[]) => {
+        lines.push(args.map(String).join(" "));
+    };
+    return { debug: write, error: write, fatal: write, info: write, trace: write, warn: write };
 }

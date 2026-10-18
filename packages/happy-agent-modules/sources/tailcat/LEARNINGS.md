@@ -74,3 +74,18 @@ subsequent requests share a fresh startup. Cleanup is generation-checked, so lat
 tear down a replacement. Permanent close still unregisters the connection; transient recovery
 does not. Destroying the old sockets also evicts them from the owning HTTP pool. No failed request
 is replayed, and no credential or roster change is needed.
+
+## Other features get their own named exposures
+
+The mobile connector needs a Tailcat address that is separate from `[feature.tailcat]`, so that
+pairing a phone never exposes the main API socket and the two can open and close independently.
+`openExposure` starts an additional supervised exposure with its own identity key from
+`ConfigModule.tailcatExposurePaths(name)`, its own fixed port, and its own relay target, and
+returns a handle with the address, port, and an idempotent close. It reuses the same genkey,
+relay, and supervision code as the default exposure, which stays exactly as it was. A name is open
+at most once, `default` is refused, and module shutdown closes every named exposure. Callers use
+only this method, never the internal exposure code.
+
+A named exposure's address carries its pre-shared key, so its log lines omit the address, and any
+Tailcat address in captured output or errors is replaced with `[address]`. The default exposure
+still logs its address exactly as before; changing that is a separate decision.

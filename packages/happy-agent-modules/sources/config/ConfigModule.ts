@@ -135,6 +135,8 @@ const MAX_TOOL_RESULT_RETENTION_DAYS = 36_500;
 const MAX_MCP_TIMEOUT_SECONDS = 600;
 const MAX_LOCAL_CREDENTIAL_FILE_BYTES = 256 * 1024;
 const DEFAULT_TAILCAT_PORT = 24_779;
+const DEFAULT_MOBILE_CONNECTOR_PORT = 24_781;
+const TAILCAT_EXPOSURE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,31}$/u;
 const PROVIDER_CREDENTIAL_REFRESH_INTERVAL_MS = 3 * 60 * 60 * 1_000;
 const PROVIDER_SERVICE_TIER_REFRESH_INTERVAL_MS = 60_000;
 
@@ -500,6 +502,15 @@ const partialValuesSchema = Type.Object(
                             {
                                 enabled: Type.Optional(Type.Boolean()),
                                 engine: Type.Optional(codeModeEngineSchema),
+                            },
+                            { additionalProperties: false },
+                        ),
+                    ),
+                    mobile_connector: Type.Optional(
+                        Type.Object(
+                            {
+                                enabled: Type.Optional(Type.Boolean()),
+                                port: Type.Optional(Type.Integer({ maximum: 65_535, minimum: 1 })),
                             },
                             { additionalProperties: false },
                         ),
@@ -877,6 +888,13 @@ const resolvedValuesSchema = Type.Object(
             {
                 codemode: Type.Object(
                     { enabled: Type.Boolean(), engine: codeModeEngineSchema },
+                    { additionalProperties: false },
+                ),
+                mobileConnector: Type.Object(
+                    {
+                        enabled: Type.Boolean(),
+                        port: Type.Integer({ maximum: 65_535, minimum: 1 }),
+                    },
                     { additionalProperties: false },
                 ),
                 tailcat: Type.Object(
@@ -1292,6 +1310,7 @@ const DEFAULT_VALUES: HappyAgentConfigValues = {
     },
     feature: {
         codemode: { enabled: false, engine: "monty" },
+        mobileConnector: { enabled: true, port: DEFAULT_MOBILE_CONNECTOR_PORT },
         tailcat: { enabled: false, port: DEFAULT_TAILCAT_PORT },
         team: {
             authentication: "workos",
@@ -1365,6 +1384,14 @@ const DEFAULT_VALUES: HappyAgentConfigValues = {
 };
 
 /** What the caller knows that no file on disk does. */
+/** The private files of one Tailcat exposure: its stable key and its live address and port. */
+export interface TailcatExposurePaths {
+    readonly addressPath: string;
+    readonly home: string;
+    readonly keyPath: string;
+    readonly portPath: string;
+}
+
 export interface ConfigModuleLoadOptions {
     /** The version this build reports as itself. Defaults to `"development"`. */
     readonly version?: string;
@@ -2152,6 +2179,33 @@ export class ConfigModule implements AgentModule {
     /** The fixed loopback and remote service port selected for Tailcat. */
     get tailcatPort(): number {
         return this.configuration.values.feature.tailcat.port;
+    }
+
+    /**
+     * Private files for one additional named Tailcat exposure. Each name has its own stable
+     * identity key beside the default one, so its address is independent of `[feature.tailcat]`.
+     */
+    tailcatExposurePaths(name: string): TailcatExposurePaths {
+        if (!TAILCAT_EXPOSURE_NAME_PATTERN.test(name) || name === "default") {
+            throw new Error("The Tailcat exposure name is invalid.");
+        }
+        const home = this.configuration.paths.tailcatHome;
+        return {
+            addressPath: join(home, `${name}.address`),
+            home,
+            keyPath: join(home, `${name}.private.json`),
+            portPath: join(home, `${name}.port`),
+        };
+    }
+
+    /** Whether phones may pair and connect directly; machine configuration only. */
+    get mobileConnectorEnabled(): boolean {
+        return this.configuration.values.feature.mobileConnector.enabled;
+    }
+
+    /** The fixed loopback and remote service port of the mobile connector's own Tailcat socket. */
+    get mobileConnectorPort(): number {
+        return this.configuration.values.feature.mobileConnector.port;
     }
 
     /**
@@ -3625,6 +3679,9 @@ function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigVal
         if (partial.feature?.codemode !== undefined) {
             Object.assign(merged.feature.codemode, partial.feature.codemode);
         }
+        if (partial.feature?.mobile_connector !== undefined) {
+            Object.assign(merged.feature.mobileConnector, partial.feature.mobile_connector);
+        }
         if (partial.feature?.tailcat !== undefined) {
             Object.assign(merged.feature.tailcat, partial.feature.tailcat);
         }
@@ -3752,6 +3809,9 @@ function normalizeFeatures(value: NonNullable<PartialValues["features"]>): Recor
 function normalizeFeature(value: NonNullable<PartialValues["feature"]>): Record<string, unknown> {
     return {
         ...(value.codemode === undefined ? {} : { codemode: { ...value.codemode } }),
+        ...(value.mobile_connector === undefined
+            ? {}
+            : { mobile_connector: { ...value.mobile_connector } }),
         ...(value.tailcat === undefined ? {} : { tailcat: { ...value.tailcat } }),
         ...(value.team === undefined ? {} : { team: normalizeTeam(value.team) }),
     };
@@ -4264,7 +4324,13 @@ function withoutProjectMachineSettings(values: PartialValues): PartialValues {
         ...rest
     } = values;
     const { permission_mode: _permissionMode, ...projectDefaults } = defaults ?? {};
-    const { tailcat: _tailcat, team: _team, ...projectFeature } = feature ?? {};
+    const {
+        // A repository must not open, move, or close this machine's phone connection socket.
+        mobile_connector: _mobileConnector,
+        tailcat: _tailcat,
+        team: _team,
+        ...projectFeature
+    } = feature ?? {};
     const {
         daemon_heap_snapshots: _daemonHeapSnapshots,
         durable_global_event_queue: _durableGlobalEventQueue,
@@ -4358,6 +4424,15 @@ function calculateProvenance(...sources: readonly PartialValues[]): Record<strin
                     }
                     if (feature.codemode.engine !== undefined) {
                         result["feature.codemode.engine"] = name;
+                    }
+                }
+                if (feature?.mobile_connector !== undefined) {
+                    result["feature.mobileConnector"] = name;
+                    if (feature.mobile_connector.enabled !== undefined) {
+                        result["feature.mobileConnector.enabled"] = name;
+                    }
+                    if (feature.mobile_connector.port !== undefined) {
+                        result["feature.mobileConnector.port"] = name;
                     }
                 }
                 if (feature?.tailcat !== undefined) {
@@ -4487,6 +4562,20 @@ function readFeature(
     assertTableSize(value, "feature");
     const result: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
+        if (key === "mobile_connector") {
+            if (!isTable(item)) throw new Error("feature.mobile_connector must be a TOML table.");
+            assertTableSize(item, "feature.mobile_connector");
+            const mobileConnector: Record<string, unknown> = {};
+            for (const [connectorKey, connectorValue] of Object.entries(item)) {
+                if (connectorKey !== "enabled" && connectorKey !== "port") {
+                    unknown(`feature.mobile_connector.${connectorKey}`);
+                    continue;
+                }
+                mobileConnector[connectorKey] = connectorValue;
+            }
+            result.mobile_connector = mobileConnector;
+            continue;
+        }
         if (key === "tailcat") {
             if (!isTable(item)) throw new Error("feature.tailcat must be a TOML table.");
             assertTableSize(item, "feature.tailcat");

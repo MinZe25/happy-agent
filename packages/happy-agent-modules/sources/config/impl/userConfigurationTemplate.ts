@@ -59,6 +59,12 @@ export const HAPPY_TOML_TEMPLATE = `# Happy configuration for Happy Agent.
 # enabled = false
 # port = 24779
 
+# Phones pair by scanning a QR code and then connect straight to this daemon over their own
+# Tailcat socket, which is open only while a pairing is active or a phone is paired.
+# [feature.mobile_connector]
+# enabled = true
+# port = 24781
+
 # Team deployments expose an authenticated TCP HTTP API instead of the private local socket.
 # [feature.team]
 # enabled = false

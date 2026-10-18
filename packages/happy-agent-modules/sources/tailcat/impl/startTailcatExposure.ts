@@ -20,6 +20,11 @@ export interface TailcatExposurePaths {
 
 export interface TailcatExposureOptions {
     readonly executable?: string;
+    /**
+     * Keep the address, which carries the identity's pre-shared key, out of every log line, Tailcat
+     * output included. Log only that the tunnel opened, with its port and process.
+     */
+    readonly redactAddress?: boolean;
     readonly restartDelayMs?: number;
     readonly startupTimeoutMs?: number;
     readonly stopGraceMs?: number;
@@ -58,6 +63,7 @@ class SupervisedTailcatExposure implements TailcatExposure {
     readonly #executable: string;
     readonly #paths: TailcatExposurePaths;
     readonly #relay: TcpRelay;
+    readonly #redactAddress: boolean;
     readonly #restartDelayMs: number;
     readonly #startupTimeoutMs: number;
     readonly #stopGraceMs: number;
@@ -80,6 +86,7 @@ class SupervisedTailcatExposure implements TailcatExposure {
         this.#executable = executable;
         this.#paths = paths;
         this.#relay = relay;
+        this.#redactAddress = options.redactAddress ?? false;
         this.#restartDelayMs = options.restartDelayMs ?? 1_000;
         this.#startupTimeoutMs = options.startupTimeoutMs ?? 60_000;
         this.#stopGraceMs = options.stopGraceMs ?? 2_000;
@@ -109,7 +116,7 @@ class SupervisedTailcatExposure implements TailcatExposure {
         await writeFile(this.#paths.portPath, `${String(this.#relay.port)}\n`, { mode: 0o600 });
         await chmod(this.#paths.portPath, 0o600);
         this.#ctx.log.info(
-            `tailcat:open address=${this.#address} port=${String(this.#relay.port)} pid=${String(this.#current.child.pid ?? 0)}`,
+            `tailcat:open ${this.#addressField()}port=${String(this.#relay.port)} pid=${String(this.#current.child.pid ?? 0)}`,
         );
         this.#supervision = this.#supervise();
         return this;
@@ -139,7 +146,7 @@ class SupervisedTailcatExposure implements TailcatExposure {
                 if (this.#current === current) this.#current = undefined;
                 if (this.#stopped) return;
                 this.#ctx.log.warn(
-                    `tailcat:exited code=${String(outcome.code)} signal=${outcome.signal ?? "none"}${outcome.stderr === "" ? "" : ` stderr=${outcome.stderr}`}`,
+                    `tailcat:exited code=${String(outcome.code)} signal=${outcome.signal ?? "none"}${outcome.stderr === "" ? "" : ` stderr=${this.#redact(outcome.stderr)}`}`,
                 );
             }
             await this.#waitBeforeRestart();
@@ -159,16 +166,25 @@ class SupervisedTailcatExposure implements TailcatExposure {
                 );
                 await chmod(this.#paths.addressPath, 0o600);
                 this.#ctx.log.info(
-                    `tailcat:reopened address=${this.#address} port=${String(this.#relay.port)} pid=${String(restarted.child.pid ?? 0)}`,
+                    `tailcat:reopened ${this.#addressField()}port=${String(this.#relay.port)} pid=${String(restarted.child.pid ?? 0)}`,
                 );
             } catch (error: unknown) {
                 this.#ctx.log.warn(
-                    `tailcat:restart-failed error=${error instanceof Error ? error.message : String(error)}`,
+                    `tailcat:restart-failed error=${this.#redact(error instanceof Error ? error.message : String(error))}`,
                 );
                 await stopTailcat(this.#current, this.#stopGraceMs);
                 this.#current = undefined;
             }
         }
+    }
+
+    #addressField(): string {
+        return this.#redactAddress ? "" : `address=${this.#address} `;
+    }
+
+    #redact(text: string): string {
+        if (!this.#redactAddress) return text;
+        return text.replace(/\btc[A-Za-z0-9_-]{16,}/gu, "[address]");
     }
 
     async #waitBeforeRestart(): Promise<void> {
