@@ -2262,6 +2262,17 @@ export class HappyAgentClient {
         );
     }
 
+    /**
+     * The URL of `CONNECT /v0/workspaces/:workspaceId/agents/:agentId/proxy`: the same tunnel,
+     * opened in that agent's own network.
+     */
+    workspaceAgentProxyUrl(workspaceId: Cuid2, agentId: Cuid2): string {
+        return endpointUrl(
+            this.#endpoint,
+            `v0/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/proxy`,
+        );
+    }
+
     // Sandboxed workspace services: creation belongs to the agent's service_start tool.
 
     /** `GET /v0/workspaces/:workspaceId/services`. Unavailable is not an empty list. */
