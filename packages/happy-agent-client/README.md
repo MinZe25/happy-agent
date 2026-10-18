@@ -160,6 +160,14 @@ changes. An absent bootstrap field, or `404` from `getUserSettings()`, means the
 settings, so keep those preferences on the device. Through `connection(id)`, settings belong to the
 remote daemon and the person it authenticates.
 
+The mobile connector pairs a phone with this daemon over its own Tailcat socket. The client covers
+only the desktop's side: `getMobileConnector()` reads the caller's snapshot, `startMobilePairing()`
+returns it with a `happy://direct?…` QR code to show and never log, `confirmMobilePairing(id)` and
+`cancelMobilePairing(id)` answer the emoji comparison, and `removeMobileDevice(id)` removes a paired
+phone. Every call returns the complete snapshot, and `mobile_connector.updated` delivers it to its
+owner only; keep the one with the greater `version`. Phones implement their side natively from the
+specification. `404` from `getMobileConnector()` means a daemon older than protocol 27.
+
 The global secrets surface exposes only safe metadata: descriptions, environment-variable names,
 availability, attachments, versions, and timestamps. Raw values appear only in typed create and
 update request bodies. Project, workspace, and exact-agent attachment targets are discriminated by

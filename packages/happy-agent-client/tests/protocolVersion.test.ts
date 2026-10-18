@@ -6,8 +6,8 @@ import {
 } from "../sources/protocol/daemon.js";
 
 describe("Happy Agent protocol version", () => {
-    it("advances to protocol 26 for runners", () => {
-        expect(HAPPY_AGENT_PROTOCOL_VERSION).toBe(26);
+    it("advances to protocol 27 for the mobile connector", () => {
+        expect(HAPPY_AGENT_PROTOCOL_VERSION).toBe(27);
     });
 
     it("keeps the additive compatibility range rooted at protocol 22", () => {

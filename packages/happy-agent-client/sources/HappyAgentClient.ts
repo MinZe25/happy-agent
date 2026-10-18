@@ -183,6 +183,7 @@ import {
     type UserSettingResponse,
     type UserSettingsResponse,
 } from "./protocol/userSettings.js";
+import type { MobileConnectorResponse } from "./protocol/mobileConnector.js";
 import type {
     ArchiveProjectRequest,
     CloneProjectRequest,
@@ -1015,6 +1016,73 @@ export class HappyAgentClient {
             method: "PUT",
             path: userSettingPath(key),
             json: request,
+            signal: options.signal,
+        });
+    }
+
+    // Mobile connector
+
+    /**
+     * `GET /v0/mobile-connector` — the caller's connector socket, pairing, and paired phones.
+     * Daemons older than protocol 27 answer `404`.
+     */
+    async getMobileConnector(options: RequestOptions = {}): Promise<MobileConnectorResponse> {
+        return await this.#json({
+            method: "GET",
+            path: "v0/mobile-connector",
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * `POST /v0/mobile-connector/pairing` — replaces any earlier pairing and returns once its QR
+     * code is ready, or with a `failed` pairing when the socket could not open.
+     */
+    async startMobilePairing(options: RequestOptions = {}): Promise<MobileConnectorResponse> {
+        return await this.#json({
+            method: "POST",
+            path: "v0/mobile-connector/pairing",
+            signal: options.signal,
+        });
+    }
+
+    /** `POST /v0/mobile-connector/pairing/confirm` — the person at the desktop says the emoji match. */
+    async confirmMobilePairing(
+        pairingId: string,
+        options: RequestOptions = {},
+    ): Promise<MobileConnectorResponse> {
+        return await this.#json({
+            method: "POST",
+            path: "v0/mobile-connector/pairing/confirm",
+            json: { pairingId },
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * `POST /v0/mobile-connector/pairing/cancel` — ends an active pairing or dismisses a finished
+     * one; any other ID changes nothing.
+     */
+    async cancelMobilePairing(
+        pairingId: string,
+        options: RequestOptions = {},
+    ): Promise<MobileConnectorResponse> {
+        return await this.#json({
+            method: "POST",
+            path: "v0/mobile-connector/pairing/cancel",
+            json: { pairingId },
+            signal: options.signal,
+        });
+    }
+
+    /** `DELETE /v0/mobile-connector/devices/:deviceId` — removes a phone and closes its connections. */
+    async removeMobileDevice(
+        deviceId: string,
+        options: RequestOptions = {},
+    ): Promise<MobileConnectorResponse> {
+        return await this.#json({
+            method: "DELETE",
+            path: `v0/mobile-connector/devices/${encodeURIComponent(deviceId)}`,
             signal: options.signal,
         });
     }

@@ -64,6 +64,7 @@ import type { Terminal } from "./terminals.js";
 import type { AgentContextUsage } from "./usage.js";
 import type { Workspace } from "./workspaces.js";
 import { storedUserSettingSchema } from "./userSettings.js";
+import { mobileConnectorSchema } from "./mobileConnector.js";
 import type { SlashCommand } from "./slashCommands.js";
 import { connectionListResponseSchema } from "./connections.js";
 import { runnerListResponseSchema } from "./runners.js";
@@ -503,6 +504,15 @@ export const userSettingsUpdatedPayloadSchema = Type.Object({
 });
 export type UserSettingsUpdatedPayload = Static<typeof userSettingsUpdatedPayloadSchema>;
 
+/**
+ * The caller's mobile connector changed: its socket, pairing, or paired phones. A complete
+ * replacement delivered only to its owner; keep the snapshot with the greater `version`.
+ */
+export const mobileConnectorUpdatedPayloadSchema = Type.Object({
+    mobileConnector: mobileConnectorSchema,
+});
+export type MobileConnectorUpdatedPayload = Static<typeof mobileConnectorUpdatedPayloadSchema>;
+
 /** One event on the journal. */
 export interface EventEnvelope<TType extends string, TPayload> {
     /** This event's place in the journal; never a resource identity. */
@@ -577,7 +587,8 @@ export type HappyAgentEvent =
     | EventEnvelope<"profile.updated", ProfileUpdatedPayload>
     | EventEnvelope<"cloud.updated", CloudUpdatedPayload>
     | EventEnvelope<"happy.integration.updated", HappyIntegrationUpdatedPayload>
-    | EventEnvelope<"user_settings.updated", UserSettingsUpdatedPayload>;
+    | EventEnvelope<"user_settings.updated", UserSettingsUpdatedPayload>
+    | EventEnvelope<"mobile_connector.updated", MobileConnectorUpdatedPayload>;
 
 /** The name of an event this client build knows. */
 export type HappyAgentEventType = HappyAgentEvent["type"];
