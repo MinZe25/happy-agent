@@ -483,7 +483,7 @@ async function applyAction(
             const stopped = (await gym.client.stopTerminal(context.workspaceId, terminalId))
                 .terminal;
             expect(stopped).toMatchObject({
-                exitCode: expect.any(Number),
+                exitCode: null,
                 id: terminalId,
                 status: "exited",
             });
@@ -730,7 +730,15 @@ async function assertRuntimeInvariants(
         expect(terminal.workspaceId).toBe(context.workspaceId);
         expect(terminal.version).toEqual(expect.any(String));
         if (terminal.status === "running") expect(terminal.exitCode).toBeNull();
-        else expect(terminal.exitCode).toEqual(expect.any(Number));
+        else {
+            // Every exited terminal in this trace was deliberately killed, never exited normally.
+            const slot = (["first", "second", "third"] as const).find(
+                (candidate) => context.model.terminals[candidate] === terminal.id,
+            );
+            expect(slot).toBeDefined();
+            expect(context.model.terminalStatus[slot!]).toBe("exited");
+            expect(terminal.exitCode).toBeNull();
+        }
     }
     expect(new Set(observed.terminals.map((terminal) => terminal.id)).size).toBe(
         observed.terminals.length,

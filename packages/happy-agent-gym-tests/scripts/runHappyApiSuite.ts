@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 
 const MINIMUM_API_SCENARIOS = 596;
 const REQUIRED_CHAOS_SEEDS = 120;
@@ -46,6 +47,12 @@ interface CommandResult {
 
 const repositoryRoot = findRepositoryRoot(process.cwd());
 const packageRoot = resolve(repositoryRoot, "packages/happy-agent-gym-tests");
+const vitestEntry = createRequire(import.meta.url).resolve("vitest/vitest.mjs");
+if (process.versions.bun === undefined) {
+    throw new Error("The complete API gym needs Bun, the Happy Agent terminal runtime.");
+}
+const vitestRuntime = ["--bun", vitestEntry];
+console.error(`API gym runtime: Bun ${process.versions.bun} (${process.execPath})`);
 const reportDirectory = resolve(repositoryRoot, ".local/gym-api-suite");
 const reportPath = join(reportDirectory, `vitest-${String(process.pid)}.json`);
 const apiTestPaths = readdirSync(join(packageRoot, "tests"))
@@ -64,8 +71,8 @@ const chaosSuites = [
 await mkdir(reportDirectory, { recursive: true });
 
 const listResult = await runCommand(
-    "pnpm",
-    ["exec", "vitest", "list", ...apiTestPaths, "--json"],
+    process.execPath,
+    [...vitestRuntime, "list", ...apiTestPaths, "--json"],
     packageRoot,
 );
 if (listResult.exitCode !== 0) {
@@ -112,10 +119,9 @@ for (const [index, spec] of runSpecs.entries()) {
         `API gym partition ${String(index + 1)}/${String(runSpecs.length)}: ${spec.label}`,
     );
     const result = await runCommand(
-        "pnpm",
+        process.execPath,
         [
-            "exec",
-            "vitest",
+            ...vitestRuntime,
             "run",
             "--maxWorkers=1",
             "--retry=0",
@@ -300,6 +306,7 @@ async function runCommand(
     additionalEnvironment: NodeJS.ProcessEnv = {},
 ): Promise<CommandResult> {
     const environment = { ...process.env };
+    environment.HAPPY_API_REQUIRE_BUN = "1";
     for (const [name, value] of Object.entries(additionalEnvironment)) {
         if (value === undefined) delete environment[name];
         else environment[name] = value;

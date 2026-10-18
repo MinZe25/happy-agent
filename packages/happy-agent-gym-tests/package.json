@@ -5,7 +5,7 @@
     "scripts": {
         "check": "tsc --noEmit",
         "test:gym": "node runGym.ts",
-        "test:gym:api": "node --experimental-strip-types scripts/runHappyApiSuite.ts"
+        "test:gym:api": "pnpm dlx bun@1.4.2 scripts/runHappyApiSuite.ts"
     },
     "devDependencies": {
         "@slopus/happy-agent-client": "0.0.98",

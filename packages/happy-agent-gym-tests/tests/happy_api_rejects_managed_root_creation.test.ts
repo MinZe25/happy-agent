@@ -5,6 +5,10 @@ it("rejects the removed parent-selection option without changing agents or works
     const gym = await createAgentGym();
     try {
         const root = (await gym.client.getAgent(gym.defaultSessionId)).agent;
+        await gym.waitUntil(async () => {
+            const { project } = await gym.client.getProject(root.workspaceId);
+            return project.initialization.status === "ready" ? true : undefined;
+        }, "the root project to finish initialization before taking the workspace snapshot");
         const before = (await gym.client.getWorkspace(root.workspaceId)).workspace;
         for (const id of ["rejectedmanagedagent", root.id]) {
             // Keep the invalid wire field outside a typed object literal: the client no longer exposes it.

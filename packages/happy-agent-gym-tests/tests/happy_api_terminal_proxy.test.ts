@@ -83,7 +83,7 @@ describe("public terminal and workspace proxy transports", () => {
 
         const stopped = await gym.client.stopTerminal(workspaceId, terminal.id);
         expect(stopped.terminal).toMatchObject({
-            exitCode: expect.any(Number),
+            exitCode: null,
             id: terminal.id,
             status: "exited",
         });

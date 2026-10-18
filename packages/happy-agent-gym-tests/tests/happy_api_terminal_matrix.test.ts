@@ -207,7 +207,7 @@ describe("terminal resource matrix", () => {
         expect(stopped).toMatchObject({
             id: initial.id,
             status: "exited",
-            exitCode: expect.any(Number),
+            exitCode: null,
         });
         expect(stopped.version).not.toBe(initial.version);
     });
@@ -230,8 +230,17 @@ describe("terminal resource matrix", () => {
         expect(event.payload).toMatchObject({
             previousVersion: initial.version,
             version: stopped.version,
-            changes: { status: "exited", exitCode: stopped.exitCode },
+            changes: { status: "exited" },
         });
+        expect(initial.exitCode).toBeNull();
+        expect(stopped.exitCode).toBeNull();
+        if (event.type !== "terminal.updated") {
+            throw new Error("The terminal exit did not emit a terminal update.");
+        }
+        expect(event.payload.changes).toEqual({ status: "exited" });
+        expect({ ...initial, ...event.payload.changes, version: event.payload.version }).toEqual(
+            stopped,
+        );
         await stream.close();
     });
 

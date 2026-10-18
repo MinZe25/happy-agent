@@ -14,6 +14,7 @@ import {
     type GymAgentEvent,
 } from "@slopus/happy-agent-gym";
 import { afterEach, describe, expect, it } from "vitest";
+import { mergeOwnerAgents } from "./helpers/mergeOwnerAgents.js";
 
 const ACTIONS_PER_SEED = 120;
 const CLIENT_COUNT = 4;
@@ -325,8 +326,10 @@ function applyEvent(
 ): Profile {
     switch (event.type) {
         case "project.created":
-            projects.set(event.payload.project.id, clone(event.payload.project));
-            syncAgents(event.payload.project.agents, agents);
+            projects.set(event.payload.project.id, {
+                ...clone(event.payload.project),
+                agents: mergeOwnerAgents(event.payload.project.agents, agents),
+            });
             return profile;
         case "project.updated": {
             const previous = projects.get(event.payload.projectId);
@@ -334,17 +337,20 @@ function applyEvent(
             const next = {
                 ...previous,
                 ...clone(event.payload.changes),
+                agents:
+                    event.payload.changes.agents === undefined
+                        ? previous.agents
+                        : mergeOwnerAgents(event.payload.changes.agents, agents),
                 version: event.payload.version,
             } as Project;
             projects.set(event.payload.projectId, next);
-            if (event.payload.changes.agents !== undefined) {
-                syncAgents(event.payload.changes.agents, agents);
-            }
             return profile;
         }
         case "workspace.created":
-            workspaces.set(event.payload.workspace.id, clone(event.payload.workspace));
-            syncAgents(event.payload.workspace.agents, agents);
+            workspaces.set(event.payload.workspace.id, {
+                ...clone(event.payload.workspace),
+                agents: mergeOwnerAgents(event.payload.workspace.agents, agents),
+            });
             return profile;
         case "workspace.updated": {
             const previous = workspaces.get(event.payload.workspaceId);
@@ -352,12 +358,13 @@ function applyEvent(
             const next = {
                 ...previous,
                 ...clone(event.payload.changes),
+                agents:
+                    event.payload.changes.agents === undefined
+                        ? previous.agents
+                        : mergeOwnerAgents(event.payload.changes.agents, agents),
                 version: event.payload.version,
             } as Workspace;
             workspaces.set(event.payload.workspaceId, next);
-            if (event.payload.changes.agents !== undefined) {
-                syncAgents(event.payload.changes.agents, agents);
-            }
             return profile;
         }
         case "agent.created":
@@ -381,10 +388,6 @@ function applyEvent(
         default:
             return profile;
     }
-}
-
-function syncAgents(nextAgents: readonly Agent[], agents: Map<string, Agent>): void {
-    for (const agent of nextAgents) agents.set(agent.id, clone(agent));
 }
 
 function attachAgent(
