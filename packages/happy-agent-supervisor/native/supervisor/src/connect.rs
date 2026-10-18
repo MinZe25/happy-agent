@@ -44,13 +44,6 @@ const FAILURE_REPORT_INTERVAL: Duration = Duration::from_millis(10);
 /// piece (`PIPE_BUF` is at least 512), so the report is one write that never waits.
 const MAX_REPORT_BYTES: usize = 512;
 
-/// Hang-up on standard input, as `poll` reports it. Linux also reports a peer's half-close of a
-/// socket; elsewhere `POLLHUP` alone stands for it.
-#[cfg(target_os = "linux")]
-const INPUT_HANGUP: libc::c_short = libc::POLLRDHUP;
-#[cfg(not(target_os = "linux"))]
-const INPUT_HANGUP: libc::c_short = 0;
-
 /// The connection failed or ended with an error the caller has been told about.
 const STATUS_CONNECTION_FAILED: i32 = 1;
 /// The caller broke the framing protocol.
@@ -219,31 +212,152 @@ fn send_watching_input(socket: &TcpStream, mut bytes: &[u8]) -> std::io::Result<
             ErrorKind::WouldBlock => {}
             _ => return Err(error),
         }
-        // Hang-up and errors are always reported, whatever was asked for; readable input is not
-        // asked for, so pending frames do not wake this loop.
-        let mut descriptors = [
-            libc::pollfd {
-                fd: socket.as_raw_fd(),
-                events: libc::POLLOUT,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: 0,
-                events: INPUT_HANGUP,
-                revents: 0,
-            },
-        ];
-        if unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) } < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != ErrorKind::Interrupted {
-                return Err(error);
-            }
-        }
-        if input_hung_up(&descriptors[1]) {
+        if let Waited::InputHungUp = wait_for_room_or_hangup(Some(socket.as_raw_fd()), None)? {
             exit_now(0);
         }
     }
     Ok(())
+}
+
+/// What waiting for room to write saw first.
+enum Waited {
+    /// The descriptor has room, or has failed in a way the next write reports.
+    Room,
+    /// Standard input hung up: the caller has gone.
+    InputHungUp,
+    /// Neither, within the time allowed.
+    Nothing,
+}
+
+/// Waits for room to write on `descriptor`, when one is given, for standard input to hang up, or
+/// for `timeout` to pass.
+///
+/// Frames already waiting on standard input do not end the wait. They are the input side's to read,
+/// and the input side may be the one waiting here, so waking for them would only spin. Their being
+/// there must not hide the hang-up either: the caller's abort usually arrives right behind them.
+#[cfg(target_os = "linux")]
+fn wait_for_room_or_hangup(
+    descriptor: Option<RawFd>,
+    timeout: Option<Duration>,
+) -> std::io::Result<Waited> {
+    // Hang-up and errors are always reported, whatever was asked for, and `POLLRDHUP` adds a
+    // socket peer's half-close. Readable input is not asked for.
+    let mut descriptors = [
+        libc::pollfd {
+            fd: descriptor.unwrap_or(-1),
+            events: libc::POLLOUT,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: 0,
+            events: libc::POLLRDHUP,
+            revents: 0,
+        },
+    ];
+    let timeout = timeout.map_or(-1, |timeout| {
+        libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX)
+    });
+    if unsafe { libc::poll(descriptors.as_mut_ptr(), 2, timeout) } < 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.kind() {
+            ErrorKind::Interrupted => Ok(Waited::Nothing),
+            _ => Err(error),
+        };
+    }
+    let hangup = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL | libc::POLLRDHUP;
+    Ok(if descriptors[1].revents & hangup != 0 {
+        Waited::InputHungUp
+    } else if descriptors[0].revents & libc::POLLOUT != 0 {
+        Waited::Room
+    } else {
+        Waited::Nothing
+    })
+}
+
+/// Waits for room to write on `descriptor`, when one is given, for standard input to hang up, or
+/// for `timeout` to pass.
+///
+/// Frames already waiting on standard input do not end the wait. They are the input side's to read,
+/// and the input side may be the one waiting here, so waking for them would only spin. Their being
+/// there must not hide the hang-up either: the caller's abort usually arrives right behind them.
+///
+/// macOS `poll` reports hang-up only on a descriptor it was asked to watch for input, and then
+/// wakes for every byte waiting too. A kqueue read filter that clears once delivered wakes for new
+/// input at most once per arrival, and reports the writer's close as `EV_EOF` whether or not
+/// frames are still waiting unread, for pipes and sockets alike.
+#[cfg(target_os = "macos")]
+fn wait_for_room_or_hangup(
+    descriptor: Option<RawFd>,
+    timeout: Option<Duration>,
+) -> std::io::Result<Waited> {
+    use std::os::fd::OwnedFd;
+
+    let queue = unsafe { libc::kqueue() };
+    if queue < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let queue = unsafe { OwnedFd::from_raw_fd(queue) };
+    let filter = |descriptor: RawFd, filter: i16, flags: u16| libc::kevent {
+        ident: descriptor as libc::uintptr_t,
+        filter,
+        flags,
+        fflags: 0,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    let mut changes = vec![filter(0, libc::EVFILT_READ, libc::EV_ADD | libc::EV_CLEAR)];
+    if let Some(descriptor) = descriptor {
+        changes.push(filter(descriptor, libc::EVFILT_WRITE, libc::EV_ADD));
+    }
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    loop {
+        let remaining = deadline.map(|deadline| {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            libc::timespec {
+                tv_sec: remaining.as_secs() as libc::time_t,
+                tv_nsec: remaining.subsec_nanos() as libc::c_long,
+            }
+        });
+        let mut events = [filter(0, 0, 0); 2];
+        let count = unsafe {
+            libc::kevent(
+                queue.as_raw_fd(),
+                changes.as_ptr(),
+                changes.len() as libc::c_int,
+                events.as_mut_ptr(),
+                events.len() as libc::c_int,
+                remaining
+                    .as_ref()
+                    .map_or(std::ptr::null(), std::ptr::from_ref),
+            )
+        };
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            return match error.kind() {
+                ErrorKind::Interrupted => Ok(Waited::Nothing),
+                _ => Err(error),
+            };
+        }
+        if count == 0 {
+            return Ok(Waited::Nothing);
+        }
+        changes.clear();
+        let events = &events[..count as usize];
+        // A filter that could not be added at all is reported as `EV_ERROR`; on standard input
+        // that is as final as `POLLNVAL`, and on the output the next write reports it.
+        if events.iter().any(|event| {
+            event.filter == libc::EVFILT_READ && event.flags & (libc::EV_EOF | libc::EV_ERROR) != 0
+        }) {
+            return Ok(Waited::InputHungUp);
+        }
+        if events
+            .iter()
+            .any(|event| event.filter == libc::EVFILT_WRITE)
+        {
+            return Ok(Waited::Room);
+        }
+        // Only new frames arrived on standard input. They wait for the input side.
+    }
 }
 
 fn connect(target: &ConnectTarget) -> Result<TcpStream, ConnectFailure> {
@@ -394,30 +508,11 @@ fn report_and_exit(descriptor: RawFd, report: &[u8], deadline: Instant, status: 
 /// Waits up to `timeout` for room to write on `descriptor`, when one is given. The end of standard
 /// input exits at once with `status`: an abort needs no report.
 fn wait_for_room(descriptor: Option<RawFd>, timeout: Duration, status: i32) -> bool {
-    let mut descriptors = [
-        libc::pollfd {
-            fd: descriptor.unwrap_or(-1),
-            events: libc::POLLOUT,
-            revents: 0,
-        },
-        libc::pollfd {
-            fd: 0,
-            events: INPUT_HANGUP,
-            revents: 0,
-        },
-    ];
-    let timeout = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
-    if unsafe { libc::poll(descriptors.as_mut_ptr(), 2, timeout) } <= 0 {
-        return false;
+    match wait_for_room_or_hangup(descriptor, Some(timeout)) {
+        Ok(Waited::Room) => true,
+        Ok(Waited::InputHungUp) => exit_now(status),
+        Ok(Waited::Nothing) | Err(_) => false,
     }
-    if input_hung_up(&descriptors[1]) {
-        exit_now(status);
-    }
-    descriptors[0].revents & libc::POLLOUT != 0
-}
-
-fn input_hung_up(input: &libc::pollfd) -> bool {
-    input.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL | INPUT_HANGUP) != 0
 }
 
 fn truncate_text(text: &mut String, limit: usize) {
