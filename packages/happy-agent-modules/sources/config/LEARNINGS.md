@@ -57,6 +57,24 @@ fails closed to unknown provenance. Native factories create fresh providers. Gym
 the same while preserving script progress, rather than carrying decorated provider instances into
 another runtime or rebinding production observation state.
 
+## Native Codex account history uses the execution credential and a private local identity
+
+Native accounts previously always appeared unknown, so signing into another account behind the same
+provider profile produced no account-change history. Config now copies the known principal from the
+actual `CodexSessionCredential` at operation entry, before awaiting storage. That same credential
+supplies Codex's HTTP and WebSocket account header; its recovery refuses a different known account.
+The public snapshot contains only a random installation-local ID. A private, transactional table
+maps exact Codex principals to those IDs across profiles, agents, token refresh and restarts. It
+retains at most 4,096 identities without eviction: existing IDs remain stable when full, and unseen
+accounts become unknown. Unknown, invalid, storage-free, API-key and Claude identities remain
+unknown; neither aliases nor a later login-file read establish identity.
+
+Native token refresh also replaces the concrete session's credential. Selection-time redaction
+alone missed an upstream error echoing that new token. The existing bounded diagnostic sanitizer
+now includes the actual session's current principal and access token when projecting diagnostic
+errors, retries and exceptions, including compaction. These private inputs never update the frozen
+execution account and never filter ordinary model output or tool payloads.
+
 ## Claude Code runs in a private empty folder
 
 Claude providers never named a working directory, so Claude Code ran wherever the daemon was

@@ -167,6 +167,14 @@ A module that needs to reach a vendor takes this module and asks it, instead of 
 registry or building a second one that would sign in again. `bedrockSearchModels` answers the same
 way for the models a Bedrock account serves its hosted search index from.
 
+Execution history can identify a known native Codex account using the credential held by the actual
+session. A private bounded table in `agent.sqlite` maps that principal to a random installation-local
+ID shared across profiles and agents. History receives only the local ID, without a label. Tokens,
+credential paths and raw principals never enter the public snapshot. The mapping survives normal
+restarts and private database backups; no API, model tool or history export enumerates it. See
+[`persistence/README.md`](persistence/README.md) for storage and failure behavior. Claude and API-key
+accounts remain unknown because the pinned providers expose no equivalent request identity.
+
 Every session resolved from the shared registry combines its caller's lifetime with the daemon's
 provider lifetime and its provider's resettable enablement lifetime. Disabling a provider aborts
 all of that provider's live inference and compaction immediately. Enabling it replaces the aborted

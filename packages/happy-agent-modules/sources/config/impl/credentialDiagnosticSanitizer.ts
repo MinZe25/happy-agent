@@ -1,8 +1,11 @@
 import { resolve } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
+import { Type, type Static } from "@sinclair/typebox";
 import type { CredentialSource, ErrorRecovery } from "@slopus/happy-agent-client";
 import {
+    CodexSession,
+    CodexSessionCredential,
     type BaseSession,
     sessionProviderErrorDiagnosticsSchema,
     type BaseProvider,
@@ -14,6 +17,12 @@ const protectedSessions = new WeakMap<BaseSession, CredentialDiagnosticSanitizer
 // sharedNativeSessionDoesNotReuseCredentialSource.test.ts checks 260 + 260 overflow this cap.
 const MAX_DIAGNOSTIC_SOURCE_VALUES = 512;
 const MAX_DIAGNOSTIC_SOURCE_CHARACTERS = 65_536;
+// OpenAI APIError retains the vendor's JSON body alongside its top-level Error message.
+const upstreamErrorBodySchema = Type.Object(
+    { message: Type.String() },
+    { additionalProperties: true },
+);
+type UpstreamErrorBody = Static<typeof upstreamErrorBodySchema>;
 
 /** Selection-time inputs only. Never reads credentials, configuration or environment after failure. */
 export class CredentialDiagnosticSources {
@@ -213,9 +222,11 @@ export class CredentialDiagnosticSanitizer {
                     : key === "diagnostics" &&
                         Value.Check(sessionProviderErrorDiagnosticsSchema, original)
                       ? this.diagnostics(original)
-                      : typeof original === "string"
-                        ? this.text(original)
-                        : original;
+                      : key === "error" && Value.Check(upstreamErrorBodySchema, original)
+                        ? this.#upstreamErrorBody(original)
+                        : typeof original === "string"
+                          ? this.text(original)
+                          : original;
             if (projected === original) continue;
             changed = true;
             descriptors[key] = { ...descriptor, value: projected };
@@ -225,6 +236,14 @@ export class CredentialDiagnosticSanitizer {
         if (!changed) return value;
         const clone = Object.setPrototypeOf(new Error(), Object.getPrototypeOf(value));
         return Object.defineProperties(clone, descriptors);
+    }
+
+    #upstreamErrorBody(body: UpstreamErrorBody): UpstreamErrorBody {
+        const message =
+            body.message.length > MAX_DIAGNOSTIC_SOURCE_CHARACTERS
+                ? "[private credential diagnostic]"
+                : this.text(body.message);
+        return message === body.message ? body : { ...body, message };
     }
 
     protect(provider: BaseProvider): BaseProvider {
@@ -252,10 +271,12 @@ export class CredentialDiagnosticSanitizer {
         const compact = session.compact.bind(session);
         // Retain native session properties and identity, not only BaseSession's narrow interface.
         session.run = (...args) => {
+            this.#captureNativeDiagnosticInputs(session);
             let stream: ReturnType<BaseSession["run"]>;
             try {
                 stream = run(...args);
             } catch (error) {
+                this.#captureNativeDiagnosticInputs(session);
                 throw this.error(error);
             }
             return {
@@ -266,10 +287,18 @@ export class CredentialDiagnosticSanitizer {
                     ) => {
                         try {
                             const result = await operation();
+                            if (
+                                !result.done &&
+                                (result.value.type === "retrying" ||
+                                    (result.value.type === "done" &&
+                                        result.value.state === "error"))
+                            )
+                                this.#captureNativeDiagnosticInputs(session);
                             return result.done
                                 ? result
                                 : { ...result, value: this.event(result.value) };
                         } catch (error) {
+                            this.#captureNativeDiagnosticInputs(session);
                             throw this.error(error);
                         }
                     };
@@ -291,16 +320,31 @@ export class CredentialDiagnosticSanitizer {
             };
         };
         session.compact = async (...args) => {
+            this.#captureNativeDiagnosticInputs(session);
             try {
                 const result = await compact(...args);
+                if (result.status === "failed") this.#captureNativeDiagnosticInputs(session);
                 return result.status === "failed"
                     ? { ...result, message: this.text(result.message) }
                     : result;
             } catch (error) {
+                this.#captureNativeDiagnosticInputs(session);
                 throw this.error(error);
             }
         };
         protectedSessions.set(session, this);
         return session;
+    }
+
+    /** Refresh may replace the actual session credential. These bounded inputs redact diagnostics
+     * only; they never identify an account or modify an execution snapshot. */
+    #captureNativeDiagnosticInputs(session: BaseSession): void {
+        if (
+            session instanceof CodexSession &&
+            session.credential instanceof CodexSessionCredential
+        ) {
+            const { accountId, accessToken } = session.credential.credential;
+            this.#include(accountId === undefined ? [accessToken] : [accountId, accessToken]);
+        }
     }
 }

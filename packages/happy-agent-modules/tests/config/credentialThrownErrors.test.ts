@@ -9,6 +9,7 @@ import type { AgentEvent } from "../../sources/events/index.js";
 import { testConfigRootedAt } from "../support/configModule.js";
 import { diagnosticRuntime } from "../support/diagnosticRuntime.js";
 import { ScriptedSession } from "../support/ScriptedProvider.js";
+import { CredentialDiagnosticSanitizer } from "../../sources/config/impl/credentialDiagnosticSanitizer.js";
 
 afterEach(() => vi.restoreAllMocks());
 const selector = "providers.private_account.api_key";
@@ -35,6 +36,38 @@ providers = ["private_account"]
 provider = "router"
 model = "openai/gpt-5.6-sol"
 `;
+
+it("copies a native SDK error body without leaking its diagnostic message or mutating the original", () => {
+    const privateToken = "synthetic-refreshed-private-token";
+    const failure = new FixtureAuthenticationError(`Rejected ${privateToken}`);
+    const body = {
+        type: "authentication_error",
+        code: "expired",
+        message: `Rejected ${privateToken}`,
+    };
+    Object.defineProperty(failure, "error", {
+        value: body,
+        enumerable: true,
+        writable: false,
+        configurable: false,
+    });
+    const projected = new CredentialDiagnosticSanitizer([privateToken]).error(
+        failure,
+    ) as FixtureAuthenticationError & { error: typeof body };
+    expect(projected).toBeInstanceOf(FixtureAuthenticationError);
+    expect(projected).not.toBe(failure);
+    expect(projected.status).toBe(failure.status);
+    expect(projected.code).toBe(failure.code);
+    expect(projected.error).toEqual({ ...body, message: "Rejected [private credential source]" });
+    expect(Object.getOwnPropertyDescriptor(projected, "error")).toEqual({
+        ...Object.getOwnPropertyDescriptor(failure, "error"),
+        value: projected.error,
+    });
+    expect(JSON.stringify(projected)).not.toContain(privateToken);
+    expect(projected.stack).not.toContain(privateToken);
+    expect(body.message).toContain(privateToken);
+    expect(failure.message).toContain(privateToken);
+});
 
 it.each(["run", "session"] as const)(
     "cleans a %s throw before the real router, history and settlement see it",

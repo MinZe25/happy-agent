@@ -113,6 +113,7 @@ import {
     type ServiceTierOption,
 } from "@slopus/happy-agent-client";
 import { resolveDefaultNodeName } from "./impl/resolveDefaultNodeName.js";
+import { nativeAccountIdentityMigrations } from "./persistence/nativeAccountIdentity.js";
 import {
     peerMessagingConfigSchema,
     validatePeerMessagingConfig,
@@ -1420,6 +1421,7 @@ export interface RuntimeProviderStateUpdate {
  * system and passed to every module that needs configuration.
  */
 export class ConfigModule implements AgentModule {
+    readonly migrations = nativeAccountIdentityMigrations;
     readonly #executionObservations = new ProviderExecutionObservations();
 
     beginExecutionObservation(

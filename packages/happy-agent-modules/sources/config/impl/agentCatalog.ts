@@ -649,7 +649,11 @@ async function createProvider(
                   : await CodexSessionCredential.tryLoad({ authFile: provider.authFile })));
         if (ambient && !provider.apiKey?.trim() && credential instanceof CodexApiKeyCredential)
             sources.environment("OPENAI_API_KEY", environment.OPENAI_API_KEY);
-        if (credential instanceof CodexSessionCredential) sources.path(credential.authFile);
+        if (credential instanceof CodexSessionCredential) {
+            sources.path(credential.authFile);
+            sources.add(credential.credential.accountId);
+            sources.add(credential.credential.accessToken);
+        }
         if (credential !== null) {
             if (provider.apiKey?.trim())
                 sources.selected("configuration", `providers.${id}.api_key`);

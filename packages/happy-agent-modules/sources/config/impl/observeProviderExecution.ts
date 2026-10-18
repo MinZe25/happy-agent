@@ -1,9 +1,16 @@
 import { agentEffort, agentPermissionMode, agentServiceTier } from "@slopus/happy-agent-base";
 import type { CredentialSource, ErrorRecovery, MessageMode } from "@slopus/happy-agent-client";
-import type { BaseProvider, BaseSession, SessionEvent } from "@slopus/happy-providers";
+import {
+    CodexSession,
+    CodexSessionCredential,
+    type BaseProvider,
+    type BaseSession,
+    type SessionEvent,
+} from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 import type { ProviderExecutionObservations } from "./ProviderExecutionObservations.js";
 import type { CredentialDiagnosticSanitizer } from "./credentialDiagnosticSanitizer.js";
+import { nativeAccountIdentity } from "../persistence/nativeAccountIdentity.js";
 
 const observedProviders = new WeakSet<BaseProvider>();
 const observedSessions = new WeakMap<
@@ -47,6 +54,7 @@ export function observeProviderExecution(
         const mode = (
             ctx: Context,
             request: { model?: string; effort?: string; serviceTier?: string },
+            account: MessageMode["account"] = null,
         ): MessageMode | undefined =>
             request.model === undefined
                 ? undefined
@@ -56,7 +64,7 @@ export function observeProviderExecution(
                       effort: request.effort ?? agentEffort(ctx) ?? "medium",
                       serviceTier: request.serviceTier ?? agentServiceTier(ctx) ?? null,
                       permissionMode: agentPermissionMode(ctx),
-                      ...(providerType === undefined ? {} : { providerType, account: null }),
+                      ...(providerType === undefined ? {} : { providerType, account }),
                   };
         const run = session.run.bind(session);
         // Preserve ordinary prototype method lookup for scripted adapters that replace their
@@ -65,16 +73,31 @@ export function observeProviderExecution(
         session.run = (ctx, request) => {
             // Capture once at entry, never look up the current operation when a late event lands.
             const handle = observations.claim(session.id, "inference");
-            const snapshot = mode(ctx, request);
-            if (handle !== undefined) {
-                if (observation.ambiguous) observations.discard(handle);
-                else if (snapshot !== undefined)
-                    observations.activate(handle, {
-                        mode: snapshot,
-                        credentialSource,
-                        ...(recovery === undefined ? {} : { recovery }),
-                    });
-            }
+            // This exact credential supplies the native HTTP and WebSocket account header.
+            // Copy before any await; never reread mutable login files or provider metadata.
+            const principal = nativePrincipal();
+            let snapshot = mode(ctx, request);
+            let prepared: Promise<void> | undefined;
+            const prepare = async () => {
+                const account =
+                    handle === undefined || observation.ambiguous
+                        ? null
+                        : await nativeAccountIdentity(ctx, principal);
+                if (snapshot !== undefined && providerType !== undefined)
+                    snapshot = {
+                        ...snapshot,
+                        account: principal === nativePrincipal() ? account : null,
+                    };
+                if (handle !== undefined) {
+                    if (observation.ambiguous) observations.discard(handle);
+                    else if (snapshot !== undefined)
+                        observations.activate(handle, {
+                            mode: snapshot,
+                            credentialSource,
+                            ...(recovery === undefined ? {} : { recovery }),
+                        });
+                }
+            };
             let recorded = false;
             const record = (errorCode?: string) => {
                 if (recorded) return;
@@ -111,6 +134,9 @@ export function observeProviderExecution(
                         operation: () => Promise<IteratorResult<SessionEvent>>,
                     ): Promise<IteratorResult<SessionEvent>> => {
                         try {
+                            // The native run is lazy. Resolve only local metadata before its first
+                            // request, so the first output block already has the frozen identity.
+                            await (prepared ??= prepare());
                             const result = await operation();
                             if (result.done) record();
                             else if (result.value.type === "done") {
@@ -147,7 +173,16 @@ export function observeProviderExecution(
         const compact = session.compact.bind(session);
         session.compact = async (ctx, request) => {
             const handle = observations.claim(session.id, "compaction");
-            const snapshot = mode(ctx, request);
+            const principal = nativePrincipal();
+            const selected = mode(ctx, request);
+            const account =
+                handle === undefined || observation.ambiguous
+                    ? null
+                    : await nativeAccountIdentity(ctx, principal);
+            const snapshot =
+                selected === undefined || providerType === undefined
+                    ? selected
+                    : { ...selected, account: principal === nativePrincipal() ? account : null };
             try {
                 return await compact(ctx, request);
             } finally {
@@ -161,6 +196,14 @@ export function observeProviderExecution(
             }
         };
         return session;
+
+        function nativePrincipal(): string | undefined {
+            return providerType === "codex" &&
+                session instanceof CodexSession &&
+                session.credential instanceof CodexSessionCredential
+                ? session.credential.credential.accountId
+                : undefined;
+        }
     };
     observedProviders.add(provider);
     return provider;
