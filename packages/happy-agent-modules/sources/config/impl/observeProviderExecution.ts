@@ -175,10 +175,16 @@ export function observeProviderExecution(
             const handle = observations.claim(session.id, "compaction");
             const principal = nativePrincipal();
             const selected = mode(ctx, request);
-            const account =
-                handle === undefined || observation.ambiguous
-                    ? null
-                    : await nativeAccountIdentity(ctx, principal);
+            let account: MessageMode["account"] = null;
+            try {
+                if (handle !== undefined && !observation.ambiguous)
+                    account = await nativeAccountIdentity(ctx, principal);
+            } catch (error) {
+                // Nothing reached the native provider. Release this claim even when a direct
+                // factory caller has no daemon settlement hook to end the observation.
+                if (handle !== undefined) observations.discard(handle);
+                throw error;
+            }
             const snapshot =
                 selected === undefined || providerType === undefined
                     ? selected

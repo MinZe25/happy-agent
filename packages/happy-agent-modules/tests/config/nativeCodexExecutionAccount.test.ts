@@ -2,7 +2,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openAgentSQLiteDatabase, withAgentDatabase } from "@slopus/happy-agent-base";
+import {
+    agentDatabaseRun,
+    openAgentSQLiteDatabase,
+    withAgentDatabase,
+} from "@slopus/happy-agent-base";
+import { sql } from "drizzle-orm";
 import { createRootContext } from "@steve.kite/stdlib";
 import { expect, it } from "vitest";
 import { testConfigRootedAt } from "../support/configModule.js";
@@ -94,6 +99,21 @@ it("maps the actual native Codex credential to an opaque ID and freezes it when 
             "synthetic-private-access",
         ])
             expect(JSON.stringify([a, failedA, b])).not.toContain(marker);
+        // A failure before native compaction dispatch must release the claimed observation,
+        // including direct factory callers that do not have a daemon settlement hook.
+        await agentDatabaseRun(ctx.db, sql`DROP TABLE happy_agent_config_native_accounts`);
+        config.beginExecutionObservation(fresh.id, "storage-failure", "compaction");
+        await expect(
+            fresh.compact(ctx, {
+                model,
+                context: { instructions: "Synthetic test.", messages: [] },
+            }),
+        ).rejects.toThrow("The private account identity could not be resolved.");
+        expect(config.executionObservation(fresh.id, "storage-failure")).toBeUndefined();
+        expect(wire).toHaveLength(3);
+        config.beginExecutionObservation(fresh.id, "after-storage-failure", "compaction");
+        expect(config.executionObservation(fresh.id, "after-storage-failure")).toEqual([]);
+        config.endExecutionObservation(fresh.id, "after-storage-failure");
     } finally {
         await fresh?.destroy();
         await session.destroy();

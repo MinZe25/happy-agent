@@ -68,6 +68,8 @@ maps exact Codex principals to those IDs across profiles, agents, token refresh 
 retains at most 4,096 identities without eviction: existing IDs remain stable when full, and unseen
 accounts become unknown. Unknown, invalid, storage-free, API-key and Claude identities remain
 unknown; neither aliases nor a later login-file read establish identity.
+If local identity storage fails before compaction dispatch, the observer releases that operation's
+claim immediately. Direct factory callers have no daemon settlement hook to clear a stale claim.
 
 Native token refresh also replaces the concrete session's credential. Selection-time redaction
 alone missed an upstream error echoing that new token. The existing bounded diagnostic sanitizer
