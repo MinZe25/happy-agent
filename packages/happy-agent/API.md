@@ -18,6 +18,10 @@ The daemon has two mutually exclusive deployment transports:
   container or service whose external boundary is controlled by its deployment platform.
   A configured port of `0` selects an ephemeral port.
 
+Either mode may also serve the same API over Tailcat: `[feature.tailcat]` exposes the deployment
+transport, and the mobile connector's socket serves paired phones with credentials of their own.
+See Mobile connector.
+
 Clients construct request URLs against an arbitrary authority — the daemon ignores the `Host`
 header. Only the path and query string matter.
 
@@ -209,11 +213,15 @@ have no credentials: no sign-in method, bearer token, or bridge token authentica
 `GET /v0/authentication` is the only unauthenticated endpoint. Every other endpoint, health
 included, requires a valid bearer token.
 
+The mobile connector's socket accepts none of these credentials, only a paired phone's device
+token and the pairing credentials, and has no unauthenticated endpoint. The main transports accept
+none of the mobile credentials. See "Credentials on the connector's socket".
+
 ### Versioning
 
 All routes are prefixed with `/v0`. Independently of the path version, every daemon advertises
 its identity through the health endpoint as a single `version` object: a numeric `protocol`
-(integer, currently 26) and the `daemon` product version string. Protocol versions from 22 onward
+(integer, currently 27) and the `daemon` product version string. Protocol versions from 22 onward
 are backward-compatible and additive. Clients support that compatibility range for existing
 capabilities instead of requiring equality with their own protocol number. A client may require
 a newer protocol for a capability it needs and must explain that an upgrade is required when the
@@ -237,6 +245,12 @@ that show runners or create projects on them require protocol 26 or newer. An ol
 daemon answers `GET /v0/runners` with `404` and never returns a runner compute. A client that meets
 a compute `type` it does not recognize treats the folder as being on another machine and offers no
 local-path actions for it.
+
+Protocol 27 adds the mobile connector: `GET /v0/mobile-connector`, the pairing and device routes
+under `/v0/mobile-connector`, `mobile_connector.updated`, and the connector's socket with its
+handshake routes and credentials. Clients that offer direct phone connections require protocol 27
+or newer. An older compatible daemon answers these routes with `404`, which clients treat as the
+feature being unavailable, and never emits the event.
 
 Account provenance, configuration history blocks, and structured error details are additive output
 and do not increment the protocol version. Clients tolerate their absence and older clients keep
@@ -2641,6 +2655,787 @@ integration. When Happy cannot confirm removing this computer, the request retur
 fresh authorization request, it returns `503` with code `happy_unavailable` and the now-unlinked
 `"disconnected"` integration; the previous credentials remain removed so a later retry cannot
 silently reconnect the account the person chose to replace.
+
+## Mobile connector
+
+The mobile connector lets a phone reach this daemon directly, without a relay. The phone scans a QR
+code shown on the desktop, runs a key exchange with the daemon over a dedicated private Tailcat
+socket, and derives a long-term device token from that exchange. Both screens then show the same
+four emoji. Pairing completes only when the person at the desktop and the person on the phone have
+both confirmed that the emoji match, so a leaked QR code by itself never yields a paired device.
+A paired phone then uses this same API over that socket with its device token.
+
+Happy Agent ships no phone code. A phone implements its side from this section alone; the fixed
+test vectors and the emoji table below are the reference it is checked against.
+
+The machine setting `[feature.mobile_connector]` has `enabled`, default `true`, and `port`, default
+`24781`. Only machine configuration can set it, never a repository's `happy.toml`.
+
+In standalone mode the installation's one person owns the pairing and the paired phones. In team
+mode each locally onboarded user has their own: authentication selects the owner for every route,
+no route takes an owner, and a phone acts with the authority of the user who paired it. Each owner
+has at most one pairing at a time.
+
+Pairing state lives only in daemon memory and a restart abandons an unfinished pairing. Paired
+phones are stored in the main database by the SHA-256 of their device token, never the token.
+
+### The connector's socket
+
+The connector's socket is a Tailcat exposure with its own stable identity, separate from
+`[feature.tailcat]`. The phone dials `server.tailcat` on the port from the QR code through a
+Tailcat client for the address from the QR code. Tailcat encrypts the traffic and authenticates the
+server. The address carries the identity's WireGuard key and pre-shared key, so it is a secret:
+phones keep it with the device token and never log it.
+
+Behind the socket is this API: the same routes, Server-Sent Events, WebSocket upgrades, and
+`CONNECT` tunnels as on the main transports, which are the Unix socket, the team TCP listener, and
+the `[feature.tailcat]` exposure. The socket differs only in the credentials it accepts.
+
+The socket is open only while a pairing is active, for three seconds after a pairing ends, or while
+at least one phone is paired. The three seconds let the answer to the request that ended a pairing,
+and a status read it woke, reach the phone. A restart reopens the socket when phones are paired.
+When nothing needs it, or the feature is disabled, nothing is exposed.
+
+### Credentials on the connector's socket
+
+Every request, WebSocket upgrade, and `CONNECT` on the connector's socket is authenticated before
+anything else happens, with one of three bearer credentials:
+
+```
+Authorization: Bearer <credential>
+```
+
+- A **device token**, `base64url(deviceToken)`, authenticates a paired phone. It acts with the
+  authority of the user who created the pairing, and may use every route that user may use, except:
+    - daemon lifecycle and debugging: `/v0/drain`, `/v0/shutdown`, and `/v0/debug` and everything
+      under it;
+    - mobile connector management: `/v0/mobile-connector` and everything under it, so one phone
+      can neither pair nor remove others.
+
+    Those return `403` with code `forbidden`, whatever the method.
+
+- The QR code's **pairing token** `t` authenticates only `POST /v0/mobile-connector/handshake`.
+- A **handshake credential**, the `handshakeId` that start returned, authenticates only that
+  handshake's own routes: `GET /v0/mobile-connector/handshake` and
+  `POST /v0/mobile-connector/handshake/reveal`, `/confirm`, and `/reject`.
+
+Anything else receives `401` with code `unauthorized` and no `authentication` field: a missing
+header, an unknown or removed device's token, a used, replaced, or expired pairing token, a
+handshake the daemon no longer knows, a pairing or handshake credential on any other route, and
+every credential of the main transports, namely the standalone token, WorkOS and JWT access
+tokens, runner tokens, and bridge tokens. On this socket no endpoint is unauthenticated,
+`GET /v0/authentication` included.
+
+The main transports never accept a device token, a pairing token, or a handshake credential: they
+receive `401` like any unknown token. The handshake routes exist only on the connector's socket; on
+a main transport they return `404` with code `not_found`.
+
+Removing a device from the desktop makes its token fail at once and closes every request, event
+stream, WebSocket, and `CONNECT` tunnel it has open. The device's `lastSeenAt` moves forward at most
+once a minute as the phone uses its token.
+
+### The mobile connector object
+
+```json
+{
+    "status": "open",
+    "pairing": {
+        "id": "pq7xk2m9r4t8w1y5z3a6b0c2",
+        "status": "verifying",
+        "qr": null,
+        "expiresAt": 1755400420000,
+        "device": { "name": "Steve's iPhone", "platform": "ios" },
+        "emoji": ["🐶", "🎸", "🍕", "🚀"],
+        "desktopConfirmed": false,
+        "mobileConfirmed": true,
+        "error": null
+    },
+    "devices": [
+        {
+            "id": "dv3n8k1m5q9r2t6w0y4z7a1c",
+            "name": "Steve's iPhone",
+            "platform": "ios",
+            "createdAt": 1755400000000,
+            "lastSeenAt": 1755400300000
+        }
+    ],
+    "error": null,
+    "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e",
+    "updatedAt": 1755400300000
+}
+```
+
+- `status` — the connector's socket, one of:
+    - `"disabled"` — `[feature.mobile_connector] enabled` is `false`;
+    - `"closed"` — enabled, but nothing needs the socket, so nothing is exposed;
+    - `"starting"` — the socket is opening;
+    - `"open"` — phones can reach the daemon;
+    - `"failed"` — the socket could not open; `error` says why. The next pairing or device change
+      tries again.
+- `pairing` — the caller's current or most recent pairing, or `null`. A finished pairing stays here
+  until the next start or cancel, so the desktop can show how it ended.
+    - `id` — a CUID2 naming this pairing in the desktop routes.
+    - `status` — one of:
+        - `"waiting"` — waiting for a phone. Before a phone uses the code, `qr` is set and `device`
+          is `null`. Once a phone has used it, `qr` is `null` and `device` is set, until the
+          phone's key arrives a moment later.
+        - `"verifying"` — the keys are exchanged. `device` and `emoji` are set, and the pairing
+          waits for both confirmations.
+        - `"completed"` — both people confirmed and the phone is paired; it is in `devices`.
+        - `"rejected"` — the person on the phone said the emoji do not match.
+        - `"expired"` — five minutes passed before both confirmations arrived.
+        - `"cancelled"` — the desktop cancelled it, or a newer pairing replaced it.
+        - `"failed"` — the phone's key did not match the one it committed to, the phone's key
+          could not be used, the phone's confirmation did not prove it derived the same keys, or
+          the socket could not open. `error` says which, in English safe to display.
+    - `qr` — the complete `happy://direct?…` text to show as a QR code while it can still be used;
+      `null` otherwise. It contains a one-time secret token and the socket's secret address, so
+      clients show it only on screen and never log or store it. Its format is specified under "The
+      QR code"; desktop clients treat it as opaque.
+    - `expiresAt` — epoch milliseconds five minutes after the pairing started. Everything, both
+      confirmations included, must happen before it.
+    - `device` — `{ name, platform }` as the phone described itself, or `null`. `name` is 1–128
+      printable characters; `platform` is `"ios"`, `"android"`, or `"other"`. The phone chose
+      these values, so they are for display and prove nothing.
+    - `emoji` — the four emoji to compare, set from `"verifying"` on and kept on a finished
+      pairing that reached it; `null` otherwise. Show them exactly as given.
+    - `desktopConfirmed`, `mobileConfirmed` — which confirmations have arrived.
+    - `error` — `null`, or an English message for a `"failed"` pairing.
+- `devices` — the caller's paired phones, oldest first. `createdAt` is when pairing completed;
+  `lastSeenAt` starts equal to it and afterwards moves forward, at most once a minute, when the
+  phone uses its token.
+- `error` — `null`, or an English message while `status` is `"failed"`.
+- `version` — a UUIDv7 minted for the caller whenever this snapshot changes. The event carries the
+  complete object, so a client keeps the one with the greater version.
+- `updatedAt` — when the snapshot last changed.
+
+### `GET /v0/mobile-connector`
+
+Response — `200`: `{ "mobileConnector": { ... } }`. This also answers while the feature is
+disabled, with `status: "disabled"`.
+
+### `POST /v0/mobile-connector/pairing`
+
+Starts a pairing, opening the socket if needed, and returns once the QR code is ready. It has no
+request body. Any earlier pairing of the caller's is cancelled and replaced, so its code stops
+working. If the socket cannot open, the response still succeeds and carries a `"failed"` pairing
+and a `"failed"` status.
+
+Response — `200`: `{ "mobileConnector": { ... } }`. When the feature is disabled, the request
+returns `503` with code `unsupported`.
+
+### `POST /v0/mobile-connector/pairing/confirm`
+
+```json
+{ "pairingId": "pq7xk2m9r4t8w1y5z3a6b0c2" }
+```
+
+The person at the desktop says the emoji match. If the phone has already confirmed, the phone is
+paired and the pairing becomes `"completed"` in the response; otherwise the pairing stays
+`"verifying"` with `desktopConfirmed: true` until the phone confirms.
+
+Response — `200`: `{ "mobileConnector": { ... } }`. A `pairingId` that is not the caller's current
+pairing returns `404` with code `not_found`. A pairing that is not `"verifying"`, including one
+that has just expired, returns `409` with code `conflict`.
+
+### `POST /v0/mobile-connector/pairing/cancel`
+
+```json
+{ "pairingId": "pq7xk2m9r4t8w1y5z3a6b0c2" }
+```
+
+The person at the desktop says the emoji do not match, or gives up. An active pairing becomes
+`"cancelled"` and nothing is paired. A finished pairing is dismissed, so `pairing` becomes `null`.
+Any other `pairingId` changes nothing, so a repeated cancel is harmless.
+
+Response — `200`: `{ "mobileConnector": { ... } }`.
+
+### `DELETE /v0/mobile-connector/devices/:deviceId`
+
+Removes one of the caller's paired phones. Its token stops working at once, every request, stream,
+WebSocket, and tunnel it has open is closed, and the socket closes if nothing else needs it. This
+also works while the feature is disabled.
+
+Response — `200`: `{ "mobileConnector": { ... } }`. A phone that is not one of the caller's returns
+`404` with code `not_found`.
+
+### Events
+
+Every change to a caller's snapshot emits `mobile_connector.updated` with the complete object. It is
+delivered only to that owner, in event pulls and in live or replayed streams, and never to another
+team member.
+
+### The QR code
+
+```
+happy://direct?<base64url(UTF-8 JSON)>
+```
+
+The scheme is Happy's existing `happy`, the host is `direct`, and the query is the whole bundle
+with no `=` or padding. Happy's older relay pairing uses `happy://terminal?…`, so the host alone
+tells the two apart: the app accepts `happy://direct?` alongside `happy://terminal?` and treats
+each according to its host. The bundle is plain encoding, not encryption:
+
+```json
+{
+    "v": 1,
+    "a": "tcEXAMPLE…",
+    "p": 24781,
+    "t": "Ad3…43 characters…",
+    "n": "Steve's Mac",
+    "e": 1755400420000
+}
+```
+
+| key | meaning                                                                  |
+| --- | ------------------------------------------------------------------------ |
+| `v` | format version, `1`                                                      |
+| `a` | the connector's Tailcat address, exactly as Tailcat printed it; a secret |
+| `p` | the port to dial on `server.tailcat`                                     |
+| `t` | the one-time pairing token: base64url of 32 random bytes                 |
+| `n` | the daemon's node name, for display only and untrusted                   |
+| `e` | the pairing's expiry in epoch milliseconds, for display only             |
+
+A reader ignores unknown keys. A bundle whose `v` is a number other than `1` asks the person to
+update the app. Anything else is not a pairing code.
+
+The token exists only in daemon memory. It expires five minutes after the pairing started and is
+consumed by the first start that presents it, whatever happens next. The daemon never logs it.
+
+### Encoding
+
+All binary values in JSON and in bearer credentials are base64url without padding, in canonical
+form. A 32-byte value is exactly 43 characters. `‖` is concatenation, `lp(x)` is a 4-byte
+big-endian length followed by `x`, and text labels are UTF-8 bytes with no length prefix. The
+primitives are X25519, SHA-256, HMAC-SHA-256, and HKDF-SHA-256.
+
+### Pairing
+
+```
+Phone                                                   Daemon
+a, A = X25519 key pair; Nm = 32 random bytes
+C = SHA256("happy-mobile-pair-v1/commit" ‖ A ‖ Nm)
+POST /v0/mobile-connector/handshake          Bearer t
+     {commitment: C, device}
+                                                        consume the token
+                                                        b, B = X25519 key pair; Nd = 32 random
+                       ←  {handshakeId, publicKey: B, nonce: Nd, expiresAt}
+POST /v0/mobile-connector/handshake/reveal   Bearer handshakeId
+     {publicKey: A, nonce: Nm}
+                                                        check C; derive the secrets
+                       ←  {status: "verifying"}
+both people compare the emoji
+POST /v0/mobile-connector/handshake/confirm  Bearer handshakeId
+     {mac: MAC("mobile")}
+GET  /v0/mobile-connector/handshake?wait=25  Bearer handshakeId, until "completed"
+                       ←  {status: "completed", deviceId, mac: MAC("daemon")}
+check MAC("daemon"), then store {address, port, deviceId, deviceToken}
+```
+
+#### Derivation
+
+Both sides compute, independently:
+
+```
+K           = X25519(own private key, peer public key)
+TH          = SHA256("happy-mobile-pair-v1" ‖ lp(t) ‖ lp(C) ‖ lp(A) ‖ lp(B) ‖ lp(Nm) ‖ lp(Nd)
+                     ‖ lp(utf8(address)) ‖ lp(u16be(port)))
+PRK         = HKDF-Extract(salt = TH, ikm = K)
+emojiKey    = HKDF-Expand(PRK, "happy-mobile-pair-v1 emoji", 32)
+confirmKey  = HKDF-Expand(PRK, "happy-mobile-pair-v1 confirm", 32)
+deviceToken = HKDF-Expand(PRK, "happy-mobile-pair-v1 device-token", 32)
+emoji       = stringForEmojiHashOfData(SHA256(emojiKey), 4)
+MAC(role)   = HMAC-SHA256(confirmKey, role ‖ TH), role "mobile" or "daemon"
+```
+
+- `t` is the token's 32 raw bytes, not its base64url text.
+- The phone uses the address and port it dialed from the QR code, and the daemon uses the ones it
+  serves, so a replaced QR code changes the transcript and the emoji.
+- Either side refuses a shared secret `K` of all zeros, which every low-order public key produces.
+- The daemon never sends emoji. The phone computes them itself.
+- The device token never crosses the wire. Both sides derive it, and the daemon stores only
+  `SHA256(deviceToken)` over its 32 raw bytes.
+
+The commitment makes a relaying attacker choose the key it shows the phone before it learns the
+phone's key, and the single-use token stops it retrying against the daemon. Its chance of matching
+emoji is about 1 in 333⁴, roughly 1 in 1.2·10¹⁰.
+
+#### Emoji
+
+The emoji function is Telegram iOS's, from
+`submodules/TelegramCallsUI/CallsEmoji/Sources/CallsEmoji.m` in TelegramMessenger/Telegram-iOS:
+
+- `stringForEmojiHashOfData(data, count)` takes exactly 32 bytes. For `i` from `0` to `count - 1`,
+  it reads bytes `[8i, 8i + 8)` as a big-endian 64-bit integer, clears its top bit, and takes the
+  remainder modulo 333 as an index into `emojisArray()`. The value exceeds 2⁵³, so JavaScript uses
+  `BigInt`.
+- `emojisArray()` has 333 entries, with the exact strings including U+FE0F variation selectors
+  such as `"✌️"`, `"⚡️"`, and `"1️⃣"`. The SHA-256 of the entries joined by `\n` in UTF-8, with
+  no trailing newline, is `c22c3a00d5a68df075fecc8cb8b730a45817a246a5ca70fa3b75d248ac5b54e9`. The
+  table is reproduced in full under "The emoji table" below; never normalize or reorder it.
+- `stringForEmojiHashOfData(x, 4)` gives:
+    - for `x` = 32 zero bytes: 😉 😉 😉 😉
+    - for `x` = `000102…1f`: 💍 ☔️ 📅 🍞
+    - for `x` = `SHA256(000102…1f)`: 🙉 🇷🇺 ☔️ ✈️
+
+#### Test vectors
+
+With phone private key `01`×32, daemon private key `02`×32, token `03`×32, phone nonce `04`×32,
+daemon nonce `05`×32, address `tcFixedVectorAddress`, and port `24781`, every value in hex:
+
+| value                 | hex                                                                |
+| --------------------- | ------------------------------------------------------------------ |
+| `A`                   | `a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209` |
+| `B`                   | `ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59` |
+| `C`                   | `ae75325169fe3b8d8571df1c5fd015ef9989051a0363e780322a09ebf2430caf` |
+| `K`                   | `2ed76ab549b1e73c031eb49c9448f0798aea81b698279a0c3dc3e49fbfc4b953` |
+| `TH`                  | `919140a78d542ec0999e8b045e9b368c94a5cc2d90d6c92e7f14e8d6d302eb08` |
+| `emojiKey`            | `fa42488ee1ceadb6998e8d35792cdda1a1210a63153069fe67f1f1ce57404369` |
+| `confirmKey`          | `152eb695974a86f350d777dd1a7e63abb327eb6af37ee465addbb46ea53cde3f` |
+| `deviceToken`         | `05bf38156a0b81046b4e15f584760e0e8996efe81239e5efe4560fef29c20aeb` |
+| `MAC("mobile")`       | `56562cd319819213d10c33fd9e508fffb19343d84b14882ecfc550c058181d85` |
+| `MAC("daemon")`       | `81fa0f2f506f539f4ca3f22eeeac675850f3cd902719f14799fc6519266893c9` |
+| `SHA256(deviceToken)` | `dd652c0915a809fbbdbedc963a8ddf0c940cff4bda204d9b9d886b3e661f67b1` |
+
+The emoji for these values are 🌀 👗 ⏳ 👟.
+
+### Handshake routes
+
+These routes exist only on the connector's socket. Each takes the credential named for it, as
+described under "Credentials on the connector's socket". A handshake's status is described by:
+
+```json
+{ "status": "completed", "deviceId": "dv3n8k1m5q9r2t6w0y4z7a1c", "mac": "…43 characters…" }
+```
+
+`status` is one of:
+
+- `"verifying"` — the pairing is in progress, including while it waits for either confirmation;
+- `"completed"` — both people confirmed. Only this status carries `deviceId` and `mac`, which is
+  `MAC("daemon")`. The phone stores nothing until that MAC checks out.
+- `"rejected"` — the pairing ended without a device: the phone or the desktop said the emoji do not
+  match, the desktop cancelled, or a key or MAC was wrong;
+- `"expired"` — five minutes passed first.
+
+Every failure is immediate and final. A wrong commitment, an unusable key, or a wrong MAC ends the
+pairing, and the single-use token cannot start another. A handshake the daemon no longer knows, for
+example after a restart or after the desktop started a newer pairing, fails authentication with
+`401`, which phones treat as `"expired"`.
+
+### `POST /v0/mobile-connector/handshake`
+
+Authenticated by the QR code's pairing token.
+
+```json
+{
+    "commitment": "…C…",
+    "device": { "name": "Steve's iPhone", "platform": "ios" }
+}
+```
+
+`device.name` is 1–128 printable characters and `device.platform` is `"ios"`, `"android"`, or
+`"other"`. The desktop shows them beside the emoji.
+
+Response — `200`:
+
+```json
+{
+    "handshakeId": "…43 characters…",
+    "publicKey": "…B…",
+    "nonce": "…Nd…",
+    "expiresAt": 1755400420000
+}
+```
+
+`handshakeId` is a separate random 32 bytes, not the desktop's pairing ID, and is the credential
+for the rest of the handshake. It is a secret: phones send it only in the `Authorization` header
+and never log it. A malformed body returns `400` with code `invalid_request` and still consumes the
+token.
+
+### `POST /v0/mobile-connector/handshake/reveal`
+
+Authenticated by the handshake credential.
+
+```json
+{ "publicKey": "…A…", "nonce": "…Nm…" }
+```
+
+Response — `200`: a handshake status. It is `"verifying"` when the key matched the commitment, and
+`"rejected"` when it did not or could not be used. Revealing twice returns `409` with code
+`conflict`.
+
+### `POST /v0/mobile-connector/handshake/confirm`
+
+Authenticated by the handshake credential.
+
+```json
+{ "mac": "…MAC(\"mobile\")…" }
+```
+
+The person on the phone says the emoji match. Response — `200`: a handshake status. It is
+`"completed"` when the desktop had already confirmed, `"verifying"` while the desktop has not, and
+`"rejected"` for a wrong MAC. Confirming before revealing returns `409` with code `conflict`.
+
+### `POST /v0/mobile-connector/handshake/reject`
+
+Authenticated by the handshake credential. It has no request body.
+
+The person on the phone says the emoji do not match. Response — `200`: a handshake status,
+normally `"rejected"`. Nothing is paired.
+
+### `GET /v0/mobile-connector/handshake?wait=25`
+
+Authenticated by the handshake credential. Reads the handshake's status. With `wait`, an integer
+number of seconds up to 25, a `"verifying"` handshake answers when its status changes or when the
+wait runs out, whichever is first. A finished handshake answers at once. Response — `200`: a
+handshake status.
+
+### The emoji table
+
+The 333 entries of Telegram iOS's `emojisArray()`, in order, as a JSON array. Index `0` is 😉 and
+index `332` is 🔷. Implementations copy these exact code points and check the SHA-256 above.
+
+<!-- emoji-table-begin -->
+
+```json
+[
+    "😉",
+    "😍",
+    "😛",
+    "😭",
+    "😱",
+    "😡",
+    "😎",
+    "😴",
+    "😵",
+    "😈",
+    "😬",
+    "😇",
+    "😏",
+    "👮",
+    "👷",
+    "💂",
+    "👶",
+    "👨",
+    "👩",
+    "👴",
+    "👵",
+    "😻",
+    "😽",
+    "🙀",
+    "👺",
+    "🙈",
+    "🙉",
+    "🙊",
+    "💀",
+    "👽",
+    "💩",
+    "🔥",
+    "💥",
+    "💤",
+    "👂",
+    "👀",
+    "👃",
+    "👅",
+    "👄",
+    "👍",
+    "👎",
+    "👌",
+    "👊",
+    "✌️",
+    "✋️",
+    "👐",
+    "👆",
+    "👇",
+    "👉",
+    "👈",
+    "🙏",
+    "👏",
+    "💪",
+    "🚶",
+    "🏃",
+    "💃",
+    "👫",
+    "👪",
+    "👬",
+    "👭",
+    "💅",
+    "🎩",
+    "👑",
+    "👒",
+    "👟",
+    "👞",
+    "👠",
+    "👕",
+    "👗",
+    "👖",
+    "👙",
+    "👜",
+    "👓",
+    "🎀",
+    "💄",
+    "💛",
+    "💙",
+    "💜",
+    "💚",
+    "💍",
+    "💎",
+    "🐶",
+    "🐺",
+    "🐱",
+    "🐭",
+    "🐹",
+    "🐰",
+    "🐸",
+    "🐯",
+    "🐨",
+    "🐻",
+    "🐷",
+    "🐮",
+    "🐗",
+    "🐴",
+    "🐑",
+    "🐘",
+    "🐼",
+    "🐧",
+    "🐥",
+    "🐔",
+    "🐍",
+    "🐢",
+    "🐛",
+    "🐝",
+    "🐜",
+    "🐞",
+    "🐌",
+    "🐙",
+    "🐚",
+    "🐟",
+    "🐬",
+    "🐋",
+    "🐐",
+    "🐊",
+    "🐫",
+    "🍀",
+    "🌹",
+    "🌻",
+    "🍁",
+    "🌾",
+    "🍄",
+    "🌵",
+    "🌴",
+    "🌳",
+    "🌞",
+    "🌚",
+    "🌙",
+    "🌎",
+    "🌋",
+    "⚡️",
+    "☔️",
+    "❄️",
+    "⛄️",
+    "🌀",
+    "🌈",
+    "🌊",
+    "🎓",
+    "🎆",
+    "🎃",
+    "👻",
+    "🎅",
+    "🎄",
+    "🎁",
+    "🎈",
+    "🔮",
+    "🎥",
+    "📷",
+    "💿",
+    "💻",
+    "☎️",
+    "📡",
+    "📺",
+    "📻",
+    "🔉",
+    "🔔",
+    "⏳",
+    "⏰",
+    "⌚️",
+    "🔒",
+    "🔑",
+    "🔎",
+    "💡",
+    "🔦",
+    "🔌",
+    "🔋",
+    "🚿",
+    "🚽",
+    "🔧",
+    "🔨",
+    "🚪",
+    "🚬",
+    "💣",
+    "🔫",
+    "🔪",
+    "💊",
+    "💉",
+    "💰",
+    "💵",
+    "💳",
+    "✉️",
+    "📫",
+    "📦",
+    "📅",
+    "📁",
+    "✂️",
+    "📌",
+    "📎",
+    "✒️",
+    "✏️",
+    "📐",
+    "📚",
+    "🔬",
+    "🔭",
+    "🎨",
+    "🎬",
+    "🎤",
+    "🎧",
+    "🎵",
+    "🎹",
+    "🎻",
+    "🎺",
+    "🎸",
+    "👾",
+    "🎮",
+    "🃏",
+    "🎲",
+    "🎯",
+    "🏈",
+    "🏀",
+    "⚽️",
+    "⚾️",
+    "🎾",
+    "🎱",
+    "🏉",
+    "🎳",
+    "🏁",
+    "🏇",
+    "🏆",
+    "🏊",
+    "🏄",
+    "☕️",
+    "🍼",
+    "🍺",
+    "🍷",
+    "🍴",
+    "🍕",
+    "🍔",
+    "🍟",
+    "🍗",
+    "🍱",
+    "🍚",
+    "🍜",
+    "🍡",
+    "🍳",
+    "🍞",
+    "🍩",
+    "🍦",
+    "🎂",
+    "🍰",
+    "🍪",
+    "🍫",
+    "🍭",
+    "🍯",
+    "🍎",
+    "🍏",
+    "🍊",
+    "🍋",
+    "🍒",
+    "🍇",
+    "🍉",
+    "🍓",
+    "🍑",
+    "🍌",
+    "🍐",
+    "🍍",
+    "🍆",
+    "🍅",
+    "🌽",
+    "🏡",
+    "🏥",
+    "🏦",
+    "⛪️",
+    "🏰",
+    "⛺️",
+    "🏭",
+    "🗻",
+    "🗽",
+    "🎠",
+    "🎡",
+    "⛲️",
+    "🎢",
+    "🚢",
+    "🚤",
+    "⚓️",
+    "🚀",
+    "✈️",
+    "🚁",
+    "🚂",
+    "🚋",
+    "🚎",
+    "🚌",
+    "🚙",
+    "🚗",
+    "🚕",
+    "🚛",
+    "🚨",
+    "🚔",
+    "🚒",
+    "🚑",
+    "🚲",
+    "🚠",
+    "🚜",
+    "🚦",
+    "⚠️",
+    "🚧",
+    "⛽️",
+    "🎰",
+    "🗿",
+    "🎪",
+    "🎭",
+    "🇯🇵",
+    "🇰🇷",
+    "🇩🇪",
+    "🇨🇳",
+    "🇺🇸",
+    "🇫🇷",
+    "🇪🇸",
+    "🇮🇹",
+    "🇷🇺",
+    "🇬🇧",
+    "1️⃣",
+    "2️⃣",
+    "3️⃣",
+    "4️⃣",
+    "5️⃣",
+    "6️⃣",
+    "7️⃣",
+    "8️⃣",
+    "9️⃣",
+    "0️⃣",
+    "🔟",
+    "❗️",
+    "❓",
+    "♥️",
+    "♦️",
+    "💯",
+    "🔗",
+    "🔱",
+    "🔴",
+    "🔵",
+    "🔶",
+    "🔷"
+]
+```
+
+<!-- emoji-table-end -->
 
 ## Secrets
 
@@ -9424,6 +10219,14 @@ version rules. Snapshot-to-stream cursor and version-gap recovery rules remain u
   reconciling snapshots for the same owner. Team clients never receive another owner's event or
   an unowned installation-wide integration event.
     - `integration` (full Happy integration object).
+
+**Mobile connector**
+
+- `mobile_connector.updated` — the caller's mobile connector changed: its socket status, pairing,
+  or paired phones. This is a complete replacement rather than a version-chain diff; clients keep
+  the snapshot with the greater `version`. In team mode only its owner receives it, in journal
+  pulls, replay, and live delivery, and the payload never names the owner.
+    - `mobileConnector` (the complete mobile connector object).
 
 **User settings**
 
