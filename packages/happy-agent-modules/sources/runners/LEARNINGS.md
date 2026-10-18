@@ -29,11 +29,9 @@ runners; Git commands that create worktrees and clones do run there.
 
 ## Everything that touches a folder runs on the runner
 
-Git, workspace checkouts, terminals, file watching, services, and the workspace proxy were all
-asked for explicitly, not only agent commands. Sandboxed services are the exception for now: the
-runner protocol has no isolated-services capability, so starting one for a runner or container
-agent fails with a message naming runners. Once any runner is configured nothing runs on the
-daemon's machine and nothing falls back to it: a disconnected runner is an error that names it.
+Git, workspace checkouts, terminals, file watching, and the workspace proxy were all asked for
+explicitly, not only agent commands. Once any runner is configured nothing runs on the daemon's
+machine and nothing falls back to it: a disconnected runner is an error that names it.
 Repository tokens still never leave the daemon — Git on a runner reaches back to the daemon's
 credential proxy through a loopback listener carried over the runner connection.
 
