@@ -100,6 +100,12 @@ pub(crate) fn run(target: ConnectTarget) -> ! {
         Err(failure) => output.fail(&failure),
     };
     let _ = socket.set_nodelay(true);
+    // No write may wait on the remote end; see `send_watching_input`. `MSG_DONTWAIT` cannot
+    // promise that: macOS honours it only while taking the send lock, then sleeps for room anyway.
+    // A non-blocking socket is non-blocking on every system, and its clone shares the mode.
+    if let Err(error) = socket.set_nonblocking(true) {
+        output.fail(&ConnectFailure::from_io(&error));
+    }
     let reader = match socket.try_clone() {
         Ok(reader) => reader,
         Err(error) => output.fail(&ConnectFailure::from_io(&error)),
@@ -117,6 +123,9 @@ pub(crate) fn run(target: ConnectTarget) -> ! {
 }
 
 /// Copies the remote end's bytes to standard output until it half-closes.
+///
+/// The socket is non-blocking, so when nothing has arrived this waits for the remote end. Each
+/// frame is written before the next read, so a caller that stops reading stops this reading too.
 fn relay_output(output: &FrameWriter, mut reader: TcpStream) {
     let mut buffer = vec![0_u8; MAX_FRAME_PAYLOAD];
     loop {
@@ -127,9 +136,30 @@ fn relay_output(output: &FrameWriter, mut reader: TcpStream) {
             }
             Ok(count) => output.frame(FRAME_DATA, &buffer[..count]),
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if let Err(error) = wait_readable(&reader) {
+                    output.fail(&ConnectFailure::from_io(&error));
+                }
+            }
             Err(error) => output.fail(&ConnectFailure::from_io(&error)),
         }
     }
+}
+
+/// Waits until `socket` has bytes, its end, or an error to read.
+fn wait_readable(socket: &TcpStream) -> std::io::Result<()> {
+    let mut descriptor = libc::pollfd {
+        fd: socket.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&raw mut descriptor, 1, -1) } < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 /// Reads the caller's frames and applies them to the connection.
@@ -185,35 +215,22 @@ fn relay_input(
 ///
 /// A remote end that stops reading fills the socket's buffer, and a blocking write would then wait
 /// for as long as the remote decides — while the end of standard input, the caller's abort, went
-/// unread behind it. Each write is therefore non-blocking, and waiting for room also waits for
+/// unread behind it. The socket is therefore non-blocking, and waiting for room also waits for
 /// standard input to hang up, which aborts at once.
-fn send_watching_input(socket: &TcpStream, mut bytes: &[u8]) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    const SEND_FLAGS: libc::c_int = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
-    #[cfg(not(target_os = "linux"))]
-    const SEND_FLAGS: libc::c_int = libc::MSG_DONTWAIT;
-
+fn send_watching_input(mut socket: &TcpStream, mut bytes: &[u8]) -> std::io::Result<()> {
     while !bytes.is_empty() {
-        let sent = unsafe {
-            libc::send(
-                socket.as_raw_fd(),
-                bytes.as_ptr().cast(),
-                bytes.len(),
-                SEND_FLAGS,
-            )
-        };
-        if sent >= 0 {
-            bytes = &bytes[sent as usize..];
-            continue;
-        }
-        let error = std::io::Error::last_os_error();
-        match error.kind() {
-            ErrorKind::Interrupted => continue,
-            ErrorKind::WouldBlock => {}
-            _ => return Err(error),
-        }
-        if let Waited::InputHungUp = wait_for_room_or_hangup(Some(socket.as_raw_fd()), None)? {
-            exit_now(0);
+        match socket.write(bytes) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(sent) => bytes = &bytes[sent..],
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if let Waited::InputHungUp =
+                    wait_for_room_or_hangup(Some(socket.as_raw_fd()), None)?
+                {
+                    exit_now(0);
+                }
+            }
+            Err(error) => return Err(error),
         }
     }
     Ok(())
