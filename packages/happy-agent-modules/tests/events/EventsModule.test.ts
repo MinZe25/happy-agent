@@ -337,6 +337,48 @@ describe("EventsModule", () => {
         }
     });
 
+    it("keeps replay and cursor lookups exact while the window slides many times over", async () => {
+        const events = new SmallWindowEventsModule(5);
+        const database = moduleDatabase(events.migrations ?? [], "events-sliding-window-test");
+        await database.ready;
+        try {
+            await events.beforeStart?.(database.context);
+            const recorded: { id: string; type: string }[] = [];
+            for (let index = 0; index < 23; index += 1) {
+                recorded.push(
+                    await events.record(database.context, {
+                        agentId: "agent-a",
+                        payload: { id: `message-${String(index)}` },
+                        type: "message.accepted",
+                    }),
+                );
+                const window = recorded.slice(-5);
+                expect(events.cursor()).toBe(recorded.at(-1)!.id);
+                expect(events.originCursor()).toBe(recorded.at(-6)?.id ?? events.originCursor());
+                expect(events.replay(events.originCursor())?.events.map((e) => e.id)).toEqual(
+                    window.map((e) => e.id),
+                );
+                // Every retained cursor resumes right after itself, a dropped one is a gap.
+                for (const [offset, event] of window.entries()) {
+                    expect(events.replay(event.id, 2)?.events.map((e) => e.id)).toEqual(
+                        window.slice(offset + 1, offset + 3).map((e) => e.id),
+                    );
+                }
+                if (recorded.length > 6) expect(events.replay(recorded.at(-7)!.id)).toBeUndefined();
+                expect(events.messageCursor("agent-a", `message-${String(index)}`)).toBe(
+                    recorded.at(-1)!.id,
+                );
+                if (index >= 5) {
+                    expect(
+                        events.messageCursor("agent-a", `message-${String(index - 5)}`),
+                    ).toBeUndefined();
+                }
+            }
+        } finally {
+            database.close();
+        }
+    });
+
     it("advances the origin when a restart runs with a smaller window", async () => {
         const first = new SmallWindowEventsModule(5);
         const database = moduleDatabase(first.migrations ?? [], "events-capacity-change-test");

@@ -115,7 +115,13 @@ const MAX_STREAMED_VERSION_AGENTS = 256;
 export class EventsModule implements AgentModule<AnyAgentTool> {
     readonly name = "events";
     readonly migrations = eventsMigrations;
-    readonly #entries: AgentEvent[] = [];
+    /**
+     * The retained window is `#buffer` from `#head` on. Leaving the front only advances `#head`,
+     * and the dead prefix is cut once it is as long as the window, so dropping the oldest event on
+     * every append costs nothing like shifting ten thousand entries each time.
+     */
+    readonly #buffer: AgentEvent[] = [];
+    #head = 0;
     /**
      * Where each retained event sits, counted from the first event this process ever held, so a
      * cursor lookup does not scan a window of ten thousand events on every append and replay.
@@ -168,9 +174,9 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             async (txCtx) => await loadEventState(txCtx.db, this.capacity()),
         );
         for (const event of loaded.events) this.#retain(freezeEvent(event));
-        this.#occurredAt = this.#entries.at(-1)?.occurredAt ?? 0;
+        this.#occurredAt = this.#last()?.occurredAt ?? 0;
         this.#originCursor = loaded.originCursor ?? this.#originCursor;
-        const highWater = this.#entries.at(-1)?.id ?? this.#originCursor;
+        const highWater = this.#last()?.id ?? this.#originCursor;
         this.#createId = createUuidV7Factory(Date.now, highWater);
         const runs = await loadActiveRuns(ctx.db, parseActiveRun);
         for (const [agentId, run] of runs) this.#runs.set(agentId, run);
@@ -178,7 +184,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
     };
 
     cursor(): string {
-        return this.#entries.at(-1)?.id ?? this.#originCursor;
+        return this.#last()?.id ?? this.#originCursor;
     }
 
     originCursor(): string {
@@ -317,12 +323,13 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         const latestCursor = this.cursor();
         if (after === undefined) return { cursor: latestCursor, events: [], latestCursor };
         if (after === this.#originCursor) {
-            const events = this.#entries.slice(0, limit);
+            const events = this.#buffer.slice(this.#head, this.#head + limit);
             return { cursor: events.at(-1)?.id ?? after, events, latestCursor };
         }
         const index = this.#indexOf(after);
         if (index < 0) return undefined;
-        const events = this.#entries.slice(index + 1, index + 1 + limit);
+        const start = this.#head + index + 1;
+        const events = this.#buffer.slice(start, start + limit);
         return { cursor: events.at(-1)?.id ?? after, events, latestCursor };
     }
 
@@ -350,12 +357,17 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
     }
 
     messageCursor(agentId: string, messageId: string): string | undefined {
-        return this.#entries.findLast(
-            (event) =>
+        for (let index = this.#buffer.length - 1; index >= this.#head; index -= 1) {
+            const event = this.#buffer[index]!;
+            if (
                 event.agentId === agentId &&
                 event.type === "message.accepted" &&
-                recordValue(event.payload)?.id === messageId,
-        )?.id;
+                recordValue(event.payload)?.id === messageId
+            ) {
+                return event.id;
+            }
+        }
+        return undefined;
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -724,14 +736,15 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         this.#retain(event);
         let drop = 0;
         while (
-            drop < this.#entries.length &&
-            (this.#entries.length - drop > this.capacity() ||
-                (removedThrough !== undefined && this.#entries[drop]!.id <= removedThrough))
+            drop < this.#size() &&
+            (this.#size() - drop > this.capacity() ||
+                (removedThrough !== undefined &&
+                    this.#buffer[this.#head + drop]!.id <= removedThrough))
         ) {
             drop += 1;
         }
         if (drop > 0) {
-            this.#originCursor = this.#entries[drop - 1]!.id;
+            this.#originCursor = this.#buffer[this.#head + drop - 1]!.id;
             this.#dropFront(drop);
         }
         for (const listener of this.#listeners) {
@@ -842,13 +855,15 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
     }
 
     #retain(event: AgentEvent): void {
-        this.#positions.set(event.id, this.#dropped + this.#entries.length);
-        this.#entries.push(event);
+        this.#positions.set(event.id, this.#dropped + this.#size());
+        this.#buffer.push(event);
         if (event.agentId !== undefined) this.#latestByAgent.set(event.agentId, event.id);
     }
 
     #dropFront(count: number): void {
-        for (const removed of this.#entries.splice(0, count)) {
+        const end = this.#head + Math.min(count, this.#size());
+        for (let index = this.#head; index < end; index += 1) {
+            const removed = this.#buffer[index]!;
             this.#positions.delete(removed.id);
             if (
                 removed.agentId !== undefined &&
@@ -857,7 +872,20 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
                 this.#latestByAgent.delete(removed.agentId);
             }
         }
-        this.#dropped += count;
+        this.#dropped += end - this.#head;
+        this.#head = end;
+        if (this.#head >= this.#size()) {
+            this.#buffer.splice(0, this.#head);
+            this.#head = 0;
+        }
+    }
+
+    #size(): number {
+        return this.#buffer.length - this.#head;
+    }
+
+    #last(): AgentEvent | undefined {
+        return this.#size() > 0 ? this.#buffer.at(-1) : undefined;
     }
 
     #indexOf(id: string): number {
