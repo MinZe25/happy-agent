@@ -84,6 +84,11 @@ export function ownAgentMetadata(metadata: AgentMetadata | undefined): AgentMeta
     return immutableClone(metadata);
 }
 
+/** @internal Deeply freeze metadata the caller already owns and has validated, in place. */
+export function freezeOwnedAgentMetadata(metadata: AgentMetadata): AgentMetadata {
+    return deepFreeze(metadata, new WeakSet<object>());
+}
+
 /** Clone one persisted value and freeze every object reachable through ordinary properties. */
 function immutableClone<Value>(value: Value): Value {
     return deepFreeze(structuredClone(value), new WeakSet<object>());
