@@ -117,6 +117,46 @@ export const eventsMigrations: readonly AgentModuleMigration[] = [
             );
         },
     ],
+    [
+        // Every append asks how large the window is. Counting it walked the whole retention index
+        // each time; triggers keep the totals instead, inside whichever transaction changed them.
+        "004-event-totals",
+        async (_ctx, database) => {
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE happy_agent_event_totals (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    count INTEGER NOT NULL,
+                    bytes INTEGER NOT NULL
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`INSERT INTO happy_agent_event_totals (singleton, count, bytes)
+                SELECT 1, count(*), coalesce(sum(payload_bytes), 0) FROM happy_agent_events`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TRIGGER happy_agent_event_totals_insert
+                AFTER INSERT ON happy_agent_events
+                BEGIN
+                    UPDATE happy_agent_event_totals
+                    SET count = count + 1, bytes = bytes + new.payload_bytes
+                    WHERE singleton = 1;
+                END`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TRIGGER happy_agent_event_totals_delete
+                AFTER DELETE ON happy_agent_events
+                BEGIN
+                    UPDATE happy_agent_event_totals
+                    SET count = count - 1, bytes = bytes - old.payload_bytes
+                    WHERE singleton = 1;
+                END`,
+            );
+        },
+    ],
 ];
 
 export async function loadEventState(
@@ -311,17 +351,17 @@ export async function insertEvent(
     return through;
 }
 
-/** Inspect only the covering size index, never deserialize the discarded transcript payloads. */
+/** Inspect only the kept totals and the covering size index, never the discarded payloads. */
 async function eventRetentionBoundary(
     database: AgentDatabase,
     capacity: number,
 ): Promise<string | undefined> {
-    const totals = await agentDatabaseRows<{ count: number; bytes: number | null }>(
+    const totals = await agentDatabaseRows<{ count: number; bytes: number }>(
         database,
-        sql`SELECT count(*) AS count, sum(payload_bytes) AS bytes FROM happy_agent_events`,
+        sql`SELECT count, bytes FROM happy_agent_event_totals WHERE singleton = 1`,
     );
     const count = Number(totals[0]!.count);
-    const bytes = Number(totals[0]!.bytes ?? 0);
+    const bytes = Number(totals[0]!.bytes);
     if (count <= capacity && bytes <= EVENTS_PAYLOAD_BYTE_CAPACITY) return undefined;
     // A full window is the steady state, so this runs on nearly every append. It walks only the
     // oldest rows that must go, in key order, instead of ranking the whole window to find them.

@@ -83,6 +83,16 @@ describe("EventsModule", () => {
                 sql`SELECT sum(payload_bytes) AS bytes FROM happy_agent_events`,
             );
             expect(rows[0]!.bytes).toBeLessThanOrEqual(EVENTS_PAYLOAD_BYTE_CAPACITY);
+            // The kept totals followed every append, trim, and rollback.
+            const [actual] = await agentDatabaseRows(
+                database.database,
+                sql`SELECT count(*) AS count, sum(payload_bytes) AS bytes FROM happy_agent_events`,
+            );
+            const [kept] = await agentDatabaseRows(
+                database.database,
+                sql`SELECT count, bytes FROM happy_agent_event_totals`,
+            );
+            expect(kept).toEqual(actual);
             const restarted = new EventsModule();
             await restarted.beforeStart(database.context);
             expect(restarted.cursor()).toBe(head);
@@ -97,7 +107,7 @@ describe("EventsModule", () => {
 
     it("migrates an oversized legacy window and reads only its bounded suffix on startup", async () => {
         const events = new EventsModule();
-        const database = moduleDatabase(events.migrations.slice(0, -1), "events-legacy-bytes");
+        const database = moduleDatabase(events.migrations.slice(0, 2), "events-legacy-bytes");
         await database.ready;
         try {
             const payload = JSON.stringify({ text: "x".repeat(4 * 1_024 * 1_024) });
@@ -117,7 +127,9 @@ describe("EventsModule", () => {
                 INSERT INTO happy_agent_events (event_id, occurred_at, type, payload_json)
                 VALUES (${id}, 1, 'test.legacy', ${payload})`,
                 );
-            await events.migrations.at(-1)![1](database.context, database.database);
+            for (const [, migrate] of events.migrations.slice(2)) {
+                await migrate(database.context, database.database);
+            }
             await events.beforeStart(database.context);
             expect(events.replay(origin)).toBeUndefined();
             expect(events.originCursor()).toBe(ids[0]);
