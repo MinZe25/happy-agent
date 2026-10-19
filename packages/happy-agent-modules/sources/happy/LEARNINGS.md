@@ -145,6 +145,11 @@ service notices, before tags are named. It needs no lookup, so it can never stal
   Mobile has no join/rejoin UI in this version. Do not simply clear `historyBackfilled` to add
   catch-up: history and live messages use different identities, so that would duplicate earlier
   live messages. Catch-up needs a separate bounded replay/deduplication decision.
+  On a legacy relay's 64-session fallback, tasks and bots share standing-conversation priority:
+  a requested task may replace the oldest bot once every slot holds a bot or task. Ordinary
+  project activity never replaces either. Catalog identity fields are daemon-owned; metadata
+  reconciliation drops stale or phone-written `bot` and `task` fields when the local snapshot
+  has none, so a project cannot masquerade as a task and a task cannot inherit a bot identity.
 
 - Only top-level agents are published: bots and the sessions a person started (`parentOf` is
   null). Subtasks used to attach through their workspace and on every event they recorded, and a

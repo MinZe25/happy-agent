@@ -477,6 +477,8 @@ export class HappySessionClient {
             if (!Value.Check(recordSchema, published))
                 throw new Error("Unreadable session metadata.");
             version = answer.version;
+            // These are only the account's previously published fields, including any phone
+            // edits. Retirement may preserve them but must never add fresh catalog facts.
             metadata = {
                 ...published,
                 ...archived,
@@ -1592,6 +1594,8 @@ function composeSessionMetadata(
     rigMetadata: Record<string, unknown>,
 ): Record<string, unknown> {
     const composed = { ...base, ...rigMetadata };
+    if (rigMetadata.bot === undefined) delete composed.bot;
+    if (rigMetadata.task === undefined) delete composed.task;
     if (rigMetadata.bot !== undefined || rigMetadata.task !== undefined) {
         delete composed.project;
         delete composed.workspace;

@@ -1456,6 +1456,61 @@ describe("keeping one session in step with Happy", () => {
         await session.close();
     });
 
+    it.each(["task", "project"] as const)(
+        "does not retain client-written catalog identities on a %s session",
+        async (kind) => {
+            const socket = new FakeSocket();
+            socket.acknowledgements = [
+                {
+                    metadata: encode({
+                        bot: { id: "stale-bot" },
+                        task: { id: "stale-task", canArchive: true, orderKey: "old" },
+                    }),
+                    result: "version-mismatch",
+                    version: 9,
+                },
+            ];
+            const { operations, snapshot } = fakeOperations();
+            const task = {
+                id: "real-task",
+                name: "Task",
+                folderName: "task",
+                orderKey: "0001",
+                canArchive: false,
+                owner: null,
+            };
+            const project = { id: "real-project", kind: "regular" as const, name: "Project" };
+            const workspace = { id: "real-workspace", name: "Workspace" };
+            const session = client({
+                operations: {
+                    ...operations,
+                    session: async () => ({
+                        ...snapshot,
+                        ...(kind === "task" ? { task } : { project, workspace }),
+                    }),
+                },
+                server: fakeServer(),
+                socket,
+            });
+            try {
+                await session.settle();
+                const last = socket.emittedValues("update-metadata").at(-1) as { metadata: string };
+                const published = decode(last.metadata);
+                expect(published).not.toHaveProperty("bot");
+                if (kind === "task") expect(published).toMatchObject({ task });
+                else {
+                    expect(published).not.toHaveProperty("task");
+                    expect(published).toMatchObject({
+                        project,
+                        workspace: { ...workspace, kind: "worktree" },
+                    });
+                }
+            } finally {
+                await session.close();
+            }
+        },
+    );
+
     it("clears stale archive and project metadata when restoring the same bot session", async () => {
         const socket = new FakeSocket();
         socket.acknowledgements = [
