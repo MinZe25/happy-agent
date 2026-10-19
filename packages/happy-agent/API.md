@@ -332,6 +332,12 @@ daemons report `capabilities.systemMonitorSurfaces: true` from health. Older dae
 reject `{ "type": "system_monitor" }` creation with `400`, and answer its read route with
 `404`. Clients leave an unknown Surface type unavailable and offer creation only when supported.
 
+Chat Surfaces are additive and do not increment the protocol version. Supporting daemons report
+`capabilities.chatSurfaces: true` from health. Older daemons omit it, reject `{ "type": "chat" }`
+creation with `400`, and answer message routes with `404`; clients then offer no chat creation.
+A chat Surface listed by a daemon a client does not support is left unavailable like any unknown
+type. The `surface_message.*` events are absent on older compatible daemons.
+
 Collaborative documents and the removal of the `separator` Surface type are a one-off exception
 to additive compatibility, approved for client and daemon together; the protocol number does not
 change. A daemon that serves collaborative documents reports `capabilities.collaborativeDocuments:
@@ -1029,6 +1035,7 @@ Fields:
   `collaborativeDocuments: true` advertises collaborative document Surfaces, described under
   Document Surfaces. `calendarSurfaces: true` advertises calendar Surfaces, described under
   Calendar Surfaces. `systemMonitorSurfaces: true` advertises System Monitor Surfaces.
+  `chatSurfaces: true` advertises chat Surfaces, described under Chat Surfaces.
 - `ready` — `false` while starting, `true` once the agent system is loaded.
 - `status` — `"starting"` or `"ready"`; the human-readable form of `ready`.
 - `version` — one identity object. `protocol` is the wire protocol number, the client's
@@ -7467,7 +7474,9 @@ Response — `200`: `{ "bot": { ... } }` with `avatar` `null`.
 A Surface is an instance of a predefined feature with its own typed API. Every instance has a
 CUID2 ID and a human name. Multiple independent Surfaces of each type may exist, with separate
 content, history, and members. Supported types are `todo`, `document`, `calendar`, `system_monitor`,
-`artifact`, `bot`, and `task`. System Monitors share host telemetry rather than independent content.
+`chat`, `artifact`, `bot`, and `task`. System Monitors share host telemetry rather than independent
+content. A `chat` Surface is a conversation among people; it is unrelated to the shared agent chat
+every chat-enabled Surface may own.
 The catalog initially has no instances.
 All onboarded authenticated people may read and modify Surface data, whether
 or not they joined. Joining and leaving control only the person's sidebar. Creating a Surface
@@ -8424,6 +8433,177 @@ and optional absolute `imagePath`. Authority checks at selection and execution, 
 creator joins, image handling, durable replay, and permission boundaries match
 `create_todo_surface`.
 
+### Chat Surfaces
+
+A `chat` Surface is a conversation among people. Members post Markdown messages to it; agents
+never post, edit, or delete them. A daemon that serves it reports `capabilities.chatSurfaces: true`
+from health.
+
+A chat Surface's **messages** are different from its **shared Surface chat**. Every chat-enabled
+Surface, a `chat` Surface included, may own one contextual agent conversation through
+`chatAgentId` and `POST /v0/surfaces/:surfaceId/chat`, described under Shared Surface chats. That
+agent conversation uses the ordinary agent message routes and `message.*` events. The people's
+messages described here are a separate resource with their own routes under
+`/v0/surfaces/chat/:surfaceId/messages`, their own `surface_message.*` events, and their own
+history. Neither ever appears in the other. In this section, "message" always means a Surface
+message.
+
+`POST /v0/surfaces` accepts `{ "type": "chat", "name": "Design team", "id": "...",
+"image": { "data": "..." }, "mutationId": "..." }`. Only `type` and `name` are required. It
+creates an empty conversation. Images, creator attribution, automatic creator membership,
+supplied-ID retries, and `surface.created` follow the catalog rules.
+
+#### Message data
+
+```json
+{
+    "id": "m4k8m2q9w1e5r7y3u6i0o2p4",
+    "surfaceId": "s4k8m2q9w1e5r7y3u6i0o2p4",
+    "seq": 42,
+    "authorUserId": "u1x2y3z4a5b6c7d8e9f0g1h2",
+    "text": "Shipping the **beta** on Friday.",
+    "status": "active",
+    "createdAt": 1755300000000,
+    "updatedAt": 1755400000000,
+    "editedAt": 1755400000000,
+    "deletedAt": null,
+    "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e"
+}
+```
+
+`id` is a CUID2. `seq` is the message's position in its Surface: a positive integer assigned at
+creation, starting at 1 and increasing by exactly one per message, never reused or changed.
+Messages are ordered by `seq`, which is also their creation order. `text` is Markdown stored
+exactly as supplied: 1–20,000 UTF-16 code units, containing a non-whitespace character, and no
+ASCII control characters except tab and newline. Clients render it as Markdown. `status` is
+`active` or `deleted`. `createdAt`, `updatedAt`, `editedAt`, and `deletedAt` are epoch
+milliseconds. `editedAt` is `null` until the text first changes and then holds the time of the
+latest text change. A deleted message is a tombstone: `deletedAt` is its deletion time, and it
+keeps every other field, including its last text. Clients show a deleted message as a
+placeholder such as "This message was deleted" and never render its text in the conversation.
+`version` is a UUIDv7 resource version.
+
+`authorUserId` is the installation-local Happy user ID of the person who posted the message,
+resolvable through `GET /v0/users`, or `null` in standalone mode. It is set at creation from the
+authenticated caller, never from a request body, and never changes. It appears unchanged in
+every revision snapshot.
+
+Only a message's author may edit or delete it. In team mode, the authenticated caller's user ID
+must equal `authorUserId`; any other person, including for a message with a `null` author,
+receives `403 forbidden` and changes nothing. In standalone mode the installation's one person
+is the author of every message. Clients compare `authorUserId` with the caller's own identity to
+decide whether to offer editing; responses carry no caller-relative permission field.
+
+Every authenticated person may read every message and post to any chat Surface, whether or not
+they joined it, as with all Surface data. Posting, reading, editing, and deleting never join
+anyone to the Surface.
+
+#### Permanent history
+
+Every creation, text edit, and deletion atomically stores the message's complete new snapshot as
+an immutable revision, alongside the current message and its durable notification intent.
+Publication to the shared event journal follows commit. A revision is `{ "message": {...},
+"actor": { "userId": null, "agentId": null }, "source": "api" }`. `actor` and `source` follow
+the todo revision rules; because agents cannot change messages, `actor.agentId` is `null` and
+`source` is `api`. A no-op stores neither a revision nor an event. Revisions are permanent:
+later edits, deletion, restart, and event-journal retention never remove or change one. A
+deleted message's earlier text stays readable through its revisions by everyone who can read
+the Surface. All operations participate in a caller's transaction and notify only after commit.
+
+There is no restore or undelete. A deleted message stays deleted. An author may return a live
+message to earlier text by reading a revision and sending that text through the ordinary edit.
+
+All mutations of existing messages require `If-Match` with the current message version. Checks
+run in this order: an unknown Surface or message returns `404 not_found`; a caller who is not the
+author returns `403 forbidden`; a missing or malformed `If-Match` returns `400 invalid_request`;
+a stale one returns `409 conflict` with `currentVersion` and the authoritative `message`; an
+invalid body returns `400 invalid_request`; and editing a deleted message returns `409 conflict`
+with the current `message`. Creation does not use `If-Match`.
+
+#### Routes
+
+The prefix is `/v0/surfaces/chat/:surfaceId/messages`. Every operation checks that the Surface has
+type `chat` and scopes message and revision lookups to that instance. Unknown Surfaces, a Surface
+of another type, and messages or revisions belonging to a different Surface return
+`404 not_found`. Todo, document, and calendar routes given a chat Surface also return
+`404 not_found`. `/v0/surfaces/chat/:surfaceId` without `/messages` is not a route. Unsupported
+body fields and malformed values return `400 invalid_request`.
+
+- `GET` returns `200 { "messages": [...], "nextBeforeSeq": 12, "nextAfterSeq": null,
+"cursor": "..." }`, one page of messages, oldest first, including tombstones. Optional
+  `beforeSeq` is an exclusive positive integer and optional `afterSeq` an exclusive non-negative
+  integer, so `afterSeq=0` reads from the first message; supplying both returns
+  `400 invalid_request`. Optional `limit` is 1 through 200, default 50. Without `afterSeq`, the
+  page holds the newest `limit` messages with `seq` below `beforeSeq`, or the newest `limit`
+  messages overall when `beforeSeq` is absent: a client opening a conversation reads this page,
+  then reads older pages with `beforeSeq: nextBeforeSeq`. With `afterSeq`, the page holds the
+  oldest `limit` messages with `seq` above it: a client catching up reads forward with
+  `afterSeq` set to the newest `seq` it holds, then `nextAfterSeq`. `nextBeforeSeq` is the first
+  returned message's `seq` when the Surface has a message with a smaller `seq`, and
+  `nextAfterSeq` is the last returned message's `seq` when it has a message with a larger `seq`;
+  each is otherwise `null`. An empty Surface returns `messages: []` with both `null`. New
+  messages never change which messages an earlier `beforeSeq` page holds, and edits and
+  deletions change messages in place, never their `seq`. `cursor` is the shared event cursor
+  captured before the read. Repeated or malformed paging parameters return
+  `400 invalid_request`; other query fields are ignored.
+- `POST` accepts `{ "text": "Shipping on Friday.", "id": "...", "mutationId": "..." }`. `id` and
+  `mutationId` are optional. Creation records the authenticated caller as `authorUserId`, assigns
+  the next `seq`, and returns `201 { "message": {...} }`, emitting shared
+  `surface_message.created`. A repeated supplied ID returns the current message unchanged with
+  `201`, even after deletion or restart, and emits no event; the other fields are ignored. This
+  ID is the creation retry key, and `mutationId` is only an echo. Clients generate the ID before
+  sending, so a retry after a lost response never posts twice.
+- `GET /:messageId` returns `200 { "message": {...} }`, including tombstones.
+- `PATCH /:messageId` accepts `{ "text": "...", "mutationId": "..." }`; `text` is required. It
+  replaces the text and sets `editedAt`. Identical text is a no-op. The response is
+  `200 { "message": {...} }`, and a change emits `surface_message.updated`.
+- `DELETE /:messageId` accepts `{}` or `{ "mutationId": "..." }`, marks the message deleted, and
+  returns `200 { "message": {...} }`. Already deleted is a no-op after the author and `If-Match`
+  checks. A change emits `surface_message.updated`. Deletion never removes a revision.
+- `GET /:messageId/versions` returns `200` with `versions` (immutable revisions, oldest first) and
+  `nextAfterVersion` (a UUIDv7 or `null`). `afterVersion` is an optional exclusive UUIDv7
+  revision cursor belonging to this message, and unknown cursors return `404 not_found`. `limit`
+  is optional, default 100, from 1 through 200. `nextAfterVersion` names this page's last
+  revision when another page exists, otherwise `null`. Appending revisions never changes prior
+  pages.
+- `GET /:messageId/versions/:version` returns `200 { "revision": {...} }` for that immutable
+  revision. Unknown versions return `404 not_found`.
+
+#### Events
+
+`surface_message.created` carries the full `message` and optional `mutationId`.
+`surface_message.updated` carries `surfaceId`, `messageId`, `previousVersion`, `version`,
+`changes`, and optional `mutationId`. `changes` holds the changed fields among `text`,
+`editedAt`, `status`, and `deletedAt`, always with `updatedAt`. Both events are shared and
+journaled, so every connected client receives new, edited, and deleted messages live through the
+ordinary event stream. Consumers follow normal version-chain reconciliation and refetch a message
+on a gap. A client showing a conversation appends `surface_message.created` messages in `seq`
+order; when a created message's `seq` is not one more than the newest it holds, it reads forward
+with `afterSeq` instead of guessing. Messages and their history are not part of desktop
+bootstrap; opening a conversation reads its newest page with that read's cursor.
+
+#### Agent tools
+
+Agents read a conversation but never take part in it. Every ordinary agent model receives fixed
+common read-only tools; there is no tool to post, edit, or delete a message.
+
+- `list_surface_messages` accepts `surfaceId`, optional exclusive `beforeSeq` or `afterSeq` (not
+  both), and optional `limit` from 1 through 50, default 30. It returns the same page as the
+  `GET` route, oldest first, with `nextBeforeSeq` and `nextAfterSeq`. Each message carries its
+  `id`, `seq`, `authorUserId`, `text`, `status`, `createdAt`, `editedAt`, and `deletedAt`. A
+  deleted message is listed without its text. The description tells models to resolve authors
+  through the people they know, to treat deleted messages as withdrawn, and to read older pages
+  with `beforeSeq` to summarize a longer conversation.
+- `list_surface_message_versions` accepts `surfaceId`, `messageId`, optional `afterVersion`, and
+  optional `limit` from 1 through 20, default 10. It returns full revisions oldest first, with
+  their actors, and `nextAfterVersion`. Each entry is the complete snapshot.
+
+Both require no review and run within the current permission boundary. Reading never joins
+anyone to the Surface. Active admin bots additionally receive `create_chat_surface`, accepting
+`name`, required explicit `creatorUserId`, and optional absolute `imagePath`. Its authority,
+attribution, creator join rules, image handling, durable replay, and permission boundaries match
+`create_todo_surface`.
+
 ### Reference Surfaces
 
 An `artifact`, `bot`, or `task` Surface points to exactly one existing entity. It does not clone
@@ -8496,8 +8676,8 @@ The reference never joins anyone to the target's own task list or changes its ex
 
 ### Shared Surface chats
 
-The chat-enabled types are `todo`, `document`, `calendar`, `system_monitor`, `artifact`, `bot`, and
-`task`. Each may own exactly
+The chat-enabled types are `todo`, `document`, `calendar`, `system_monitor`, `chat`, `artifact`,
+`bot`, and `task`. Each may own exactly
 one shared persistent conversation, created lazily when a person explicitly opens its chat.
 Unsupported types have no chat: their ensure operation returns `409 conflict` and leaves
 `chatAgentId` null. A reference Surface's contextual chat is separate from the target
@@ -8564,8 +8744,11 @@ archive, reorder, and child creation; and attaching another root agent all retur
 Surface membership changes never stop the chat, delete its folder, or discard history, even
 when nobody remains joined. Since Surfaces have no deletion route, their chats and folders
 remain for the Surface's lifetime. The agent's context names its Surface ID, type, and stored
-label, and tells it to use ordinary Surface tools, plus document tools for document content and
-calendar tools for calendar events. A calendar chat's context calls its Surface a calendar.
+label, and tells it to use ordinary Surface tools, plus document tools for document content,
+calendar tools for calendar events, and the read-only message tools for a chat Surface's
+conversation. A calendar chat's context calls its Surface a calendar. A chat Surface's agent
+context calls its Surface a conversation among people, and tells the agent it reads that
+conversation but cannot post to it, so it answers in its own shared chat.
 It receives no admin role, no new subtask-creation eligibility, and no implicit join, creation,
 or target permissions. Ensuring or using the chat never joins anyone to a Surface or task list.
 
