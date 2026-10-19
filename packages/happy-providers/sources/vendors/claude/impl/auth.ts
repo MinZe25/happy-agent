@@ -14,7 +14,20 @@ const MACOS_KEYCHAIN_RETRY_DELAY_MS = 20;
 interface ClaudeCodeCredentials {
     claudeAiOauth?: {
         accessToken?: string;
+        scopes?: unknown;
     };
+}
+
+/** A Claude Code OAuth token and what is known about the grant behind it. */
+export interface ClaudeCodeOAuthCredential {
+    accessToken: string;
+    /**
+     * `environment` is a `CLAUDE_CODE_OAUTH_TOKEN`, which `claude setup-token` issues for
+     * inference only. `login` is the credential `claude auth login` stores.
+     */
+    source: "environment" | "login";
+    /** The OAuth scopes the stored login was granted, or undefined when it does not say. */
+    scopes: readonly string[] | undefined;
 }
 
 export interface ReadClaudeCodeOAuthTokenOptions {
@@ -26,10 +39,22 @@ export function getClaudeConfigDir(env: NodeJS.ProcessEnv = process.env): string
 }
 
 export function parseClaudeOAuthAccessToken(value: string): string | undefined {
+    return parseClaudeOAuthCredential(value)?.accessToken;
+}
+
+function parseClaudeOAuthCredential(value: string): ClaudeCodeOAuthCredential | undefined {
     try {
         const credentials = JSON.parse(value) as ClaudeCodeCredentials;
         const token = credentials.claudeAiOauth?.accessToken;
-        return typeof token === "string" && token.trim().length > 0 ? token : undefined;
+        if (typeof token !== "string" || token.trim().length === 0) return undefined;
+        const scopes = credentials.claudeAiOauth?.scopes;
+        return {
+            accessToken: token,
+            source: "login",
+            scopes: Array.isArray(scopes)
+                ? scopes.filter((scope): scope is string => typeof scope === "string")
+                : undefined,
+        };
     } catch {
         return undefined;
     }
@@ -38,22 +63,33 @@ export function parseClaudeOAuthAccessToken(value: string): string | undefined {
 export async function readClaudeCodeOAuthToken(
     options: ReadClaudeCodeOAuthTokenOptions = {},
 ): Promise<string | undefined> {
+    return (await readClaudeCodeOAuthCredential(options))?.accessToken;
+}
+
+/** Reads the native Claude Code token together with the kind of grant it came from. */
+export async function readClaudeCodeOAuthCredential(
+    options: ReadClaudeCodeOAuthTokenOptions = {},
+): Promise<ClaudeCodeOAuthCredential | undefined> {
     const env = options.env ?? process.env;
     if (env.CLAUDE_CODE_OAUTH_TOKEN?.trim()) {
-        return env.CLAUDE_CODE_OAUTH_TOKEN;
+        return {
+            accessToken: env.CLAUDE_CODE_OAUTH_TOKEN,
+            source: "environment",
+            scopes: undefined,
+        };
     }
 
     const configDirectory = getClaudeConfigDir(env);
 
     if (process.platform === "darwin") {
-        const keychainToken = await readTokenFromMacOsKeychain(configDirectory, env);
-        if (keychainToken !== undefined) {
-            return keychainToken;
+        const keychainCredential = await readCredentialFromMacOsKeychain(configDirectory, env);
+        if (keychainCredential !== undefined) {
+            return keychainCredential;
         }
     }
 
     try {
-        return parseClaudeOAuthAccessToken(
+        return parseClaudeOAuthCredential(
             await readFile(join(configDirectory, ".credentials.json"), "utf8"),
         );
     } catch (error) {
@@ -68,6 +104,13 @@ export async function readTokenFromMacOsKeychain(
     configDirectory: string,
     env: NodeJS.ProcessEnv,
 ): Promise<string | undefined> {
+    return (await readCredentialFromMacOsKeychain(configDirectory, env))?.accessToken;
+}
+
+async function readCredentialFromMacOsKeychain(
+    configDirectory: string,
+    env: NodeJS.ProcessEnv,
+): Promise<ClaudeCodeOAuthCredential | undefined> {
     const defaultDirectory = env.CLAUDE_CONFIG_DIR === undefined;
     const directorySuffix = defaultDirectory
         ? ""
@@ -83,9 +126,9 @@ export async function readTokenFromMacOsKeychain(
     // function has no cache, so a single swallowed failure is reported to the caller as a missing
     // credential. Retry instead, since the window closes within milliseconds.
     for (let attempt = 1; attempt <= MACOS_KEYCHAIN_ATTEMPTS; attempt++) {
-        const token = await readTokenFromMacOsKeychainOnce(account, service);
-        if (token !== undefined) {
-            return token;
+        const credential = await readCredentialFromMacOsKeychainOnce(account, service);
+        if (credential !== undefined) {
+            return credential;
         }
 
         if (attempt < MACOS_KEYCHAIN_ATTEMPTS) {
@@ -96,10 +139,10 @@ export async function readTokenFromMacOsKeychain(
     return undefined;
 }
 
-async function readTokenFromMacOsKeychainOnce(
+async function readCredentialFromMacOsKeychainOnce(
     account: string,
     service: string,
-): Promise<string | undefined> {
+): Promise<ClaudeCodeOAuthCredential | undefined> {
     try {
         const { stdout } = await execFileAsync(
             "security",
@@ -110,7 +153,7 @@ async function readTokenFromMacOsKeychainOnce(
                 timeout: MACOS_KEYCHAIN_TIMEOUT_MS,
             },
         );
-        return parseClaudeOAuthAccessToken(stdout);
+        return parseClaudeOAuthCredential(stdout);
     } catch {
         return undefined;
     }

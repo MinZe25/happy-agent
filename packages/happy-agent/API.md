@@ -221,7 +221,7 @@ none of the mobile credentials. See "Credentials on the connector's socket".
 
 All routes are prefixed with `/v0`. Independently of the path version, every daemon advertises
 its identity through the health endpoint as a single `version` object: a numeric `protocol`
-(integer, currently 28) and the `daemon` product version string. Protocol versions from 22 onward
+(integer, currently 29) and the `daemon` product version string. Protocol versions from 22 onward
 are backward-compatible and additive. Clients support that compatibility range for existing
 capabilities instead of requiring equality with their own protocol number. A client may require
 a newer protocol for a capability it needs and must explain that an upgrade is required when the
@@ -257,6 +257,14 @@ names the network an agent's connections leave from, and `CONNECT /v0/networks/:
 Clients that keep browser state per network require protocol 28 or newer. An older compatible
 daemon answers the read with `404`, which cannot be told apart from an unknown agent, so clients
 check the protocol instead of probing, and offer no network-scoped browsing on an older daemon.
+
+Protocol 29 adds pushed provider-account usage: the `provider.usage.updated` event,
+`POST /v0/usage/refresh`, the always-present `refreshedAt`, `refreshError`, `retryAt`, and
+`refreshing` fields on every `GET /v0/usage` provider entry, and the optional per-window
+`capturedAt`. Clients that follow usage live require protocol 29 or newer. A client that only has
+a usage response can tell the same thing from the entry itself: an entry without `refreshedAt`
+comes from an older compatible daemon, which never emits the event and answers the refresh route
+with `404`, so the client keeps polling `GET /v0/usage` instead.
 
 Account provenance, configuration history blocks, and structured error details are additive output
 and do not increment the protocol version. Clients tolerate their absence and older clients keep
@@ -7071,13 +7079,15 @@ Response — `200`:
                         "usedPercent": 32,
                         "resetsAt": 1755412000000,
                         "startsAt": 1755394000000,
-                        "durationMs": 18000000
+                        "durationMs": 18000000,
+                        "capturedAt": 1755400000000
                     },
                     "weekly": {
                         "usedPercent": 16,
                         "resetsAt": 1755900000000,
                         "startsAt": 1755295200000,
-                        "durationMs": 604800000
+                        "durationMs": 604800000,
+                        "capturedAt": 1755396400000
                     },
                     "monthly": null
                 },
@@ -7089,7 +7099,11 @@ Response — `200`:
                 }
             },
             "checkedAt": 1755400000100,
-            "error": null
+            "error": null,
+            "refreshedAt": 1755400000000,
+            "refreshError": null,
+            "retryAt": null,
+            "refreshing": false
         }
     ],
     "hour": {
@@ -7123,12 +7137,63 @@ Response — `200`:
   expose no account-usage API. `checkedAt` is when the daemon last finished asking, whether or not
   the request succeeded. `error` explains why no reading is available; a failed refresh does not
   discard an older successful reading.
+- `refreshedAt`, `refreshError`, `retryAt`, and `refreshing` are optional for protocol-28
+  compatibility. A protocol-29 daemon always sends all four on every entry, with explicit `null`
+  or `false`. `refreshedAt` is when the last successful reading arrived, from a poll or from
+  inference, or `null` before the first one; an in-band report that measured no window does not
+  advance it. `refreshError` is the human-readable reason the latest attempt to read the account
+  failed, kept even while an older reading is still shown and cleared by the next success.
+  `retryAt` is the epoch-millisecond instant before which the vendor asked not to be asked again,
+  or `null`. `refreshing` is `true` while a read of this account is in flight.
 - A non-null `usage` keeps every normalized vendor value: the human-readable `planName`, current
   `exhausted` state, five-hour, weekly, and monthly windows, optional `fableWeekly` for Claude's
   separate Fable weekly allowance, and spendable `credits`. A window is `null` only when the vendor
   did not report it. `fableWeekly` is omitted or `null` when the vendor has no Fable meter. Window
   timestamps are epoch milliseconds, `durationMs` is milliseconds, monetary amounts are USD cents,
   and percentages run from 0 to 100.
+- Each window's optional `capturedAt` is when that window itself was last measured. A vendor that
+  reports only some windows in band leaves the others as they were, and those keep their own older
+  `capturedAt`, so a client can show how old each number is. The reading's `capturedAt` is when its
+  newest window was measured; a report that measured no window does not move it. A window that
+  has reset since it was measured is dropped rather than shown as current.
+
+### `POST /v0/usage/refresh`
+
+Asks the daemon for fresher provider-account readings without waiting for them. The daemon starts
+a background read of each selected account and answers at once; every result arrives as
+`provider.usage.updated`, beginning with a snapshot whose `refreshing` is `true`.
+
+Request body, every field optional:
+
+```json
+{
+    "providerIds": ["claude-work", "codex"],
+    "olderThanMs": 300000
+}
+```
+
+- `providerIds` — the accounts to consider. Omitted means every enabled account. IDs that name no
+  configured account are skipped rather than rejected.
+- `olderThanMs` — only accounts whose `refreshedAt` is older than this many milliseconds, or that
+  have never been read, are read again. Defaults to 300000 (five minutes); smaller values are
+  raised to 60000 (one minute), so a client cannot hammer a vendor's rate-limited usage API.
+
+An account is also skipped while its `retryAt` has not passed, while a read of it is already in
+flight, and when it has no account-usage source, such as Bedrock or an API key. Reads of the same
+account never overlap: a refresh joins the same one-at-a-time queue as the hourly poll.
+
+Response — `202`:
+
+```json
+{
+    "started": ["claude-work"]
+}
+```
+
+- `started` — the accounts for which a read was started, in configuration order. An empty array
+  means every selected account was fresh enough or could not be read now.
+
+`400` when the body is not an object of the shape above.
 
 ## Bots
 
@@ -10493,6 +10558,21 @@ version rules. Snapshot-to-stream cursor and version-gap recovery rules remain u
   reconciling snapshots for the same owner. Team clients never receive another owner's event or
   an unowned installation-wide integration event.
     - `integration` (full Happy integration object).
+
+**Provider-account usage**
+
+- `provider.usage.updated` — protocol 29 or newer. One provider account's usage entry changed: a
+  read started or finished, a vendor reported the account during inference, or a read failed.
+  The payload is a complete replacement of that account's entry from `GET /v0/usage`, without the
+  configuration fields `type`, `enabled`, and `models`, which follow `config.updated`:
+    - `providerId`, `usage`, `checkedAt`, `error`, `refreshedAt`, `refreshError`, `retryAt`, and
+      `refreshing` — exactly as on the `GET /v0/usage` entry.
+
+    Every change emits one event, in the order the changes happened, so the latest event for a
+    `providerId` is its current state. The event is journaled like any other and replays from a
+    cursor. Readings live only in daemon memory, so events replayed from before a daemon restart
+    describe state that daemon no longer holds; after a resync or a reconnect across a restart,
+    clients read `GET /v0/usage` again and treat it as current.
 
 **Mobile connector**
 

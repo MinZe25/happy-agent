@@ -222,7 +222,12 @@ import type {
     TerminalListResponse,
     TerminalResponse,
 } from "./protocol/terminals.js";
-import type { AgentUsageResponse, DaemonUsageResponse } from "./protocol/usage.js";
+import type {
+    AgentUsageResponse,
+    DaemonUsageResponse,
+    ProviderUsageRefreshRequest,
+    ProviderUsageRefreshResponse,
+} from "./protocol/usage.js";
 import type {
     StopWorkspaceServiceRequest,
     WorkspaceServiceAccessTokenResponse,
@@ -2959,6 +2964,24 @@ export class HappyAgentClient {
     /** `GET /v0/usage` — the whole daemon, in rolling windows ending now. */
     async getUsage(options: RequestOptions = {}): Promise<DaemonUsageResponse> {
         return await this.#json({ method: "GET", path: "v0/usage", signal: options.signal });
+    }
+
+    /**
+     * `POST /v0/usage/refresh` — asks for fresher provider-account readings, protocol 29 or newer.
+     *
+     * Answers at once with the accounts whose reads started; the readings themselves arrive as
+     * `provider.usage.updated` events. An older daemon answers `404`.
+     */
+    async refreshProviderUsage(
+        request: ProviderUsageRefreshRequest = {},
+        options: RequestOptions = {},
+    ): Promise<ProviderUsageRefreshResponse> {
+        return await this.#json({
+            method: "POST",
+            path: "v0/usage/refresh",
+            json: request,
+            signal: options.signal,
+        });
     }
 
     // Events

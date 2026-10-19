@@ -1,4 +1,5 @@
 import type { ProviderModality } from "@/core/ProviderModality.js";
+import type { ProviderUsage } from "@/core/ProviderUsage.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
 import {
     createInferenceMaxRetriesResolver,
@@ -38,6 +39,8 @@ export interface CodexProviderOptions extends InferenceRetryOptions {
     credential: CodexProviderCredential;
     endpoint?: string;
     model?: string;
+    /** Receives the account usage the ChatGPT backend reports during inference. */
+    onAccountUsage?: (usage: ProviderUsage) => void;
     /** Enables multi-call batches; Codex v2 uses standard Responses instead of Responses Lite. */
     parallelToolCalls?: boolean;
     region?: string;
@@ -58,6 +61,7 @@ export class CodexProvider extends ResponsesProvider {
     readonly credential: CodexProviderCredential;
     readonly bedrockTransport: CodexBedrockTransport | undefined;
     readonly endpoint: string;
+    readonly onAccountUsage: ((usage: ProviderUsage) => void) | undefined;
     readonly model: string | undefined;
     readonly parallelToolCalls: boolean | undefined;
     readonly region: string;
@@ -71,6 +75,7 @@ export class CodexProvider extends ResponsesProvider {
         super();
         assertCodexCredential(options.credential);
         this.credential = options.credential;
+        this.onAccountUsage = options.onAccountUsage;
         const isBedrock = isBedrockCredential(options.credential);
         const region =
             options.region?.trim() ||
@@ -151,6 +156,7 @@ export class CodexProvider extends ResponsesProvider {
             endpoint: this.endpoint,
             installationId,
             ...(this.model === undefined ? {} : { model: this.model }),
+            ...(this.onAccountUsage === undefined ? {} : { onAccountUsage: this.onAccountUsage }),
             ...(this.parallelToolCalls === undefined
                 ? {}
                 : { parallelToolCalls: this.parallelToolCalls }),

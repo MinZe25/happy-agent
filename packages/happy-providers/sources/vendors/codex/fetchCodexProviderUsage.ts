@@ -60,13 +60,13 @@ export async function fetchCodexProviderUsage(
     }
 }
 
-interface CodexWindowPayload {
+export interface CodexWindowPayload {
     limit_window_seconds?: unknown;
     reset_at?: unknown;
     used_percent?: unknown;
 }
 
-interface CodexUsagePayload {
+export interface CodexUsagePayload {
     plan_type?: unknown;
     rate_limit_reached_type?: { type?: unknown } | null;
     rate_limit?: {
@@ -118,7 +118,7 @@ function hasCodexHardExhaustion(body: CodexUsagePayload): boolean {
     );
 }
 
-function parseCodexWindows(
+export function parseCodexWindows(
     payloads: readonly (CodexWindowPayload | null | undefined)[],
 ): ProviderUsage["windows"] {
     const windows: ProviderUsage["windows"] = { fiveHour: null, weekly: null, monthly: null };
@@ -151,7 +151,9 @@ function durationMatches(actualSeconds: number, expectedSeconds: number): boolea
     return Math.abs(actualSeconds - expectedSeconds) <= expectedSeconds * 0.05;
 }
 
-function parseCodexCredits(payload: CodexUsagePayload["credits"]): ProviderUsageCredits | null {
+export function parseCodexCredits(
+    payload: CodexUsagePayload["credits"],
+): ProviderUsageCredits | null {
     if (payload == null) return null;
     const unlimited = payload.unlimited === true;
     // The balance arrives as a decimal string of dollars.

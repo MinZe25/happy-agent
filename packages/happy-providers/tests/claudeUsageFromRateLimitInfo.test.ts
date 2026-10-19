@@ -1,3 +1,4 @@
+import type { SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
 
 import { claudeUsageFromRateLimitInfo } from "@/vendors/claude/claudeUsageFromRateLimitInfo.js";
@@ -88,5 +89,71 @@ describe("claudeUsageFromRateLimitInfo", () => {
         expect(usage?.windows.fableWeekly?.usedPercent).toBe(100);
         expect(usage?.windows.weekly).toBeNull();
         expect(usage?.exhausted).toBe(true);
+    });
+
+    // Shape of a real 0.3.284 `rate_limit_event` for a healthy subscription: the CLI emits it when
+    // a window's rounded percentage moves, with no top-level window because nothing constrains.
+    it("reads both windows the CLI tracks on every response", () => {
+        const usage = claudeUsageFromRateLimitInfo(
+            {
+                status: "allowed",
+                isUsingOverage: false,
+                overageStatus: "rejected",
+                overageDisabledReason: "org_level_disabled",
+                unifiedWindows: {
+                    five_hour: { utilization: 0.37, resetsAt: 1_785_559_800 },
+                    seven_day: { utilization: 0.62, resetsAt: 1_785_844_800 },
+                    seven_day_overage_included: { utilization: 0.1, resetsAt: 1_785_844_800 },
+                },
+            } as SDKRateLimitInfo,
+            context,
+        );
+
+        expect(usage?.exhausted).toBe(false);
+        expect(usage?.windows.fiveHour).toEqual({
+            usedPercent: 37,
+            resetsAt: 1_785_559_800_000,
+            startsAt: 1_785_559_800_000 - 5 * 60 * 60 * 1_000,
+            durationMs: 5 * 60 * 60 * 1_000,
+        });
+        expect(usage?.windows.weekly).toEqual({
+            usedPercent: 62,
+            resetsAt: 1_785_844_800_000,
+            startsAt: 1_785_844_800_000 - 7 * 24 * 60 * 60 * 1_000,
+            durationMs: 7 * 24 * 60 * 60 * 1_000,
+        });
+        expect(usage?.credits).toMatchObject({ available: false });
+    });
+
+    it("reports a window that ran past its cap as fully used", () => {
+        const usage = claudeUsageFromRateLimitInfo(
+            {
+                status: "allowed",
+                unifiedWindows: { five_hour: { utilization: 1.08, resetsAt: 1_785_559_800 } },
+            } as SDKRateLimitInfo,
+            context,
+        );
+
+        expect(usage?.windows.fiveHour?.usedPercent).toBe(100);
+        expect(usage?.windows.weekly).toBeNull();
+    });
+
+    it("prefers the tracked windows and ignores malformed ones", () => {
+        const usage = claudeUsageFromRateLimitInfo(
+            {
+                status: "allowed_warning",
+                rateLimitType: "seven_day",
+                utilization: 0.8,
+                resetsAt: 1_785_844_800,
+                unifiedWindows: {
+                    five_hour: { utilization: "0.5", resetsAt: 1_785_559_800 },
+                    seven_day: { utilization: 0.81, resetsAt: 1_785_844_800 },
+                },
+            } as unknown as SDKRateLimitInfo,
+            context,
+        );
+
+        expect(usage?.windows.fiveHour).toBeNull();
+        expect(usage?.windows.weekly?.usedPercent).toBe(81);
     });
 });

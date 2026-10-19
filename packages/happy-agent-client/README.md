@@ -76,6 +76,15 @@ connected), its runner `protocol`, `since`, and the last disconnection `reason`.
 transport addresses never appear. Runners require protocol 26: older daemons answer `404`, so
 treat runners as unavailable there.
 
+Provider-account usage is read with `getUsage()` and, from protocol 29, followed live: the typed
+`provider.usage.updated` event carries one account's complete entry state — the reading,
+`checkedAt`, `error`, `refreshedAt`, `refreshError`, `retryAt`, and `refreshing` — after every
+change, so the latest event per `providerId` wins. `refreshProviderUsage({ providerIds,
+olderThanMs })` asks for fresher readings and answers at once with `{ started }`; the readings
+arrive as events. An entry without `refreshedAt` comes from an older daemon that neither emits the
+event nor serves the refresh, so keep polling `getUsage()` there. Readings live in daemon memory;
+read `getUsage()` again after a resync or a daemon restart.
+
 A folder on a runner has a `{ type: "runner", runnerId, path }` compute, with `path` in the
 runner's filesystem and `null` for the home project before its runner first connects. Docker
 workspace computes may carry the mounted `path` and the holding `runnerId`. `registerProject()` and

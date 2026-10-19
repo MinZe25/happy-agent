@@ -12,6 +12,7 @@ import {
     createResponsesLiteWebSocketInferenceRequest,
 } from "@/protocol/responsesLite/createResponsesLiteRequest.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
+import type { CodexAccountUsageObserver } from "@/vendors/codex/impl/CodexAccountUsageObserver.js";
 import type { CodexTurnState } from "@/vendors/codex/impl/CodexTurnState.js";
 import {
     CodexWebSocketClosedBeforeRequestError,
@@ -59,6 +60,7 @@ export class CodexWebSocketConnection {
 
     constructor(
         private readonly options: {
+            accountUsage?: CodexAccountUsageObserver;
             codexBackend: () => boolean;
             client: () => OpenAI;
             headers: () => Record<string, string>;
@@ -112,6 +114,7 @@ export class CodexWebSocketConnection {
             setCodexRequestKind(warmup, "prewarm");
             for await (const event of this.send(client, warmup, signal)) {
                 turnState.observe(event);
+                this.options.accountUsage?.observe(event);
                 if (event.type === "response.completed")
                     this.previousResponseId = event.response.id;
             }
@@ -153,6 +156,7 @@ export class CodexWebSocketConnection {
         let completedItemsAreReusable = true;
         for await (const event of this.send(client, inferenceRequest, signal)) {
             turnState.observe(event);
+            this.options.accountUsage?.observe(event);
             if (event.type === "response.output_item.done") {
                 sawCompletedItem = true;
                 if (

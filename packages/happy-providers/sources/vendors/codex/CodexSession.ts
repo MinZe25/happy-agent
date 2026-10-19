@@ -4,6 +4,7 @@ import type OpenAI from "openai";
 import type { CodexBedrockTransport } from "@/vendors/codex/CodexProvider.js";
 
 import { BaseSession } from "@/core/BaseSession.js";
+import type { ProviderUsage } from "@/core/ProviderUsage.js";
 import {
     createInferenceMaxRetriesResolver,
     type InferenceRetryOptions,
@@ -40,6 +41,7 @@ import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseReq
 import { createCodexClient } from "@/vendors/codex/impl/createCodexClient.js";
 import { createCodexClientMetadata } from "@/vendors/codex/impl/createCodexClientMetadata.js";
 import { CodexSseConnection } from "@/vendors/codex/impl/CodexSseConnection.js";
+import { CodexAccountUsageObserver } from "@/vendors/codex/impl/CodexAccountUsageObserver.js";
 import { CodexTurnState } from "@/vendors/codex/impl/CodexTurnState.js";
 import { CodexWebSocketConnection } from "@/vendors/codex/impl/CodexWebSocketConnection.js";
 import {
@@ -86,6 +88,8 @@ export interface CodexSessionOptions extends InferenceRetryOptions {
     endpoint: string;
     installationId: string;
     model?: string;
+    /** Receives the account usage the ChatGPT backend reports during inference. */
+    onAccountUsage?: (usage: ProviderUsage) => void;
     modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
     parallelToolCalls?: boolean;
     region?: string;
@@ -166,7 +170,12 @@ export class CodexSession extends BaseSession {
                 : this.modelConfigurations.get(options.model)) ?? baseConfiguration;
         this.context = { instructions: this.activeConfiguration.instructions, messages: [] };
 
+        const accountUsage = new CodexAccountUsageObserver(
+            options.onAccountUsage,
+            () => this.credential.name === "codex-session",
+        );
         this.sseConnection = new CodexSseConnection({
+            accountUsage,
             bedrock: () => isBedrockCredential(this.credential),
             codexBackend: () => this.credential.name === "codex-session",
             client: () => this.resolveClient(),
@@ -175,6 +184,7 @@ export class CodexSession extends BaseSession {
             windowId: () => this.windowId,
         });
         this.websocketConnection = new CodexWebSocketConnection({
+            accountUsage,
             codexBackend: () => this.credential.name === "codex-session",
             client: () => this.resolveClient(),
             headers: () => this.websocketHeaders(),

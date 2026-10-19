@@ -18,6 +18,13 @@ export interface ProviderUsageWindow {
     startsAt: number | null;
     /** Window length in milliseconds, or null when unreported. */
     durationMs: number | null;
+    /**
+     * Epoch milliseconds when this window itself was measured. A fresh reading
+     * leaves it unset, meaning the reading's own `capturedAt`; a consumer that
+     * lays a partial reading over an older one sets it so a window the newer
+     * reading did not mention keeps its real age.
+     */
+    capturedAt?: number;
 }
 
 /**

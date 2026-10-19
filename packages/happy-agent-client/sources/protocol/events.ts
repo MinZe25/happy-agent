@@ -61,7 +61,7 @@ import {
 } from "./surfaces.js";
 import { Nullable } from "./common.js";
 import type { Terminal } from "./terminals.js";
-import type { AgentContextUsage } from "./usage.js";
+import { providerAccountUsageStateSchema, type AgentContextUsage } from "./usage.js";
 import type { Workspace } from "./workspaces.js";
 import { storedUserSettingSchema } from "./userSettings.js";
 import { mobileConnectorSchema } from "./mobileConnector.js";
@@ -513,6 +513,14 @@ export const mobileConnectorUpdatedPayloadSchema = Type.Object({
 });
 export type MobileConnectorUpdatedPayload = Static<typeof mobileConnectorUpdatedPayloadSchema>;
 
+/**
+ * One provider account's complete usage entry, protocol 29 or newer: everything `GET /v0/usage`
+ * reports for it except the configuration fields. Every change emits one, in order, so the latest
+ * event for a `providerId` is its current state.
+ */
+export const providerUsageUpdatedPayloadSchema = Type.Required(providerAccountUsageStateSchema);
+export type ProviderUsageUpdatedPayload = Static<typeof providerUsageUpdatedPayloadSchema>;
+
 /** One event on the journal. */
 export interface EventEnvelope<TType extends string, TPayload> {
     /** This event's place in the journal; never a resource identity. */
@@ -584,6 +592,7 @@ export type HappyAgentEvent =
     | EventEnvelope<"config.updated", ConfigUpdatedPayload>
     | EventEnvelope<"connections.updated", ConnectionsUpdatedPayload>
     | EventEnvelope<"runners.updated", RunnersUpdatedPayload>
+    | EventEnvelope<"provider.usage.updated", ProviderUsageUpdatedPayload>
     | EventEnvelope<"profile.updated", ProfileUpdatedPayload>
     | EventEnvelope<"cloud.updated", CloudUpdatedPayload>
     | EventEnvelope<"happy.integration.updated", HappyIntegrationUpdatedPayload>

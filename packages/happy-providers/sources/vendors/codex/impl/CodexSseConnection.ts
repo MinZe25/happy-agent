@@ -7,6 +7,7 @@ import type {
 import type { SessionTool } from "@/core/SessionTool.js";
 import { createResponsesLiteSseRequest } from "@/protocol/responsesLite/createResponsesLiteRequest.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
+import type { CodexAccountUsageObserver } from "@/vendors/codex/impl/CodexAccountUsageObserver.js";
 import type { CodexTurnState } from "@/vendors/codex/impl/CodexTurnState.js";
 import { createCodexBedrockRequest } from "@/vendors/codex/impl/createCodexBedrockRequest.js";
 import { createCodexRequestHeaders } from "@/vendors/codex/impl/createCodexRequestHeaders.js";
@@ -25,6 +26,7 @@ import { createCodexRoutingHint } from "./createCodexRoutingHint.js";
 export class CodexSseConnection {
     constructor(
         private readonly options: {
+            accountUsage?: CodexAccountUsageObserver;
             bedrock: () => boolean;
             codexBackend: () => boolean;
             client: () => OpenAI;
@@ -75,6 +77,7 @@ export class CodexSseConnection {
             )
             .withResponse();
         turnState.observeHeaders(response.headers);
+        this.options.accountUsage?.observeHeaders(response.headers);
         return observeTurnState(
             withCodexStreamIdleTimeout({
                 stream,
@@ -82,6 +85,7 @@ export class CodexSseConnection {
                 ...(signal === undefined ? {} : { signal }),
             }),
             turnState,
+            this.options.accountUsage,
         );
     }
 }
@@ -89,9 +93,11 @@ export class CodexSseConnection {
 async function* observeTurnState(
     stream: AsyncIterable<ResponseStreamEvent>,
     turnState: CodexTurnState,
+    accountUsage: CodexAccountUsageObserver | undefined,
 ): AsyncGenerator<ResponseStreamEvent> {
     for await (const event of stream) {
         turnState.observe(event);
+        accountUsage?.observe(event);
         yield event;
     }
 }

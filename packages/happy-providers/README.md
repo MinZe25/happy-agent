@@ -571,7 +571,12 @@ diagnostics.
 ## Package surface
 
 The root export contains the stable shared types, provider classes, credential classes, usage and
-quota helpers, and provider-specific option types. Internal request builders, transports, native
+quota helpers, and provider-specific option types. `fetchClaudeProviderUsage` chooses its method
+from the credential: a stored `claude auth login` with the `user:profile` scope asks the OAuth usage
+endpoint, while a `CLAUDE_CODE_OAUTH_TOKEN`, a login without that scope, or `usageEndpoint: false`
+measures a one-token inference response's unified headers instead. A throttled endpoint also falls
+back to those headers, and `onUsageEndpointRefused` reports the endpoint's `403`, `404`, or `429`
+with its retry instant so a caller can stop asking it. Internal request builders, transports, native
 prompts, native tool catalogs, and trace fixtures are not exported.
 
 More reference documentation:
@@ -607,6 +612,10 @@ Every option each provider constructor accepts, and how the defaults are chosen.
 - `endpoint` — overrides that default endpoint.
 - `model` — the session's default model, resolved against the curated catalog. On Bedrock the
   catalog maps it to the corresponding Bedrock model ID.
+- `onAccountUsage` — receives the ChatGPT account's five-hour and weekly windows as the backend
+  reports them during inference: the `codex.rate_limits` event that opens every WebSocket response
+  and the `x-codex-*` rate-limit headers on an SSE response. Only a Codex session is reported; API
+  key and Bedrock traffic never is. A listener that throws never affects the run.
 - `parallelToolCalls` — enables multi-call tool batches. Because batches are unavailable under
   Responses Lite, setting this to `true` also forces standard Responses for v2 models (see below).
 - `region` — the Bedrock region. Resolution order: this option, then `AWS_REGION`, then
@@ -638,6 +647,10 @@ separate Bedrock provider class in the public API:
   `model`, `onAccountUsage`, `pathToClaudeCodeExecutable`, `query`, and `userAgent`. `cwd` is the
   directory Claude Code runs in and defaults to the process's own; because Claude Code reads its
   working directory on startup, name an empty private folder rather than a home or root folder.
+  `onAccountUsage` receives the account's five-hour and seven-day windows from the SDK's
+  `rate_limit_event`, which the CLI emits whenever either window's rounded percentage or reset
+  moves, including the internal `unifiedWindows` it reads from every response's unified
+  rate-limit headers.
 - A `BedrockBearerTokenCredential` or `BedrockAwsCredential` uses Anthropic Messages on Amazon
   Bedrock. This branch accepts `client`, `endpoint`, `model`, `region` (default `us-east-1`),
   `transport` (`"mantle"` by default, or `"runtime"`), and `userAgent`.

@@ -7,7 +7,10 @@ import {
     providerUsageWindow,
     usagePercent,
 } from "@/core/providerUsageValues.js";
-import { readClaudeCodeOAuthToken } from "@/vendors/claude/impl/auth.js";
+import {
+    readClaudeCodeOAuthCredential,
+    type ClaudeCodeOAuthCredential,
+} from "@/vendors/claude/impl/auth.js";
 import { parseClaudeRateLimitHeaders } from "@/vendors/claude/parseClaudeRateLimitHeaders.js";
 
 const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
@@ -27,11 +30,32 @@ export interface FetchClaudeProviderUsageOptions {
     fetch?: typeof fetch;
     now?: () => number;
     oauthToken?: string;
+    /**
+     * Called when the OAuth usage endpoint refused this account: `403` or `404` when the token
+     * cannot read it at all, `429` with the provider's retry instant when it is throttled.
+     */
+    onUsageEndpointRefused?: (refusal: ClaudeUsageEndpointRefusal) => void;
     probeModel?: string;
     providerId?: string;
     timeoutMs?: number;
+    /**
+     * Whether to ask the OAuth usage endpoint before measuring the inference headers. By default
+     * a stored login is asked unless its grant lacks `user:profile`, a `CLAUDE_CODE_OAUTH_TOKEN`
+     * is never asked, and an explicit `oauthToken` is asked.
+     */
+    usageEndpoint?: boolean;
     userAgent?: string;
 }
+
+/** Why the OAuth usage endpoint did not answer for an account. */
+export interface ClaudeUsageEndpointRefusal {
+    status: number;
+    /** Epoch milliseconds before which the endpoint asked not to be called again. */
+    retryAt?: number;
+}
+
+/** The OAuth scope the usage endpoint requires; only a full `claude auth login` grants it. */
+const PROFILE_SCOPE = "user:profile";
 
 /**
  * Reads one Claude account's usage.
@@ -39,21 +63,45 @@ export interface FetchClaudeProviderUsageOptions {
  * The OAuth usage endpoint is richer — it carries the plan, the scoped limits,
  * and extra-usage credits — but it requires the `user:profile` scope that only
  * a full `claude auth login` grants, and it is itself rate limited. Tokens from
- * `claude setup-token` are inference-only and never satisfy it.
+ * `claude setup-token` are inference-only and never satisfy it, so they are not
+ * sent there at all.
  *
- * An inference-only token falls back to the unified rate-limit headers on an
- * inference response. Transient account-endpoint failures are surfaced so the
- * daemon can retain its cached reading and honor the provider's retry boundary.
+ * Every other case measures the unified rate-limit headers on a one-token
+ * inference response: an inference-only token, an endpoint that refused the
+ * token, and an endpoint that throttled us. A throttled endpoint still reports
+ * its retry boundary through `onUsageEndpointRefused`, and when the fallback
+ * cannot measure the account either the endpoint's own error is surfaced so the
+ * daemon can retain its cached reading and honor that boundary.
  */
 export async function fetchClaudeProviderUsage(
     options: FetchClaudeProviderUsageOptions = {},
 ): Promise<ProviderUsage | null> {
-    const token = options.oauthToken ?? (await readClaudeToken(options));
+    const credential =
+        options.oauthToken === undefined ? await readClaudeCredential(options) : undefined;
+    const token = options.oauthToken ?? credential?.accessToken;
     if (token === undefined) return null;
-    return (
-        (await fetchFromUsageEndpoint(token, options)) ??
-        (await probeRateLimitHeaders(token, options))
-    );
+    const askEndpoint =
+        options.usageEndpoint ??
+        (credential === undefined ||
+            (credential.source === "login" &&
+                (credential.scopes === undefined || credential.scopes.includes(PROFILE_SCOPE))));
+    if (!askEndpoint) return await probeRateLimitHeaders(token, options);
+    try {
+        const usage = await fetchFromUsageEndpoint(token, options);
+        if (usage !== null) return usage;
+    } catch (error: unknown) {
+        if (!(error instanceof ProviderUsageRequestError) || error.status !== 429) throw error;
+        options.onUsageEndpointRefused?.({
+            status: error.status,
+            ...(error.retryAt === undefined ? {} : { retryAt: error.retryAt }),
+        });
+        // A throttled endpoint is no reason to keep showing an old reading: the inference
+        // headers answer the same question and are not subject to that limit.
+        const measured = await probeRateLimitHeaders(token, options);
+        if (measured !== null) return measured;
+        throw error;
+    }
+    return await probeRateLimitHeaders(token, options);
 }
 
 async function fetchFromUsageEndpoint(
@@ -77,7 +125,10 @@ async function fetchFromUsageEndpoint(
     ]);
     // An inference-only setup token cannot read account metadata, but it can
     // still report the unified limits attached to an inference response.
-    if (usage.status === 403 || usage.status === 404) return null;
+    if (usage.status === 403 || usage.status === 404) {
+        options.onUsageEndpointRefused?.({ status: usage.status });
+        return null;
+    }
     if (!usage.ok) throw providerUsageResponseError(usage, now());
     const profilePayload = await optionalResponseJson(profile);
 
@@ -165,12 +216,14 @@ function claudeHeaders(
     };
 }
 
-function readClaudeToken(options: FetchClaudeProviderUsageOptions): Promise<string | undefined> {
+function readClaudeCredential(
+    options: FetchClaudeProviderUsageOptions,
+): Promise<ClaudeCodeOAuthCredential | undefined> {
     const env: NodeJS.ProcessEnv = {
         ...(options.env ?? process.env),
         ...(options.configDir === undefined ? {} : { CLAUDE_CONFIG_DIR: options.configDir }),
     };
-    return readClaudeCodeOAuthToken({ env });
+    return readClaudeCodeOAuthCredential({ env });
 }
 
 interface ClaudeRateLimitPayload {
