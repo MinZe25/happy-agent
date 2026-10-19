@@ -42,3 +42,11 @@ with explicit time and frame-count bounds. It must not filter by the expected me
 or payload: the first integration event is still compared exactly, so another member's leaked
 connection state cannot be skipped. Real profile updates force unrelated events ahead of both
 replayed and live connection updates, making the ordering regression deterministic.
+
+## Disclosure snapshots settle the seeded bot's public catalog
+
+The disclosure reader test waited for its fixture agent's cached catalog, but the built-in Chief
+of Staff discovers and publishes its catalog independently. Its initial publication could arrive
+after the retained snapshot and look like a reader mutation. Setup now waits for that bot's exact
+public catalog and creation events before capturing cursors. The original mutation whitelist,
+privacy checks, canonical-record checks, and cursor assertions remain intact.

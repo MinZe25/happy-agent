@@ -211,6 +211,28 @@ ${publicKey.export({ type: "spki", format: "pem" }).toString()}"""
                         ),
                     ).toEqual(["compact"]);
                 });
+                // The built-in bot discovers its catalog independently of this fixture agent.
+                // Wait for its public creation snapshot before testing reader-only mutations.
+                const { bots } = await owner.listBots();
+                const chief = bots.find((bot) => bot.systemKey === "chief_of_staff");
+                expect(chief).toBeDefined();
+                await vi.waitFor(() => {
+                    const events = journal!.replay(undefined, undefined, 10_000)!.events;
+                    expect(events).toContainEqual(
+                        expect.objectContaining({
+                            type: "agent.slash_commands.updated",
+                            payload: expect.objectContaining({ agentId: chief!.agent.id }),
+                        }),
+                    );
+                    expect(events).toContainEqual(
+                        expect.objectContaining({
+                            type: "agent.created",
+                            payload: expect.objectContaining({
+                                agent: expect.objectContaining({ id: chief!.agent.id }),
+                            }),
+                        }),
+                    );
+                });
                 const ctx = withAgentDatabase(
                     runtime!.ctx.named("test.diagnostic-record"),
                     runtime!.database,
