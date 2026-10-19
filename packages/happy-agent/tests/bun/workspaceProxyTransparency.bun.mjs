@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
 import { once } from "node:events";
-import { createServer } from "node:http";
-import { connect, createServer as createTcpServer } from "node:net";
+import { createServer, IncomingMessage } from "node:http";
+import { connect, createServer as createTcpServer, Socket } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { bindAgentHttpServer } from "../../sources/socket/AgentSocket.ts";
 import { WorkspaceProxy } from "../../../happy-agent-modules/sources/api/WorkspaceProxy.ts";
+import { RemoteProxyConnection } from "../../../happy-agent-modules/sources/connections/impl/RemoteProxyConnection.ts";
 
 const cleanups = [];
 afterEach(async () => {
@@ -49,12 +50,20 @@ async function frontDoor(networkPort, prepare) {
                 });
                 return { handled: true, route };
             },
+            // A tunnel that reaches the HTTP server is admitted the way the daemon admits it.
+            handleConnect: async (ctx, request, socket, head) => {
+                const admitted = await prepared.api.prepareWorkspaceProxySocket(ctx, request.url);
+                if (!admitted.handled || admitted.route === undefined) return false;
+                proxy.accept(socket, head, admitted.route);
+                return true;
+            },
         },
     };
     const listener = await bindAgentHttpServer(prepared, "127.0.0.1", 0);
     cleanups.push(() => listener.close());
     return {
         opened,
+        port: listener.port,
         async attach() {
             const socket = connect({ host: "127.0.0.1", port: listener.port, allowHalfOpen: true });
             cleanups.push(() => socket.destroy());
@@ -79,6 +88,18 @@ async function readAll(socket) {
         socket.once("close", resolve);
     });
     return text;
+}
+
+/** A loopback socket pair: whatever is written to `inner` is read from `outer`, and back. */
+async function socketPair() {
+    const server = createTcpServer({ allowHalfOpen: true });
+    const port = await listening(server);
+    const accepted = once(server, "connection");
+    const outer = connect({ host: "127.0.0.1", port, allowHalfOpen: true });
+    cleanups.push(() => outer.destroy());
+    const [inner] = await accepted;
+    cleanups.push(() => inner.destroy());
+    return { outer, inner };
 }
 
 /** Open a nested CONNECT and return its answer, leaving any bytes after it to be read. */
@@ -109,6 +130,44 @@ test("every tunnel and request opens from the attachment's network, never native
     expect(await readAll(socket)).toBe("network");
     expect(f.opened).toEqual([`127.0.0.1:${sentinelPort}`]);
     expect(reached).toEqual([]);
+}, 5000);
+
+test("a desktop's tunnel to a remote opens after the remote connection served a request", async () => {
+    const app = createTcpServer({ allowHalfOpen: true }, (socket) => socket.end("network"));
+    const f = await frontDoor(await listening(app));
+    let carriers = 0;
+    const remote = new RemoteProxyConnection(() => {
+        carriers += 1;
+        return connect({ host: "127.0.0.1", port: f.port });
+    });
+    cleanups.push(() => remote.close());
+    const authorize = async () => "fixture";
+    // The desktop's daemon forwards ordinary requests to the remote over one pooled connection.
+    const gateway = createServer((req, res) => void remote.forward(req, res, req.url, authorize));
+    const warmed = await fetch(`http://127.0.0.1:${await listening(gateway)}/v0/health`);
+    expect(await warmed.text()).toBe("healthy");
+    expect(carriers).toBe(1);
+
+    // The browser's tunnel, handed over as the desktop's Bun front door adapts an attachment. The
+    // remote routes a connection by its first request, so the tunnel needs a connection of its own.
+    const route = "/v0/workspaces/w/agents/a/proxy";
+    const request = new IncomingMessage(new Socket());
+    request.method = "CONNECT";
+    request.url = route;
+    request.headers = { host: "happy-agent.invalid", authorization: "Bearer fixture" };
+    request.complete = true;
+    cleanups.push(() => request.destroy());
+    const { outer, inner } = await socketPair();
+    const established = once(outer, "data");
+    const forwarded = remote.forward(request, inner, route, authorize, Buffer.alloc(0));
+    expect((await established)[0].toString()).toBe("HTTP/1.1 200 Connection Established\r\n\r\n");
+    expect(carriers).toBe(2);
+    expect(await tunnel(outer, "localhost:3000")).toBe(
+        "HTTP/1.1 200 Connection Established\r\n\r\n",
+    );
+    expect(await readAll(outer)).toBe("network");
+    await forwarded;
+    expect(f.opened).toEqual(["localhost:3000"]);
 }, 5000);
 
 test("an attachment admitted without a route is refused instead of connected natively", async () => {
