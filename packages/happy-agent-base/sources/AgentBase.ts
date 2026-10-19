@@ -5510,7 +5510,9 @@ interface SessionConfig {
 /**
  * Snapshot each tool's descriptor fields. Tools are assembled again for every request while
  * their schema objects are shared, so keeping the field values lets the next comparison settle
- * most fields by identity instead of serializing every schema on every request.
+ * most fields by identity instead of serializing every schema on every request. A schema object
+ * handed to a request is treated as immutable: a module that changes a tool builds a new descriptor,
+ * which is compared by value, rather than editing the one the previous request saw in place.
  */
 function sessionConfigOf(
     provider: string,
