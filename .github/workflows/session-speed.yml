@@ -57,13 +57,14 @@ jobs:
                   mkdir -p "$RUNNER_TEMP/base/packages/happy-agent-gym/perf"
                   cp packages/happy-agent-gym/perf/*.ts "$RUNNER_TEMP/base/packages/happy-agent-gym/perf/"
 
+            # The daemon runs on the published happy-agent-base and happy-agent-client the manifests
+            # pin, so those are what is measured: a change to either package shows up in the pull
+            # request that moves the pin to its release.
             - name: Build and benchmark the base
               continue-on-error: true
               working-directory: ${{ runner.temp }}/base
               run: |
                   pnpm install --frozen-lockfile
-                  pnpm --filter @slopus/happy-agent-base build
-                  pnpm --filter @slopus/happy-agent-client build
                   pnpm --filter @slopus/happy-agent-modules build
                   pnpm --filter @slopus/happy-agent build
                   cd packages/happy-agent-gym
@@ -72,8 +73,6 @@ jobs:
             - name: Build and benchmark the head
               run: |
                   pnpm install --frozen-lockfile
-                  pnpm --filter @slopus/happy-agent-base build
-                  pnpm --filter @slopus/happy-agent-client build
                   pnpm --filter @slopus/happy-agent-modules build
                   pnpm --filter @slopus/happy-agent build
                   cd packages/happy-agent-gym
