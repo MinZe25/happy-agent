@@ -309,3 +309,20 @@ A strong scenario asserts more than the last sentence the model produced:
 - Waiting for a steering message's run to settle, when steering joins a run already under way.
 - Treating an emulated-machine failure as a host-machine failure: this gym has no host boundary,
   and a scenario that needs one belongs somewhere else.
+
+## Session speed benchmark
+
+`perf/ciBench.ts` seeds a throwaway installation through the daemon API — a few sessions with long
+histories and a few hundred without — then restarts the daemon (`perf/serve.ts`, in a child
+process) and records medians: restart until ready, the first desktop bootstrap and history read
+after it, the warm desktop bootstrap, and opening a long session. `perf/ciCompare.ts` compares two
+results and prints warnings for what got slower; it never fails.
+
+```sh
+cd packages/happy-agent-gym
+PERF_OUT=/tmp/head.json node --import tsx perf/ciBench.ts
+node --import tsx perf/ciCompare.ts /tmp/base.json /tmp/head.json
+```
+
+The `Session speed` workflow runs both on a pull request's base and head and reports in the job
+summary. It is not a required check and never blocks a merge or a release.
