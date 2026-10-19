@@ -39,4 +39,14 @@ describe("agent networks", () => {
         for (const networkId of ["", "-host", "Host", "a/b", "a".repeat(129), "a b"])
             expect(Value.Check(workspaceAgentNetworkResponseSchema, { networkId })).toBe(false);
     });
+
+    it("refuses to address a network outside the opaque form", () => {
+        const client = new HappyAgentClient({ endpoint: "http://daemon/", token: "credential" });
+        const longest = "a".repeat(128);
+        expect(new URL(client.networkProxyUrl(longest)).pathname).toBe(
+            `/v0/networks/${longest}/proxy`,
+        );
+        for (const networkId of ["..", ".", "a/b", "", "a".repeat(129), "-host", "a%2fb", "a?b"])
+            expect(() => client.networkProxyUrl(networkId)).toThrow("The network ID is invalid.");
+    });
 });

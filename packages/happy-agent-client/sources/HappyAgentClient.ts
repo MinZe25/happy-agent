@@ -242,15 +242,16 @@ import type {
     InvokeSlashCommandRequest,
     InvokeSlashCommandResponse,
 } from "./protocol/slashCommands.js";
-import type {
-    ArchiveWorkspaceRequest,
-    CreateWorkspaceRequest,
-    ListWorkspacesQuery,
-    RenameWorkspaceRequest,
-    ReorderWorkspaceRequest,
-    WorkspaceAgentNetworkResponse,
-    WorkspaceListResponse,
-    WorkspaceResponse,
+import {
+    networkIdSchema,
+    type ArchiveWorkspaceRequest,
+    type CreateWorkspaceRequest,
+    type ListWorkspacesQuery,
+    type RenameWorkspaceRequest,
+    type ReorderWorkspaceRequest,
+    type WorkspaceAgentNetworkResponse,
+    type WorkspaceListResponse,
+    type WorkspaceResponse,
 } from "./protocol/workspaces.js";
 import type { QueryParameters } from "./endpointUrl.js";
 import type {
@@ -2295,7 +2296,10 @@ export class HappyAgentClient {
      * that `getWorkspaceAgentNetwork` named.
      */
     networkProxyUrl(networkId: string): string {
-        return endpointUrl(this.#endpoint, `v0/networks/${encodeURIComponent(networkId)}/proxy`);
+        if (!Value.Check(networkIdSchema, networkId)) {
+            throw new Error("The network ID is invalid.");
+        }
+        return endpointUrl(this.#endpoint, `v0/networks/${networkId}/proxy`);
     }
 
     // Sandboxed workspace services: creation belongs to the agent's service_start tool.
