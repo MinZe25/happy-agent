@@ -83,14 +83,17 @@ export class AgentPersistenceDrizzle<
         prefix: string,
     ): Promise<readonly { readonly key: string; readonly value: unknown }[]> {
         return await this.#operation(ctx, async (database) => {
-            // SQLite compares text bytewise, so every key starting with the prefix lies in
-            // [prefix, prefix + U+10FFFF): bounding the key lets the primary key seek straight to
-            // the scope instead of testing every value the owner holds. The collection root owns
-            // one entry per agent, so an unbounded scan made each single-key read linear in the
+            // SQLite compares UTF-8 text bytewise, so every key starting with the prefix lies in
+            // [prefix, successor): bounding the key lets the primary key seek straight to the
+            // scope instead of testing every value the owner holds. The collection root owns one
+            // entry per agent, so an unbounded scan made each single-key read linear in the
             // installation. The substr test still decides membership exactly on every engine.
-            const range = isAgentSQLiteDatabase(database)
-                ? sql`AND key >= ${prefix} AND key < ${`${prefix}\u{10FFFF}`}`
-                : sql``;
+            const upper = isAgentSQLiteDatabase(database) ? prefixSuccessor(prefix) : undefined;
+            const range = !isAgentSQLiteDatabase(database)
+                ? sql``
+                : upper === undefined
+                  ? sql`AND key >= ${prefix}`
+                  : sql`AND key >= ${prefix} AND key < ${upper}`;
             const rows = await agentDatabaseRows<{ key: string; value_json: string }>(
                 database,
                 sql`SELECT key, value_json
@@ -183,4 +186,19 @@ export class AgentPersistenceDrizzle<
         }
         return ctx;
     }
+}
+
+/**
+ * The least string greater than every string that starts with `prefix`, in UTF-8 byte order, or
+ * nothing when no such bound exists (an empty prefix, or one of only U+10FFFF). A trailing U+10FFFF
+ * carries into the code point before it, and a lone surrogate, which has no UTF-8 encoding to
+ * order by, gives no bound at all.
+ */
+export function prefixSuccessor(prefix: string): string | undefined {
+    const points = [...prefix];
+    while (points.at(-1) === "\u{10FFFF}") points.pop();
+    const last = points.pop()?.codePointAt(0);
+    if (last === undefined || (last >= 0xd800 && last <= 0xdfff)) return undefined;
+    const next = last === 0xd7ff ? 0xe000 : last + 1;
+    return points.join("") + String.fromCodePoint(next);
 }
