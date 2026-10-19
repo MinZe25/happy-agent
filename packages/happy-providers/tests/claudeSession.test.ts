@@ -2010,6 +2010,49 @@ describe("ClaudeSession", () => {
         expect(textFromSessionEvents(events)).toBe("CONTINUED");
     });
 
+    it("keys the live query only on the tool descriptors Claude sees", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const query = vi.fn<ClaudeSdkQuery>(() => fakeQuery("DONE"));
+        // Agent tools reach the session with executor-only fields such as `returnType`. MCP tools
+        // share one bounded JSON-value schema whose serialized form is millions of characters, so
+        // serializing those fields for every tool overflows the engine's maximum string length.
+        const agentTool = {
+            name: "mcp__server__lookup",
+            parameters: Type.Object({ id: Type.String() }),
+            returnType: {
+                toJSON: () => {
+                    throw new Error("Executor-only tool fields must not be serialized.");
+                },
+            },
+        };
+        const session = new ClaudeSession("tool-descriptor-key-session", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            query,
+            tools: [agentTool],
+        });
+
+        const events = await collectSessionEvents(
+            session.run(testContext, {
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Look it up." }],
+                        },
+                    ],
+                },
+            }),
+        );
+
+        expect(query).toHaveBeenCalledOnce();
+        expect(textFromSessionEvents(events)).toBe("DONE");
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+    });
+
     it("restarts when the caller edits the assistant message the query generated", async () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");

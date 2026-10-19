@@ -403,7 +403,7 @@ export class ClaudeSession extends BaseSession {
                 ? {}
                 : { structuredOutput: options.structuredOutput }),
             systemPrompt,
-            tools,
+            tools: tools.map(claudeQueryToolKey),
         });
         // Subsumes the older tail check: the live MCP bridge can close a tool batch only while
         // its results remain at the context tail, and requiring the suffix to be exactly that
@@ -1158,4 +1158,25 @@ function* closeClaudeOutputBlocks(
         }
     }
     blocks.clear();
+}
+
+/**
+ * The part of a tool the live query depends on. Callers pass richer tool objects through
+ * `SessionTool`, and their executor-only fields - an MCP result schema serializes to millions of
+ * characters - must neither churn the query nor be serialized at all.
+ */
+function claudeQueryToolKey(tool: SessionTool): SessionTool {
+    return {
+        name: tool.name,
+        ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
+        ...(tool.namespaceDescription === undefined
+            ? {}
+            : { namespaceDescription: tool.namespaceDescription }),
+        ...(tool.server === undefined ? {} : { server: tool.server }),
+        ...(tool.description === undefined ? {} : { description: tool.description }),
+        ...(tool.parameters === undefined ? {} : { parameters: tool.parameters }),
+        ...(tool.searchKeywords === undefined ? {} : { searchKeywords: tool.searchKeywords }),
+        ...(tool.defer === undefined ? {} : { defer: tool.defer }),
+        ...(tool.grammar === undefined ? {} : { grammar: tool.grammar }),
+    };
 }
