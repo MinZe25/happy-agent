@@ -100,6 +100,53 @@ describe("AgentBase", () => {
         expect(provider.sessions[0]?.destroyed).toBe(true);
     });
 
+    it("keeps the provider session for a rebuilt tool with the same descriptor and recreates it for a changed one", async () => {
+        const provider = new ScriptedProvider([
+            textTurn("one"),
+            textTurn("two"),
+            textTurn("three"),
+        ]);
+        const tool = (parameters: ReturnType<typeof Type.Object>) =>
+            defineAgentTool({
+                name: "probe",
+                description: "Probe the workspace.",
+                parameters,
+                returnType: Type.Object({}),
+                shouldReviewInAutoMode: () => false,
+                execute: () => Promise.resolve({}),
+                toLLM: () => [],
+            });
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            initialState: {
+                instructions: "Be brief.",
+                tools: [tool(Type.Object({ path: Type.String(), depth: Type.Number() }))],
+            },
+        });
+
+        await agent.send(ctx, user("first"));
+        await agent.waitForIdle();
+        // A freshly built schema with the same JSON is the same descriptor.
+        agent.state.tools.splice(
+            0,
+            1,
+            tool(Type.Object({ path: Type.String(), depth: Type.Number() })),
+        );
+        await agent.send(ctx, user("second"));
+        await agent.waitForIdle();
+        expect(provider.sessions).toHaveLength(1);
+
+        agent.state.tools.splice(0, 1, tool(Type.Object({ path: Type.String() })));
+        await agent.send(ctx, user("third"));
+        await agent.waitForIdle();
+        expect(provider.sessions).toHaveLength(2);
+        expect(provider.sessions[0]?.destroyed).toBe(true);
+        await agent.close();
+    });
+
     it("reads mutated state on the next inference", async () => {
         const provider = new ScriptedProvider([
             textTurn("one"),

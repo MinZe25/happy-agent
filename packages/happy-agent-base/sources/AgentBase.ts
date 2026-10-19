@@ -507,7 +507,7 @@ export class AgentBase {
     /** The provider session requests run on, created on first use and stateful thereafter. */
     #session: BaseSession | undefined;
     /** The provider-facing configuration the current session was created with. */
-    #sessionConfig: string | undefined;
+    #sessionConfig: SessionConfig | undefined;
     /** The conversation under Base-owned identities, reloaded from the store every turn. */
     #messages: SessionMessage[] = [];
     /** Provider-native tool IDs used only when serializing the private provider context. */
@@ -5396,8 +5396,11 @@ export class AgentBase {
         instructions: string,
         tools: readonly AnyAgentTool[],
     ): Promise<BaseSession> {
-        const key = sessionConfigKey(this.#providerId, this.#model, instructions, tools);
-        if (this.#session !== undefined && this.#sessionConfig !== key) {
+        const config = sessionConfigOf(this.#providerId, this.#model, instructions, tools);
+        if (
+            this.#session !== undefined &&
+            (this.#sessionConfig === undefined || !sessionConfigSame(this.#sessionConfig, config))
+        ) {
             const session = this.#session;
             this.#session = undefined;
             // The session being replaced may still be held by a response iterator that has not
@@ -5418,7 +5421,7 @@ export class AgentBase {
                 instructions,
                 tools: [...tools],
             });
-            this.#sessionConfig = key;
+            this.#sessionConfig = config;
         }
         return this.#session;
     }
@@ -5483,26 +5486,60 @@ function toolFailure(id: string, reason: string): SessionToolResultMessage {
  * sees participate, so re-created tool objects with identical descriptors do not churn the
  * session.
  */
-function sessionConfigKey(
+/** The provider-facing descriptor fields of one tool, in the order they are compared. */
+const SESSION_TOOL_FIELDS = [
+    "name",
+    "namespace",
+    "namespaceDescription",
+    "description",
+    "parameters",
+    "defer",
+    "searchKeywords",
+    "server",
+    "grammar",
+] as const;
+
+/** The provider-facing configuration of a session: what recreating it would hand the provider. */
+interface SessionConfig {
+    readonly provider: string;
+    readonly model: string | null;
+    readonly instructions: string;
+    readonly tools: readonly (readonly unknown[])[];
+}
+
+/**
+ * Snapshot each tool's descriptor fields. Tools are assembled again for every request while
+ * their schema objects are shared, so keeping the field values lets the next comparison settle
+ * most fields by identity instead of serializing every schema on every request.
+ */
+function sessionConfigOf(
     provider: string,
     model: string | undefined,
     instructions: string,
     tools: readonly AnyAgentTool[],
-): string {
-    return deterministicStringify([
+): SessionConfig {
+    return {
         provider,
-        model ?? null,
+        model: model ?? null,
         instructions,
-        tools.map((tool) => [
-            tool.name,
-            tool.namespace ?? null,
-            tool.namespaceDescription ?? null,
-            tool.description ?? null,
-            tool.parameters ?? null,
-            tool.defer ?? null,
-            tool.searchKeywords ?? null,
-            tool.server ?? null,
-            tool.grammar ?? null,
-        ]),
-    ]);
+        tools: tools.map((tool) => SESSION_TOOL_FIELDS.map((field) => tool[field] ?? null)),
+    };
+}
+
+/** Whether two configurations give the provider the same JSON, ignoring key order. */
+function sessionConfigSame(a: SessionConfig, b: SessionConfig): boolean {
+    return (
+        a.provider === b.provider &&
+        a.model === b.model &&
+        a.instructions === b.instructions &&
+        a.tools.length === b.tools.length &&
+        a.tools.every((fields, index) => {
+            const other = b.tools[index]!;
+            return fields.every(
+                (value, field) =>
+                    value === other[field] ||
+                    deterministicStringify([value]) === deterministicStringify([other[field]]),
+            );
+        })
+    );
 }
