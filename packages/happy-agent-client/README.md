@@ -34,6 +34,17 @@ recurrence in the client. `createCalendarEvent()`, `updateCalendarEvent()`, and
 restore one by sending its fields through ordinary update. After `calendar_event.created` or
 `calendar_event.updated` for a shown calendar, read the visible range again.
 
+Chat Surfaces are conversations among people, served at `/v0/surfaces/chat/:surfaceId/messages`
+when health reports `capabilities.chatSurfaces`. Their messages are separate from every Surface's
+shared agent chat (`ensureSurfaceChat()`). `listSurfaceMessages(surfaceId)` reads the newest page,
+oldest first; continue older with `beforeSeq: nextBeforeSeq` or forward with `afterSeq`.
+`sendSurfaceMessage()` takes a client-generated `id` so a retry never posts twice.
+`editSurfaceMessage()` and `deleteSurfaceMessage()` take `ifMatch` and are refused with
+`forbidden` for anyone but the author. `listSurfaceMessageVersions()` and
+`getSurfaceMessageVersion()` expose permanent snapshots, including a deleted message's text.
+Follow `surface_message.created` and `surface_message.updated`; when a created message's `seq` is
+not one past the newest held, read forward with `afterSeq`.
+
 `HappyAgentClient` is built from an endpoint and a bearer token. The token may be a function called
 for every request, so refreshed credentials apply without a new client; it may be omitted only to
 call `getAuthentication()` before signing in.

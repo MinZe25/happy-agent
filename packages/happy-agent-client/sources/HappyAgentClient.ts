@@ -86,6 +86,13 @@ import type {
     CalendarRangeResponse,
     SystemMonitorSnapshot,
     CreateCalendarEventRequest,
+    EditSurfaceMessageRequest,
+    SendSurfaceMessageRequest,
+    SurfaceMessageMutationRequest,
+    SurfaceMessagePageResponse,
+    SurfaceMessageResponse,
+    SurfaceMessageVersionListResponse,
+    SurfaceMessageVersionResponse,
     UpdateCalendarEventRequest,
     EnsureSurfaceChatRequest,
     ReorderSurfaceRequest,
@@ -1899,6 +1906,116 @@ export class HappyAgentClient {
         return await this.#json({
             method: "GET",
             path: `v0/surfaces/calendar/${encodeURIComponent(surfaceId)}/${encodeURIComponent(eventId)}/versions/${encodeURIComponent(version)}`,
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * One page of a chat Surface's messages, oldest first. Without `afterSeq` it is the newest
+     * page below `beforeSeq`; with `afterSeq` it reads forward. These are people's messages,
+     * never the Surface's shared agent chat.
+     */
+    async listSurfaceMessages(
+        surfaceId: SurfaceId,
+        options: RequestOptions & {
+            readonly beforeSeq?: number;
+            readonly afterSeq?: number;
+            readonly limit?: number;
+        } = {},
+    ): Promise<SurfaceMessagePageResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/chat/${encodeURIComponent(surfaceId)}/messages`,
+            query: {
+                beforeSeq: options.beforeSeq,
+                afterSeq: options.afterSeq,
+                limit: options.limit,
+            },
+            signal: options.signal,
+        });
+    }
+
+    /** A client-generated ID safely resolves an uncertain post; a retry never posts twice. */
+    async sendSurfaceMessage(
+        surfaceId: SurfaceId,
+        request: SendSurfaceMessageRequest,
+        options: RequestOptions = {},
+    ): Promise<SurfaceMessageResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/surfaces/chat/${encodeURIComponent(surfaceId)}/messages`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** Deleted tombstones remain readable by ID. */
+    async getSurfaceMessage(
+        surfaceId: SurfaceId,
+        messageId: Cuid2,
+        options: RequestOptions = {},
+    ): Promise<SurfaceMessageResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/chat/${encodeURIComponent(surfaceId)}/messages/${encodeURIComponent(messageId)}`,
+            signal: options.signal,
+        });
+    }
+
+    /** Only the message's author may edit it. */
+    async editSurfaceMessage(
+        surfaceId: SurfaceId,
+        messageId: Cuid2,
+        request: EditSurfaceMessageRequest,
+        options: VersionedRequestOptions,
+    ): Promise<SurfaceMessageResponse> {
+        return await this.#json({
+            method: "PATCH",
+            path: `v0/surfaces/chat/${encodeURIComponent(surfaceId)}/messages/${encodeURIComponent(messageId)}`,
+            json: request,
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Only the author may delete; the tombstone keeps every immutable revision. */
+    async deleteSurfaceMessage(
+        surfaceId: SurfaceId,
+        messageId: Cuid2,
+        options: VersionedRequestOptions & SurfaceMessageMutationRequest,
+    ): Promise<SurfaceMessageResponse> {
+        return await this.#json({
+            method: "DELETE",
+            path: `v0/surfaces/chat/${encodeURIComponent(surfaceId)}/messages/${encodeURIComponent(messageId)}`,
+            json: bodyOf(options),
+            ifMatch: options.ifMatch,
+            signal: options.signal,
+        });
+    }
+
+    /** Permanent revisions, oldest first; the cursor belongs to this message's version history. */
+    async listSurfaceMessageVersions(
+        surfaceId: SurfaceId,
+        messageId: Cuid2,
+        options: RequestOptions & { readonly afterVersion?: string; readonly limit?: number } = {},
+    ): Promise<SurfaceMessageVersionListResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/chat/${encodeURIComponent(surfaceId)}/messages/${encodeURIComponent(messageId)}/versions`,
+            query: { afterVersion: options.afterVersion, limit: options.limit },
+            signal: options.signal,
+        });
+    }
+
+    async getSurfaceMessageVersion(
+        surfaceId: SurfaceId,
+        messageId: Cuid2,
+        version: string,
+        options: RequestOptions = {},
+    ): Promise<SurfaceMessageVersionResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/chat/${encodeURIComponent(surfaceId)}/messages/${encodeURIComponent(messageId)}/versions/${encodeURIComponent(version)}`,
             signal: options.signal,
         });
     }

@@ -82,6 +82,8 @@ export const healthResponseSchema = Type.Object({
             calendarSurfaces: Type.Optional(Type.Boolean()),
             /** True when the daemon serves System Monitor Surfaces. */
             systemMonitorSurfaces: Type.Optional(Type.Boolean()),
+            /** True when the daemon serves chat Surfaces and their people's messages. */
+            chatSurfaces: Type.Optional(Type.Boolean()),
         }),
     ),
     /** Always `true`; a daemon that cannot answer does not answer. */

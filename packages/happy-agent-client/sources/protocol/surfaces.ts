@@ -151,6 +151,15 @@ export const createCalendarSurfaceRequestSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+/** A conversation among people; unrelated to the Surface's shared agent chat. */
+export const createChatSurfaceRequestSchema = Type.Object(
+    {
+        ...surfaceCreationFields,
+        image: Type.Optional(surfaceImageInputSchema),
+        type: Type.Literal("chat"),
+    },
+    { additionalProperties: false },
+);
 export const createArtifactSurfaceRequestSchema = Type.Object(
     {
         ...surfaceCreationFields,
@@ -191,6 +200,7 @@ export const createSurfaceRequestSchema = Type.Union([
     createDocumentSurfaceRequestSchema,
     createCalendarSurfaceRequestSchema,
     createSystemMonitorSurfaceRequestSchema,
+    createChatSurfaceRequestSchema,
     createArtifactSurfaceRequestSchema,
     createBotSurfaceRequestSchema,
     createTaskSurfaceRequestSchema,
@@ -788,6 +798,111 @@ export type UpdateCalendarEventRequest = Static<typeof updateCalendarEventReques
 /** Delete accepts this optional echo-only body. */
 export const calendarEventMutationRequestSchema = surfaceMemberRequestSchema;
 export type CalendarEventMutationRequest = Static<typeof calendarEventMutationRequestSchema>;
+
+/**
+ * Markdown a person posted to a chat Surface, stored verbatim; length is in UTF-16 units. These
+ * messages are people's conversation, never the Surface's shared agent chat.
+ */
+export const surfaceMessageTextSchema = Type.String({
+    minLength: 1,
+    maxLength: 20_000,
+    pattern: "^(?=[\\s\\S]*\\S)[^\\x00-\\x08\\x0b-\\x1f\\x7f]+$",
+});
+
+/** A message's position in its Surface: contiguous from 1, in creation order, never reused. */
+export const surfaceMessageSeqSchema = Type.Integer({
+    minimum: 1,
+    maximum: Number.MAX_SAFE_INTEGER,
+});
+
+export const surfaceMessageStatusSchema = Type.Union([
+    Type.Literal("active"),
+    Type.Literal("deleted"),
+]);
+export type SurfaceMessageStatus = Static<typeof surfaceMessageStatusSchema>;
+
+const surfaceMessageFields = {
+    /** The poster, from the authenticated caller; null in standalone mode. Immutable. */
+    authorUserId: Nullable(userIdSchema),
+    createdAt: timestampSchema,
+    /** Time of the latest text change, or null when never edited. */
+    editedAt: Nullable(timestampSchema),
+    id: cuid2Schema,
+    seq: surfaceMessageSeqSchema,
+    surfaceId: surfaceIdSchema,
+    text: surfaceMessageTextSchema,
+    updatedAt: timestampSchema,
+    version: resourceVersionSchema,
+};
+
+/** A deleted message is a tombstone that keeps its last text; clients show a placeholder. */
+export const surfaceMessageSchema = Type.Union([
+    Type.Object({
+        ...surfaceMessageFields,
+        deletedAt: Type.Null(),
+        status: Type.Literal("active"),
+    }),
+    Type.Object({
+        ...surfaceMessageFields,
+        deletedAt: timestampSchema,
+        status: Type.Literal("deleted"),
+    }),
+]);
+export type SurfaceMessage = Static<typeof surfaceMessageSchema>;
+
+/** Oldest first, tombstones included; each cursor is null when nothing lies beyond the page. */
+export const surfaceMessagePageResponseSchema = Type.Object({
+    cursor: eventCursorSchema,
+    messages: Type.Array(surfaceMessageSchema),
+    nextAfterSeq: Nullable(surfaceMessageSeqSchema),
+    nextBeforeSeq: Nullable(surfaceMessageSeqSchema),
+});
+export type SurfaceMessagePageResponse = Static<typeof surfaceMessagePageResponseSchema>;
+
+export const surfaceMessageResponseSchema = Type.Object({ message: surfaceMessageSchema });
+export type SurfaceMessageResponse = Static<typeof surfaceMessageResponseSchema>;
+
+/** Agents never change messages, so every revision comes from a person through the API. */
+export const surfaceMessageRevisionSchema = Type.Object({
+    actor: surfaceRevisionActorSchema,
+    message: surfaceMessageSchema,
+    source: surfaceRevisionSourceSchema,
+});
+export type SurfaceMessageRevision = Static<typeof surfaceMessageRevisionSchema>;
+
+export const surfaceMessageVersionListResponseSchema = Type.Object({
+    nextAfterVersion: Nullable(resourceVersionSchema),
+    versions: Type.Array(surfaceMessageRevisionSchema),
+});
+export type SurfaceMessageVersionListResponse = Static<
+    typeof surfaceMessageVersionListResponseSchema
+>;
+
+export const surfaceMessageVersionResponseSchema = Type.Object({
+    revision: surfaceMessageRevisionSchema,
+});
+export type SurfaceMessageVersionResponse = Static<typeof surfaceMessageVersionResponseSchema>;
+
+/** A client-generated `id` is the creation retry key, so a lost response never posts twice. */
+export const sendSurfaceMessageRequestSchema = Type.Object(
+    {
+        id: Type.Optional(cuid2Schema),
+        mutationId: Type.Optional(mutationIdSchema),
+        text: surfaceMessageTextSchema,
+    },
+    { additionalProperties: false },
+);
+export type SendSurfaceMessageRequest = Static<typeof sendSurfaceMessageRequestSchema>;
+
+export const editSurfaceMessageRequestSchema = Type.Object(
+    { mutationId: Type.Optional(mutationIdSchema), text: surfaceMessageTextSchema },
+    { additionalProperties: false },
+);
+export type EditSurfaceMessageRequest = Static<typeof editSurfaceMessageRequestSchema>;
+
+/** Delete accepts this optional echo-only body. */
+export const surfaceMessageMutationRequestSchema = surfaceMemberRequestSchema;
+export type SurfaceMessageMutationRequest = Static<typeof surfaceMessageMutationRequestSchema>;
 
 const monitorBytes = Type.Number({ minimum: 0 });
 const monitorPercent = Type.Number({ minimum: 0, maximum: 100 });

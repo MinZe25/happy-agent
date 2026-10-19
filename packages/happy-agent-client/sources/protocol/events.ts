@@ -55,6 +55,9 @@ import {
     calendarEventTitleSchema,
     calendarRecurrenceSchema,
     calendarTimingSchema,
+    surfaceMessageSchema,
+    surfaceMessageStatusSchema,
+    surfaceMessageTextSchema,
     todoSchema,
     todoTextSchema,
     type SurfaceDocumentLiveFrame,
@@ -281,6 +284,30 @@ export const calendarEventUpdatedPayloadSchema = Type.Object({
     version: resourceVersionSchema,
 });
 export type CalendarEventUpdatedPayload = Static<typeof calendarEventUpdatedPayloadSchema>;
+
+/** A person posted to a chat Surface; the full message carries its `seq` for gap detection. */
+export const surfaceMessageCreatedPayloadSchema = Type.Object({
+    message: surfaceMessageSchema,
+    mutationId: Type.Optional(mutationIdSchema),
+});
+export type SurfaceMessageCreatedPayload = Static<typeof surfaceMessageCreatedPayloadSchema>;
+
+/** Only the fields that changed, always with `updatedAt`; `seq` and author never change. */
+export const surfaceMessageUpdatedPayloadSchema = Type.Object({
+    changes: Type.Object({
+        deletedAt: Type.Optional(Nullable(timestampSchema)),
+        editedAt: Type.Optional(Nullable(timestampSchema)),
+        status: Type.Optional(surfaceMessageStatusSchema),
+        text: Type.Optional(surfaceMessageTextSchema),
+        updatedAt: timestampSchema,
+    }),
+    messageId: cuid2Schema,
+    mutationId: Type.Optional(mutationIdSchema),
+    previousVersion: resourceVersionSchema,
+    surfaceId: surfaceIdSchema,
+    version: resourceVersionSchema,
+});
+export type SurfaceMessageUpdatedPayload = Static<typeof surfaceMessageUpdatedPayloadSchema>;
 
 /**
  * Emitted only by daemons without collaborative documents; current daemons deliver document
@@ -555,6 +582,8 @@ export type HappyAgentEvent =
     | EventEnvelope<"todo.updated", TodoUpdatedPayload>
     | EventEnvelope<"calendar_event.created", CalendarEventCreatedPayload>
     | EventEnvelope<"calendar_event.updated", CalendarEventUpdatedPayload>
+    | EventEnvelope<"surface_message.created", SurfaceMessageCreatedPayload>
+    | EventEnvelope<"surface_message.updated", SurfaceMessageUpdatedPayload>
     | EventEnvelope<"surface.document.updated", SurfaceDocumentUpdatedPayload>
     | EventEnvelope<"artifact.created", ArtifactCreatedPayload>
     | EventEnvelope<"artifact.updated", ArtifactUpdatedPayload>
