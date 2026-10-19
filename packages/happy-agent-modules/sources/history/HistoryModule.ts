@@ -2722,7 +2722,10 @@ async function readRunsMessages(
             sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
                 FROM ${sql.raw(HISTORY_TABLE)}
                 WHERE ${runMessagesScope(agentId, runs, anchorRun)}
-                ORDER BY position ASC
+                -- The unary plus keeps SQLite from walking the agent's whole history in
+                -- primary-key order, where reading each row's trailing run_id pages in
+                -- its full message, and seeks the selected runs by their index instead.
+                ORDER BY +position ASC
                 LIMIT ${expectedMessages + 1}`,
         ),
     );
