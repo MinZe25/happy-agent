@@ -319,6 +319,11 @@ then offer no calendar creation. A calendar Surface listed by a daemon a client 
 support is left unavailable like any unknown type. The `calendar_event.*` events are absent on
 older compatible daemons.
 
+System Monitor Surfaces are additive and do not increment the protocol version. Supporting
+daemons report `capabilities.systemMonitorSurfaces: true` from health. Older daemons omit it,
+reject `{ "type": "system_monitor" }` creation with `400`, and answer its read route with
+`404`. Clients leave an unknown Surface type unavailable and offer creation only when supported.
+
 Collaborative documents and the removal of the `separator` Surface type are a one-off exception
 to additive compatibility, approved for client and daemon together; the protocol number does not
 change. A daemon that serves collaborative documents reports `capabilities.collaborativeDocuments:
@@ -1015,7 +1020,7 @@ Fields:
   voice desktop capability names the daemon accepts; see Live voice sessions.
   `collaborativeDocuments: true` advertises collaborative document Surfaces, described under
   Document Surfaces. `calendarSurfaces: true` advertises calendar Surfaces, described under
-  Calendar Surfaces.
+  Calendar Surfaces. `systemMonitorSurfaces: true` advertises System Monitor Surfaces.
 - `ready` — `false` while starting, `true` once the agent system is loaded.
 - `status` — `"starting"` or `"ready"`; the human-readable form of `ready`.
 - `version` — one identity object. `protocol` is the wire protocol number, the client's
@@ -7396,8 +7401,9 @@ Response — `200`: `{ "bot": { ... } }` with `avatar` `null`.
 
 A Surface is an instance of a predefined feature with its own typed API. Every instance has a
 CUID2 ID and a human name. Multiple independent Surfaces of each type may exist, with separate
-content, history, and members. Supported types are `todo`, `document`, `calendar`, `artifact`, `bot`,
-and `task`. The catalog initially has no instances.
+content, history, and members. Supported types are `todo`, `document`, `calendar`, `system_monitor`,
+`artifact`, `bot`, and `task`. System Monitors share host telemetry rather than independent content.
+The catalog initially has no instances.
 All onboarded authenticated people may read and modify Surface data, whether
 or not they joined. Joining and leaving control only the person's sidebar. Creating a Surface
 does not create a workspace, agent, or chat; the separate chat-ensure operation below is lazy.
@@ -8201,6 +8207,158 @@ explicit `creatorUserId`, and optional absolute `imagePath`. Its authority, attr
 join rules, image handling, durable replay, and permission boundaries match
 `create_todo_surface`.
 
+### System Monitor Surfaces
+
+A `system_monitor` Surface displays the machine running the daemon. Multiple named instances may
+exist; they all read the same daemon-wide sampler. Catalog, managed images, attribution, creator
+membership, shared chat, and creation replay follow the ordinary Surface rules.
+`POST /v0/surfaces` accepts `{ "type": "system_monitor", "name": "System Monitor" }`, with
+optional `id`, `image`, and `mutationId`. It accepts no host selector or probe configuration.
+
+#### `GET /v0/surfaces/system-monitor/:surfaceId`
+
+Returns `200` with the snapshot directly (no response envelope or event cursor). A malformed,
+missing, or differently typed Surface ID returns `404 not_found`.
+
+```json
+{
+    "sampledAt": 1760943600000,
+    "intervalMs": 1000,
+    "host": {
+        "hostname": "build-box",
+        "platform": "linux",
+        "arch": "x64",
+        "osName": "Ubuntu 24.04.1 LTS",
+        "uptimeSeconds": 123456
+    },
+    "cpu": {
+        "model": "AMD Ryzen 9 7950X",
+        "logicalCores": 2,
+        "usagePercent": 26.05,
+        "perCoreUsagePercent": [12, 40.1],
+        "loadAverage": [1.2, 0.9, 0.7],
+        "speedMhz": 4500,
+        "temperatureCelsius": null
+    },
+    "memory": {
+        "totalBytes": 34359738368,
+        "usedBytes": 8589934592,
+        "availableBytes": 25769803776,
+        "cachedBytes": 2147483648,
+        "swapTotalBytes": 0,
+        "swapUsedBytes": 0
+    },
+    "gpus": [
+        {
+            "name": "NVIDIA GeForce RTX 4090",
+            "vendor": "nvidia",
+            "usagePercent": 12,
+            "memoryTotalBytes": null,
+            "memoryUsedBytes": null,
+            "temperatureCelsius": 45,
+            "powerWatts": 60.5
+        }
+    ],
+    "disks": [
+        {
+            "mountPoint": "/",
+            "device": "/dev/nvme0n1p2",
+            "fileSystem": "ext4",
+            "totalBytes": 1000000000000,
+            "usedBytes": 400000000000,
+            "availableBytes": 600000000000
+        }
+    ],
+    "diskIo": { "readBytesPerSecond": 0, "writeBytesPerSecond": 0 },
+    "processes": {
+        "total": 123,
+        "threads": 456,
+        "items": [
+            {
+                "pid": 1234,
+                "parentPid": 1,
+                "name": "node",
+                "user": "steve",
+                "state": "running",
+                "cpuPercent": 12.5,
+                "memoryBytes": 268435456,
+                "threads": 12,
+                "startedAt": 1760940000000
+            }
+        ]
+    },
+    "history": [
+        {
+            "sampledAt": 1760943600000,
+            "cpuPercent": 26.05,
+            "memoryUsedBytes": 8589934592,
+            "gpuPercent": 12,
+            "diskReadBytesPerSecond": 0,
+            "diskWriteBytesPerSecond": 0
+        }
+    ]
+}
+```
+
+All fields shown are present. `sampledAt` is epoch milliseconds; `intervalMs` is the recommended
+visible-client polling interval, currently 1000. Strings identify the daemon's host; `platform`
+and `arch` use Node's platform and architecture names. `uptimeSeconds` is nonnegative.
+`cpu.model` is a string and `logicalCores` a nonnegative integer. All CPU measurement fields
+are nullable: `usagePercent`, `perCoreUsagePercent` (an array ordered by logical CPU),
+`loadAverage` (exactly three numbers), `speedMhz`, and `temperatureCelsius`. CPU usage needs two
+observations; unavailable initial values are null. Windows load averages are null.
+`memory.totalBytes`, `usedBytes`, and `availableBytes` are nonnegative numbers. Used memory
+excludes reclaimable page cache, using the operating system's available-memory accounting;
+macOS derives it from `vm_stat` and `sysctl`. `cachedBytes`, `swapTotalBytes`, and `swapUsedBytes`
+are nullable. Byte counts and rates are nonnegative numbers, not necessarily safe integers.
+
+`gpus` is empty when no GPU can be discovered. GPU `name` is a string and `vendor` is `nvidia`,
+`amd`, `apple`, `intel`, or `other`. Every GPU measurement is nullable. Percentages are from 0
+through 100; temperatures are Celsius and power is watts. `disks` contains real mounted volumes
+only, excluding virtual filesystems such as tmpfs, overlay, proc, and snap squashfs. Each disk's
+three byte counts are nonnegative numbers, `mountPoint` and `device` are strings, and `fileSystem`
+is a nullable string. An unavailable disk probe returns an empty array. `diskIo` is null when
+unavailable; otherwise both rates are nonnegative numbers and aggregate physical-device activity
+without counting partitions again. GPU history uses the maximum available device utilization,
+or null. History CPU and disk-rate fields are nullable like their current measurements.
+
+`processes` is null when process telemetry is unavailable. Otherwise `total` is the nonnegative
+integer count of processes observed, `threads` is the total thread count or null, and `items`
+contains at most 100 readable processes: the union of the top 50 by measured CPU and the top 50
+by resident memory. It is sorted by CPU descending (unknown CPU last), then resident memory
+descending, then PID ascending; a process appears only once. With fewer processes, all readable
+ones appear. Each item has a nonnegative integer `pid`, nullable nonnegative integer `parentPid`,
+string `name`, nullable string `user`, nullable `state` (`running`, `sleeping`, `stopped`,
+`zombie`, `idle`, or `other`), nullable `cpuPercent` from 0 through 100, nonnegative resident
+`memoryBytes`, nullable nonnegative integer `threads`, and nullable epoch-millisecond
+`startedAt`. Process CPU is the share of the whole machine on the same scale as
+`cpu.usagePercent`, rather than a percentage of one core. Initial or unavailable process CPU
+measurements are null. PID reuse resets the CPU baseline using the process start identity.
+`name` contains only the executable basename or operating system process name (comm), never
+command-line arguments, paths, or environment values. All authenticated people and models can
+read this data; command lines and environments may contain credentials and are never collected.
+Process sampling has the same time and output bounds as other probes and runs independently,
+so a slow scan never delays CPU, memory, disk, or GPU sampling. It may refresh less frequently
+on expensive platforms, with a sampling interval of at most five seconds, reusing the last result between scans.
+A failed scan returns null rather than retaining an indefinitely stale process list.
+
+The sampler starts lazily on the first read, samples about once per second without overlapping
+passes, stops after 60 seconds without a read, and keeps at most 300 history entries oldest first
+in memory. History is neither persisted nor journaled. The first read waits at most 1500 ms for
+sampling; a slow or failed probe never prevents a snapshot response. Unavailable measurements
+are null or empty arrays, never fabricated zero utilization. External probes are bounded in
+time and output and belong to a named sampler context rooted in the daemon lifetime. Requests
+read the shared latest snapshot; they never start their own probe processes. Telemetry emits no
+events and never changes the Surface version or membership. A daemon restart resets history.
+
+Ordinary models receive `read_system_monitor`, accepting `surfaceId`, with no Auto review. It
+returns a concise human-readable host and resource summary, including the top five available
+processes by CPU and the top five by resident memory. Active admin bots additionally
+receive `create_system_monitor_surface`, accepting `name`, required explicit `creatorUserId`,
+and optional absolute `imagePath`. Authority checks at selection and execution, attribution,
+creator joins, image handling, durable replay, and permission boundaries match
+`create_todo_surface`.
+
 ### Reference Surfaces
 
 An `artifact`, `bot`, or `task` Surface points to exactly one existing entity. It does not clone
@@ -8273,7 +8431,7 @@ The reference never joins anyone to the target's own task list or changes its ex
 
 ### Shared Surface chats
 
-The chat-enabled types are `todo`, `document`, `calendar`, `artifact`, `bot`, and
+The chat-enabled types are `todo`, `document`, `calendar`, `system_monitor`, `artifact`, `bot`, and
 `task`. Each may own exactly
 one shared persistent conversation, created lazily when a person explicitly opens its chat.
 Unsupported types have no chat: their ensure operation returns `409 conflict` and leaves
