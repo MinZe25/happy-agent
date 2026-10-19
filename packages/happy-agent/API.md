@@ -221,7 +221,7 @@ none of the mobile credentials. See "Credentials on the connector's socket".
 
 All routes are prefixed with `/v0`. Independently of the path version, every daemon advertises
 its identity through the health endpoint as a single `version` object: a numeric `protocol`
-(integer, currently 27) and the `daemon` product version string. Protocol versions from 22 onward
+(integer, currently 28) and the `daemon` product version string. Protocol versions from 22 onward
 are backward-compatible and additive. Clients support that compatibility range for existing
 capabilities instead of requiring equality with their own protocol number. A client may require
 a newer protocol for a capability it needs and must explain that an upgrade is required when the
@@ -251,6 +251,12 @@ under `/v0/mobile-connector`, `mobile_connector.updated`, and the connector's so
 handshake routes and credentials. Clients that offer direct phone connections require protocol 27
 or newer. An older compatible daemon answers these routes with `404`, which clients treat as the
 feature being unavailable, and never emits the event.
+
+Protocol 28 adds agent networks: `GET /v0/workspaces/:workspaceId/agents/:agentId/proxy`, which
+names the network an agent's connections leave from, and `CONNECT /v0/networks/:networkId/proxy`.
+Clients that keep browser state per network require protocol 28 or newer. An older compatible
+daemon answers the read with `404`, which cannot be told apart from an unknown agent, so clients
+check the protocol instead of probing, and offer no network-scoped browsing on an older daemon.
 
 Account provenance, configuration history blocks, and structured error details are additive output
 and do not increment the protocol version. Clients tolerate their absence and older clients keep
@@ -4316,6 +4322,55 @@ on them with `502`. A tunnel ends when the client closes it or the daemon stops.
 The route is additive and does not increment the protocol version. An older daemon closes such a
 `CONNECT` without a response. A client that needs an agent's network then offers no preview, and
 does not fall back to the workspace proxy.
+
+### `GET /v0/workspaces/:workspaceId/agents/:agentId/proxy`
+
+Names the network that agent's connections leave from, so a client can keep one browser profile,
+with its cookies and storage, per network rather than per agent or workspace.
+
+Response — `200`: `{ "networkId": "..." }`.
+
+- `networkId` — an opaque identifier of 1 to 128 characters: lowercase letters and digits, plus
+  `-` and `_` after the first character. Clients compare it for equality and never parse it.
+
+Two agents have the same `networkId` exactly when their connections leave from the same network:
+
+- Every agent working on this computer shares one, including agents whose work runs as another
+  Linux user here. It stays the same across daemon restarts.
+- Every agent on one runner shares that runner's. It stays the same while the runner reconnects
+  and across daemon restarts.
+- An agent working in a container has one of its own. It stays the same while the agent's
+  container environment — its image and the machine holding its folder — stays the same,
+  including across daemon restarts. When that environment changes, the agent gets a new
+  `networkId` and the old one is no longer served.
+
+The network is the one the agent's machine actually runs with. A setting changed after the machine
+started, such as its bot choosing another compute, takes effect only once the machine starts again.
+
+The read is refused exactly as the agent's `CONNECT` above is. Reading it starts the agent's
+machine if it is not running yet, as opening the agent's tunnel does, but never starts an agent
+turn. The `networkId` is not part of the agent object, listings, or events.
+
+### `CONNECT /v0/networks/:networkId/proxy`
+
+The same tunnel, opened in the network a `networkId` names. Every connection on it leaves from that
+network and nowhere else, and the tunnel behaves exactly like the workspace proxy above. It needs
+the same authentication as every other route; there is no separate grant.
+
+The `CONNECT` is refused, before the tunnel opens, with:
+
+- `404 not_found` — the daemon does not serve this `networkId` right now: it is malformed or
+  unknown, it names a runner that is no longer configured, it names this computer while work here
+  is disabled, or it names an agent's container whose agent is archived, whose environment
+  changed, or whose machine has not started since the daemon did.
+- `501 unsupported` — the network's machine cannot open network connections.
+- `503 runner_unavailable` — the network is a runner's and that runner is away.
+- `503 draining` — as for every new proxy attachment.
+
+A client that receives `404` reads the agent's network again, which starts its machine, and opens
+the `networkId` it returns, which may be the same one. Archiving an agent that works in a container
+closes every connection opened through its network's tunnels and answers later requests on them
+with `502`. The daemon never opens such a tunnel in another network.
 
 ### Local bridges
 
