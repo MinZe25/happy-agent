@@ -140,6 +140,15 @@ export class AgentSystemLocal<
     /** The durable parent of each non-root identity, keyed by child identity. */
     readonly #parents: AgentKV;
     /**
+     * Committed parent links grouped by parent, in durable key order. Links are keyed by child,
+     * so answering `childOf` from storage reads every link in the collection; resource
+     * projections ask that for every agent they show. Built lazily outside transactions,
+     * dropped whenever a link changes and again once that change commits.
+     */
+    #childIndex: ReadonlyMap<string, readonly string[]> | undefined;
+    /** Advances on every link change, so a build that raced one is never installed. */
+    #childIndexGeneration = 0;
+    /**
      * The root of the store modules share across the collection. Each module works under its
      * own scope of it, which is where anything outliving one agent's conversation belongs.
      */
@@ -462,7 +471,10 @@ export class AgentSystemLocal<
                         throw new Error(`Agent "${parent}" has not been created.`);
                     }
                     await this.#configs.write(txCtx, agentId, owned);
-                    if (parent !== null) await this.#parents.write(txCtx, agentId, parent);
+                    if (parent !== null) {
+                        await this.#parents.write(txCtx, agentId, parent);
+                        this.#parentLinksChanged(txCtx);
+                    }
                     await this.#recordLifecycle(
                         txCtx,
                         lifecycle,
@@ -534,6 +546,7 @@ export class AgentSystemLocal<
                     for (const child of children) {
                         if (child.value === agentId) await this.#parents.delete(txCtx, child.key);
                     }
+                    this.#parentLinksChanged(txCtx);
                     if (config !== undefined) {
                         await this.#recordLifecycle(
                             txCtx,
@@ -624,10 +637,37 @@ export class AgentSystemLocal<
     async childOf(ctx: Context, agentId: string): Promise<readonly string[]> {
         return await this.#admit(async () => {
             await this.#requireAgent(ctx, agentId);
-            return (await this.#parents.list(ctx)).flatMap(({ key, value }) =>
-                value === agentId ? [key] : [],
-            );
+            // A transaction may hold links nobody else can see yet, so it reads its own view.
+            if (agentStorageTransaction(ctx) !== undefined) {
+                return (await this.#parents.list(ctx)).flatMap(({ key, value }) =>
+                    value === agentId ? [key] : [],
+                );
+            }
+            let index = this.#childIndex;
+            if (index === undefined) {
+                const generation = this.#childIndexGeneration;
+                const built = new Map<string, string[]>();
+                for (const { key, value } of await this.#parents.list(ctx)) {
+                    if (typeof value !== "string") continue;
+                    const siblings = built.get(value);
+                    if (siblings === undefined) built.set(value, [key]);
+                    else siblings.push(key);
+                }
+                if (generation === this.#childIndexGeneration) this.#childIndex = built;
+                index = built;
+            }
+            return [...(index.get(agentId) ?? [])];
         });
+    }
+
+    /** Forget the committed child index now, and again once the changing transaction commits. */
+    #parentLinksChanged(ctx: Context): void {
+        const invalidate = (): void => {
+            this.#childIndexGeneration += 1;
+            this.#childIndex = undefined;
+        };
+        invalidate();
+        afterCommit(ctx, invalidate);
     }
 
     /** The parent of an existing agent, or `null` when it is a root. */

@@ -4,6 +4,7 @@ import type { Context } from "@steve.kite/stdlib";
 import {
     agentDatabaseRows,
     agentDatabaseRun,
+    isAgentSQLiteDatabase,
     type AgentDatabase,
     type AgentDatabaseFacade,
 } from "./AgentDatabase.js";
@@ -82,11 +83,20 @@ export class AgentPersistenceDrizzle<
         prefix: string,
     ): Promise<readonly { readonly key: string; readonly value: unknown }[]> {
         return await this.#operation(ctx, async (database) => {
+            // SQLite compares text bytewise, so every key starting with the prefix lies in
+            // [prefix, prefix + U+10FFFF): bounding the key lets the primary key seek straight to
+            // the scope instead of testing every value the owner holds. The collection root owns
+            // one entry per agent, so an unbounded scan made each single-key read linear in the
+            // installation. The substr test still decides membership exactly on every engine.
+            const range = isAgentSQLiteDatabase(database)
+                ? sql`AND key >= ${prefix} AND key < ${`${prefix}\u{10FFFF}`}`
+                : sql``;
             const rows = await agentDatabaseRows<{ key: string; value_json: string }>(
                 database,
                 sql`SELECT key, value_json
                     FROM happy_agent_values
                     WHERE owner_id = ${this.#ownerId}
+                      ${range}
                       AND substr(key, 1, length(${prefix})) = ${prefix}
                     ORDER BY key`,
             );
