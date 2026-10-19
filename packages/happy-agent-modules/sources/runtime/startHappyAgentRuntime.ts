@@ -897,6 +897,7 @@ export async function startHappyAgentRuntime(
             progress: () => autoModule.drainProgress(),
         });
         registerShutdown("titles", async () => await titles.close());
+        registerShutdown("slash-commands", async () => await slashCommands.close());
         registerShutdown("bots", async () => await bots.close());
         registerShutdown("tasks", async () => await tasks.close());
         registerShutdown("cloud", async () => await cloud.stop());

@@ -7,6 +7,13 @@ invocation. Skipping restoration or deferring it until a client opens the agent 
 contract. Startup now benefits from Skills sharing concurrent equivalent scans and batching metadata
 reads; each agent still loads its own complete catalog and publishes its own changes.
 
+Restoration starts every agent's load but no longer waits for it. Awaited, the loads held readiness
+for about two of the three seconds a restart of a thousand agents took, because the restore
+transactions serialize and so the scans rarely overlapped to be shared. Four restored agents load
+at a time behind the daemon becoming ready; a catalog read, an invocation, or a turn for an agent
+still waiting loads it immediately through the same coalesced refresh, so no reader sees less than
+before.
+
 ## Loading latency needs stage-level traces
 
 Restoring hundreds of agents can spend seconds rebuilding command catalogs. A single hook duration

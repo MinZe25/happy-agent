@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { Value } from "@sinclair/typebox/value";
 import {
     withAgentConfig,
+    withAgentDatabase,
     type AgentModule,
     type AgentModuleHooks,
     type AgentSystemRef,
@@ -14,7 +15,7 @@ import {
     slashCommandSchema,
     type SlashCommand,
 } from "@slopus/happy-agent-client";
-import type { Context } from "@steve.kite/stdlib";
+import { detach, type Context } from "@steve.kite/stdlib";
 
 import { EventsModule, eventAgentIdSchema } from "../events/index.js";
 import {
@@ -38,6 +39,9 @@ interface CachedCatalog {
     readonly fingerprint: string;
 }
 
+/** How many restored agents load their catalogs at once while the daemon already serves. */
+const RESTORE_LOAD_CONCURRENCY = 4;
+
 /** Merges module-owned slash commands into one current per-agent command surface. */
 export class SlashCommandsModule implements AgentModule {
     readonly name = "slash-commands";
@@ -45,7 +49,11 @@ export class SlashCommandsModule implements AgentModule {
     readonly #contributors: readonly SlashCommandContributor[];
     readonly #events: EventsModule;
     readonly #refreshes = new Map<string, Promise<CachedCatalog>>();
+    /** Restored agents whose catalogs are still to be loaded, oldest first. */
+    readonly #restoreQueue: { readonly agentId: string; readonly ctx: Context }[] = [];
+    readonly #restoreLoaders = new Set<Promise<void>>();
     #agents: AgentSystemRef | undefined;
+    #closed = false;
 
     constructor(events: EventsModule, ...contributors: SlashCommandContributor[]) {
         this.#events = events;
@@ -118,8 +126,8 @@ export class SlashCommandsModule implements AgentModule {
             agentCreated: async (ctx, _scope, agent) => {
                 await this.refresh(ctx, agent.id);
             },
-            agentRestored: async (ctx, _scope, agent) => {
-                await this.refresh(ctx, agent.id);
+            agentRestored: (ctx, _scope, agent) => {
+                this.#restoreLoad(ctx, agent.id);
             },
             beforeTurn: async (ctx, scope) => {
                 await this.refresh(ctx, scope.agent.id);
@@ -127,6 +135,50 @@ export class SlashCommandsModule implements AgentModule {
             },
         };
     };
+
+    /** Stop loading restored catalogs and wait for the loads already running. */
+    async close(): Promise<void> {
+        this.#closed = true;
+        this.#restoreQueue.length = 0;
+        await Promise.allSettled(this.#restoreLoaders);
+    }
+
+    /**
+     * Load a restored agent's catalog without holding the restart until it is done.
+     *
+     * Restoring every agent at startup would otherwise keep the daemon from serving until
+     * hundreds of catalogs were discovered. A catalog read, an invocation, and a turn each load
+     * the catalog themselves when it is not there yet, so none of them sees less than before.
+     * A few loads run at a time, so requests arriving meanwhile are not queued behind them.
+     */
+    #restoreLoad(ctx: Context, agentId: string): void {
+        if (this.#closed) return;
+        this.#restoreQueue.push({ agentId, ctx: withAgentDatabase(detach(ctx), ctx.db) });
+        if (this.#restoreLoaders.size >= RESTORE_LOAD_CONCURRENCY) return;
+        const loader = this.#restoreLoadNext().finally(() => this.#restoreLoaders.delete(loader));
+        this.#restoreLoaders.add(loader);
+    }
+
+    async #restoreLoadNext(): Promise<void> {
+        for (
+            let next = this.#restoreQueue.shift();
+            next !== undefined;
+            next = this.#restoreQueue.shift()
+        ) {
+            // A turn or a read may have loaded it already.
+            if (this.#cache.has(next.agentId)) continue;
+            try {
+                await this.refresh(next.ctx, next.agentId);
+            } catch (error: unknown) {
+                if (this.#closed) return;
+                next.ctx.log.warn(
+                    "A restored agent's slash commands could not be loaded.",
+                    {},
+                    error,
+                );
+            }
+        }
+    }
 
     async #discover(ctx: Context, agentId: string): Promise<CachedCatalog> {
         const agentCtx = await this.#agentContext(ctx, agentId);
