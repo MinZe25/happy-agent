@@ -55,6 +55,7 @@ const vitestRuntime = ["--bun", vitestEntry];
 console.error(`API gym runtime: Bun ${process.versions.bun} (${process.execPath})`);
 const reportDirectory = resolve(repositoryRoot, ".local/gym-api-suite");
 const reportPath = join(reportDirectory, `vitest-${String(process.pid)}.json`);
+const listReportPath = join(reportDirectory, `vitest-${String(process.pid)}-listed.json`);
 const apiTestPaths = readdirSync(join(packageRoot, "tests"))
     .filter((name) => /^happy_api_.+\.test\.ts$/u.test(name))
     .sort()
@@ -72,7 +73,7 @@ await mkdir(reportDirectory, { recursive: true });
 
 const listResult = await runCommand(
     process.execPath,
-    [...vitestRuntime, "list", ...apiTestPaths, "--json"],
+    [...vitestRuntime, "list", ...apiTestPaths, `--json=${listReportPath}`],
     packageRoot,
 );
 if (listResult.exitCode !== 0) {
@@ -82,7 +83,7 @@ if (listResult.exitCode !== 0) {
     );
 }
 
-const listed = parseJson<ListedTest[]>(listResult.stdout);
+const listed = parseJson<ListedTest[]>(await readFile(listReportPath, "utf8"));
 const chaosFilter = process.env.API_CHAOS_SEED?.trim() || undefined;
 const chaosPaths = new Set(chaosSuites.map((suite) => join("tests", suite.file)));
 const runSpecs =
