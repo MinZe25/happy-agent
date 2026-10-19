@@ -1,5 +1,3 @@
-import { mkdir } from "node:fs/promises";
-
 import {
     createHostNetwork,
     createJustBashCompute,
@@ -30,7 +28,8 @@ export function createGymCompute(
 ): (ctx: Context, config: HostComputeConfig) => Promise<Compute> {
     const network = createHostNetwork();
     return async (_ctx, config) => {
-        await mkdir(config.cwd, { recursive: true });
+        // Discovery can resolve compute before workspace provisioning finishes. Leave an absent
+        // folder absent: construction may fail now and be retried once its owner creates it.
         const machine = createJustBashCompute({
             cwd: config.cwd,
             folder: config.cwd,
