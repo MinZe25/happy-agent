@@ -1,6 +1,7 @@
 import type { AgentPermissionMode } from "@slopus/happy-agent-base";
 import type { HappyInputContent } from "./HappyProtocol.js";
 import type { BotRecord } from "../bots/index.js";
+import type { TaskRecord } from "../tasks/index.js";
 import type { AgentDraftSnapshot, MessageMode } from "@slopus/happy-agent-client";
 
 /**
@@ -34,6 +35,11 @@ export interface HappyGitSummary {
 
 /** One session, in the terms Happy publishes it. */
 export interface HappySessionSnapshot {
+    readonly task?: Pick<TaskRecord, "id" | "name" | "folderName"> & {
+        readonly orderKey: string;
+        readonly canArchive: boolean;
+        readonly owner: { readonly userId: string; readonly name: string } | null;
+    };
     /** Local bot catalog revision, used only to schedule image sync; never session metadata. */
     readonly avatarVersion?: number;
     readonly bot?: Pick<BotRecord, "id" | "name" | "username" | "workspaceId" | "orderKey"> & {
@@ -139,7 +145,8 @@ export type HappySpawnTarget =
      * A bot to make, whose one continuous conversation becomes the session. The id is derived
      * from the request, like the session id, so a retried request finds the bot it already made.
      */
-    | { readonly kind: "bot"; readonly id: string; readonly name: string };
+    | { readonly kind: "bot"; readonly id: string; readonly name: string }
+    | { readonly kind: "task"; readonly id: string; readonly name?: string };
 
 interface HappySpawnSelection {
     readonly effort: string;
@@ -158,7 +165,7 @@ export interface HappyDirectorySpawnRequest extends HappySpawnSelection {
 /** A Happy Agent catalog spawn, once its wire request and model choice have been checked. */
 export interface HappyTargetSpawnRequest extends HappySpawnSelection {
     readonly target: HappySpawnTarget;
-    /** The deterministic workspace identity used only by `newWorkspace` and `bot`. */
+    /** The deterministic workspace identity used by `newWorkspace`, `bot`, and `task`. */
     readonly workspaceId: string;
 }
 

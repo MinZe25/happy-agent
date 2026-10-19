@@ -11,6 +11,7 @@ import {
 } from "../../sources/runtime/startHappyAgentRuntime.js";
 import { createMobileRelayFixture } from "../support/MobileRelayFixture.js";
 import { ScriptedProvider, type ScriptedTurn } from "../support/ScriptedProvider.js";
+import { createHappySpawnSessionId } from "../../sources/happy/createHappySpawnSessionId.js";
 
 const ACCOUNT = "phone";
 const cleanups: (() => Promise<void>)[] = [];
@@ -116,6 +117,98 @@ async function messages(client: HappyAgentClient, agentId: string): Promise<stri
 }
 
 describe("carrying mobile sessions over the machine connection", () => {
+    it("creates an unnamed task once through encrypted spawn, preserves its draft, and accepts its first message", async () => {
+        const { client, relay } = await linkedDaemon();
+        const machineId = relay.machines.get(ACCOUNT)!;
+        const method = `${machineId}:spawn-happy-session`;
+        const request = {
+            type: "happy-agent-spawn",
+            clientRequestId: "mobile-task-creation",
+            target: { kind: "task" },
+            agentConfiguration: {
+                type: "happy-agent",
+                modelId: "gym/model",
+                providerId: "gym",
+                effort: "medium",
+                permissionMode: "read_only",
+            },
+        };
+        let result: unknown;
+        await vi.waitFor(
+            async () => {
+                result = await relay.callRpc(ACCOUNT, method, request);
+                expect(result).toMatchObject({ type: "success" });
+            },
+            { timeout: 10_000 },
+        );
+        const taskId = createHappySpawnSessionId(machineId, "mobile-task-creation:task");
+        const created = await client.getTask(taskId);
+        expect(created.task).toMatchObject({
+            name: "New Task",
+            ownerUserId: null,
+            creatorAgentId: null,
+            workspaceId: createHappySpawnSessionId(machineId, "mobile-task-creation:workspace"),
+            agent: { id: createHappySpawnSessionId(machineId, "mobile-task-creation") },
+            canArchive: true,
+        });
+        const sid = relay.taskSessions(ACCOUNT, taskId)[0]!;
+        expect(result).toEqual({ type: "success", sessionId: sid });
+        expect(relay.sessionMetadata(ACCOUNT, sid)).toMatchObject({
+            task: {
+                id: taskId,
+                owner: null,
+                canArchive: true,
+                orderKey: created.membership!.orderKey,
+            },
+            draft: { text: "", permissionMode: "read_only", modelId: "gym/model" },
+        });
+        await client.saveAgentDraft(created.task.agent.id, {
+            draft: {
+                text: "Keep this edit",
+                permissionMode: "auto",
+                modelId: "gym/model",
+                providerId: "gym",
+                effort: "medium",
+                serviceTier: null,
+            },
+            updatedAt: Date.now() + 1,
+        });
+        expect(await relay.callRpc(ACCOUNT, method, request)).toEqual(result);
+        expect(
+            await Promise.all([
+                relay.callRpc(ACCOUNT, method, request),
+                relay.callRpc(ACCOUNT, method, request),
+            ]),
+        ).toEqual([result, result]);
+        expect((await client.getAgentDraft(created.task.agent.id)).draft.value?.text).toBe(
+            "Keep this edit",
+        );
+        expect(relay.taskSessions(ACCOUNT, taskId)).toEqual([sid]);
+        await vi.waitFor(() => expect(relay.rpcMethods(ACCOUNT)).toContain(`${sid}:readFile`));
+        // Task workspaces resolve from the task catalog, not a missing project association.
+        expect(
+            await relay.callRpc(ACCOUNT, `${sid}:readFile`, { path: "does-not-exist.txt" }),
+        ).toMatchObject({
+            success: false,
+            code: "missing",
+        });
+        relay.deliver(ACCOUNT, taskId, "My first mobile task message.");
+        await vi.waitFor(
+            async () => {
+                expect(await messages(client, created.task.agent.id)).toContain(
+                    "My first mobile task message.",
+                );
+            },
+            { timeout: 10_000 },
+        );
+        const current = (await client.getTask(taskId)).task;
+        await client.archiveTask(taskId, { ifMatch: current.version });
+        expect(await relay.callRpc(ACCOUNT, method, request)).toEqual({
+            type: "error",
+            errorMessage: "That task was archived.",
+        });
+    }, 30_000);
+
     it("sends and receives every session on the machine socket, with no socket per session", async () => {
         const { bot, client, relay, sessionOf } = await linkedDaemon({
             script: [
@@ -230,6 +323,22 @@ describe("carrying mobile sessions over the machine connection", () => {
             { timeout: 30_000, interval: 250 },
         );
         // The sessions beyond the cap were let go before any socket opened.
+        expect(relay.peakSessionSockets(ACCOUNT)).toBe(64);
+        // A requested task is a standing conversation too; a full bot catalog must not leave
+        // its creation permanently pending on an older relay's bounded transport.
+        const machineId = relay.machines.get(ACCOUNT)!;
+        await vi.waitFor(
+            async () =>
+                expect(
+                    await relay.callRpc(ACCOUNT, `${machineId}:spawn-happy-session`, {
+                        type: "happy-agent-spawn",
+                        clientRequestId: "task-at-capacity",
+                        target: { kind: "task" },
+                    }),
+                ).toMatchObject({ type: "success" }),
+            { timeout: 10_000 },
+        );
+        expect(relay.sessionSockets(ACCOUNT)).toBeLessThanOrEqual(64);
         expect(relay.peakSessionSockets(ACCOUNT)).toBe(64);
     }, 120_000);
 

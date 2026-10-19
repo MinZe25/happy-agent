@@ -18,6 +18,7 @@ import { createHappyAccountFingerprint } from "../../sources/happy/credentials/c
 import { happyIntegrationMigrations } from "../../sources/happy/HappyIntegrationDatabase.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import type { BotRecord } from "../../sources/bots/index.js";
+import type { TaskRecord } from "../../sources/tasks/index.js";
 import { HistoryModule } from "../../sources/history/index.js";
 import { ProjectFileError } from "../../sources/files/index.js";
 
@@ -60,7 +61,15 @@ const SELECTION = {
 
 /** Catalogs only reference tags are named from; these tests never mention anything. */
 const referenceArtifacts = { get: async () => undefined };
-const referenceTasks = { forAgent: async () => undefined };
+const referenceTasks = {
+    forAgent: async () => undefined,
+    memberFor: () => "standalone",
+    listForMember: async () => [],
+    list: async () => [],
+    forWorkspace: async () => undefined,
+    get: async () => undefined,
+    onEvent: () => () => undefined,
+};
 
 const databases: ReturnType<typeof moduleDatabase>[] = [];
 const temporaryDirectories: string[] = [];
@@ -121,6 +130,8 @@ async function fixture() {
 
     const configs = new Map<string, AgentConfig>();
     const bots = new Map<string, BotRecord>();
+    const tasks = new Map<string, TaskRecord>();
+    const taskMemberships = new Set<string>();
     /** Agent Base ancestry: child agent id to the agent that manages it. */
     const parents = new Map<string, string>();
     const archivedBots: string[] = [];
@@ -407,7 +418,15 @@ async function fixture() {
             }),
         } as never,
         referenceArtifacts as never,
-        referenceTasks as never,
+        {
+            ...referenceTasks,
+            forAgent: async (_ctx: Context, agentId: string) =>
+                [...tasks.values()].find((task) => task.agentId === agentId),
+            membership: async (_ctx: Context, taskId: string) =>
+                taskMemberships.has(taskId)
+                    ? { taskId, memberId: "standalone", orderKey: "0001", joinedAt: 1 }
+                    : undefined,
+        } as never,
     );
     modules.push(module);
     module.beforeStart(database.context, agents as never);
@@ -422,6 +441,8 @@ async function fixture() {
         archivedBots,
         botArchiveScopes,
         bots,
+        tasks,
+        taskMemberships,
         configs,
         createdBots,
         createdWorkspaces,
@@ -446,6 +467,64 @@ async function fixture() {
 }
 
 describe("Happy mobile messages", () => {
+    it.each(["left", "archived"] as const)(
+        "refuses stale task operations after it was %s",
+        async (state) => {
+            const test = await fixture();
+            const ctx = databases.at(-1)!.context;
+            test.configs.set("task-agent", storedAgent({}));
+            test.tasks.set("task", {
+                id: "task",
+                agentId: "task-agent",
+                workspaceId: "task-workspace",
+                name: "Task",
+                nameConfigured: true,
+                folderName: "task",
+                path: "/tasks/task",
+                version: 1,
+                workspaceVersion: 1,
+                workspaceUpdatedAt: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                status: state === "archived" ? "archived" : "active",
+            });
+            if (state === "archived") test.taskMemberships.add("task");
+            const refused = "This task is not available to this connection.";
+            await expect(
+                test.module.submit(ctx, "task-agent", {
+                    images: [],
+                    remoteMessageId: "late-message",
+                    selection: {},
+                    text: "Late message",
+                }),
+            ).rejects.toMatchObject({ name: "HappyMessageRefused", message: refused });
+            await expect(test.module.abort(ctx, "task-agent")).rejects.toThrow(refused);
+            await expect(
+                test.module.readFile(ctx, "task-agent", { path: "private.txt" }),
+            ).rejects.toThrow(refused);
+            await expect(
+                test.module.answerQuestion(ctx, "task-agent", "question", {}),
+            ).rejects.toThrow(refused);
+            await expect(test.module.cancelQuestion(ctx, "task-agent", "question")).rejects.toThrow(
+                refused,
+            );
+            await expect(
+                test.module.saveDraft(ctx, "task-agent", { updatedAt: 5, value: null }),
+            ).rejects.toThrow(refused);
+            if (state === "left")
+                await expect(test.module.archiveSession(ctx, "task-agent")).rejects.toThrow(
+                    refused,
+                );
+            await expect(
+                test.module.setSessionAvatar(ctx, "task-agent", new Uint8Array([1]), "image/png"),
+            ).rejects.toThrow("Only a bot can be given a picture.");
+            expect(test.steered).toEqual([]);
+            expect(test.pendingMessages).toEqual([]);
+            expect(test.aborted).toEqual([]);
+            expect(test.archivedCompute).toEqual([]);
+        },
+    );
+
     it("reports a plain-folder Git view as unsupported rather than asking the phone to retry", async () => {
         const test = await fixture();
         test.configs.set("viewer", { metadata: {} });

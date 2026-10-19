@@ -113,6 +113,7 @@ export interface HappySessionMetadata {
      */
     project?: { id: string; kind: "home" | "regular"; name: string };
     bot?: HappySessionSnapshot["bot"];
+    task?: HappySessionSnapshot["task"];
     providers: readonly HappyProviderDescriptor[];
     rigMetadataVersion: 1;
     session: {
@@ -161,7 +162,7 @@ export function createHappySessionMetadata(options: {
             ? [describeHappyProvider(session.providerId, session.providerType)]
             : describeHappyProviders(models);
     const efforts = selected?.effortLevels ?? [];
-    const title = session.bot?.name ?? session.title;
+    const title = session.task?.name ?? session.bot?.name ?? session.title;
     return {
         capabilities: {
             abort: true,
@@ -181,7 +182,9 @@ export function createHappySessionMetadata(options: {
             permissionModeSelection: true,
             reasoningSelection: efforts.length > 0,
             resume: false,
-            rpcMethods: [...HAPPY_SESSION_RPC_METHODS],
+            rpcMethods: HAPPY_SESSION_RPC_METHODS.filter(
+                (method) => method !== "leaveTask" || session.task !== undefined,
+            ),
             shell: false,
             steering: true,
         },
@@ -215,7 +218,7 @@ export function createHappySessionMetadata(options: {
         // Falls back to the session's own identity only when this daemon keeps no project for it.
         // A per-session id groups nothing, which is the right answer for a session that belongs
         // to nothing, and the wrong one for every session that does.
-        ...(session.bot === undefined
+        ...(session.bot === undefined && session.task === undefined
             ? {
                   project:
                       session.project === undefined
@@ -232,6 +235,7 @@ export function createHappySessionMetadata(options: {
               }
             : {}),
         ...(session.bot === undefined ? {} : { bot: { ...session.bot } }),
+        ...(session.task === undefined ? {} : { task: { ...session.task } }),
         providers,
         rigMetadataVersion: 1,
         session: {
@@ -247,7 +251,9 @@ export function createHappySessionMetadata(options: {
             : { summary: { text: title, updatedAt: options.summaryUpdatedAt } }),
         tools: [...session.tools],
         ...(session.gitBranch === undefined ? {} : { gitBranch: session.gitBranch }),
-        ...(session.workspace === undefined || session.bot !== undefined
+        ...(session.workspace === undefined ||
+        session.bot !== undefined ||
+        session.task !== undefined
             ? {}
             : {
                   workspace: {

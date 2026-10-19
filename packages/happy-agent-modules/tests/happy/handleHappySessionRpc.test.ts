@@ -34,6 +34,28 @@ function recorder() {
 }
 
 describe("carrying out what the phone asked", () => {
+    it("leaves the attached task without accepting caller-supplied identity or archiving", async () => {
+        const { calls, options } = recorder();
+        const leaveTask = async () => {
+            calls.push("leave");
+        };
+        expect(
+            await handleHappySessionRpc({ ...options, leaveTask, method: "leaveTask", params: {} }),
+        ).toEqual({ success: true });
+        expect(
+            await handleHappySessionRpc({
+                ...options,
+                leaveTask,
+                method: "leaveTask",
+                params: { agentId: "someone-else" },
+            }),
+        ).toEqual({ error: "The leave task request is invalid." });
+        expect(
+            await handleHappySessionRpc({ ...options, method: "leaveTask", params: {} }),
+        ).toEqual({ error: "This session is not a task." });
+        expect(calls).toEqual(["leave"]);
+    });
+
     it("stops the agent", async () => {
         const { calls, options } = recorder();
         expect(await handleHappySessionRpc({ ...options, method: "abort", params: {} })).toEqual({

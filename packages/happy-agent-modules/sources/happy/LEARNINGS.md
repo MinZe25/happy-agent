@@ -127,6 +127,25 @@ service notices, before tags are named. It needs no lookup, so it can never stal
 
 ## Session state
 
+- Task roots are a distinct mobile catalog, not project sessions or bots. A connection publishes
+  only its owner's active joined tasks, with that member's order and fresh archive permission.
+  Every operation rechecks membership, including existing attachments and cached spawn successes.
+  Leaving is personal; archival belongs to TasksModule and the owner/team-owner policy. A final
+  live sync after leaving would disclose later activity, so retirement only marks the relay's
+  stored encrypted metadata archived, even when startup is reaping an offline leave. Rejoining
+  restores that same remote identity. Task creation uses daemon-derived identities and normal
+  first-message delivery; no avatar or second project/workspace conversation is created.
+  Cold retirement reads stored relay metadata with an `expectedVersion: -1` CAS probe: Happy's
+  metadata versions are nonnegative integers and its strict comparison guarantees a mismatch
+  without a write. A live probe carries its unchanged published snapshot; a cold probe carries
+  only an encrypted archived marker, never fresh task facts. Do not hydrate retirement by
+  posting the session tag: if the phone deleted that row, POST would recreate it.
+  Rejoining currently resumes live messages under the same remote identity without replaying
+  messages written while the person was absent; the complete conversation remains on desktop.
+  Mobile has no join/rejoin UI in this version. Do not simply clear `historyBackfilled` to add
+  catch-up: history and live messages use different identities, so that would duplicate earlier
+  live messages. Catch-up needs a separate bounded replay/deduplication decision.
+
 - Only top-level agents are published: bots and the sessions a person started (`parentOf` is
   null). Subtasks used to attach through their workspace and on every event they recorded, and a
   busy one could evict a bot. On one phone, 32 of 38 visible sessions were subtasks. A subtask is

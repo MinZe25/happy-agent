@@ -1652,6 +1652,112 @@ describe("answering what the phone asks of a session", () => {
 });
 
 describe("ending a session", () => {
+    it("finishes archival without applying a pending phone draft to an archived task", async () => {
+        const socket = new FakeSocket();
+        const server = fakeServer();
+        const { operations } = fakeOperations();
+        const session = client({ operations, server, socket });
+        await session.settle();
+        const save = vi
+            .spyOn(operations, "saveDraft")
+            .mockRejectedValue(new Error("Task is archived"));
+        socket.update({
+            body: {
+                t: "update-session",
+                id: "remote-1",
+                metadata: {
+                    value: encode({
+                        draft: { ...PHONE_MODE, text: "Late draft" },
+                        draftUpdatedAt: 300,
+                    }),
+                    version: 8,
+                },
+            },
+        });
+        await session.archive();
+        expect(save).not.toHaveBeenCalled();
+        const final = socket.emittedValues("update-metadata").at(-1) as { metadata: string };
+        expect(decode(final.metadata)).toMatchObject({ lifecycleState: "archived" });
+        expect(server.posted("/v1/sessions/remote-1/archive")).toHaveLength(1);
+    });
+
+    it("keeps the published snapshot intact even if a relay unexpectedly accepts a live retirement probe", async () => {
+        const socket = new FakeSocket();
+        const server = fakeServer();
+        const session = client({ operations: fakeOperations().operations, server, socket });
+        await session.settle();
+        const before = socket.emittedValues("update-metadata").at(-1) as { metadata: string };
+        socket.acknowledgements.push({ result: "success", version: 5 });
+        await session.archive({ metadataOnly: true });
+        const probe = socket.emittedValues("update-metadata").at(-1) as {
+            expectedVersion: number;
+            metadata: string;
+        };
+        expect(probe.expectedVersion).toBe(-1);
+        expect(decode(probe.metadata)).toEqual(decode(before.metadata));
+    });
+
+    it.each([false, true])(
+        "retires only stored metadata after membership loss (cold=%s)",
+        async (cold) => {
+            const socket = new FakeSocket();
+            const server = fakeServer();
+            const { operations } = fakeOperations();
+            const session = client({ operations, server, socket });
+            if (cold) {
+                await sync.setRemoteSession(store.context, AGENT_ID, "remote-1", Date.now());
+            } else {
+                await session.settle();
+            }
+            const stored = {
+                task: { id: "task-1", name: "Previously shared" },
+                name: "Previously shared",
+            };
+            socket.acknowledgements.push(
+                { result: "version-mismatch", version: 8, metadata: encode(stored) },
+                { result: "success", version: 9 },
+            );
+            const read = vi
+                .spyOn(operations, "session")
+                .mockRejectedValue(new Error("Must not read after leaving"));
+            const questions = vi.spyOn(operations, "pendingQuestions");
+            const before = server.requests.length;
+            await sync.projectEvent(store.context, {
+                agentId: AGENT_ID,
+                eventId: "01900000-0000-7000-8000-000000000002",
+                messages: [{ localId: "post-leave", payload: { text: "Must not publish" } }],
+                now: 2_000,
+            });
+            await session.archive({ metadataOnly: true });
+            expect(read).not.toHaveBeenCalled();
+            expect(questions).not.toHaveBeenCalled();
+            expect(server.requests.slice(before)).toEqual([
+                expect.objectContaining({
+                    method: "POST",
+                    url: `${SERVER}/v1/sessions/remote-1/archive`,
+                }),
+            ]);
+            const writes = socket.emittedValues("update-metadata") as {
+                expectedVersion: number;
+                metadata: string;
+            }[];
+            expect(writes.at(-2)?.expectedVersion).toBe(-1);
+            if (cold) {
+                expect(decode(writes.at(-2)!.metadata)).toMatchObject({
+                    lifecycleState: "archived",
+                });
+                expect(decode(writes.at(-2)!.metadata)).not.toHaveProperty("task");
+            }
+            expect(decode(writes.at(-1)!.metadata)).toMatchObject({
+                ...stored,
+                lifecycleState: "archived",
+            });
+            expect(JSON.stringify(writes.map((write) => decode(write.metadata)))).not.toContain(
+                "Must not publish",
+            );
+        },
+    );
+
     it("unsubscribes without ending the turn, archiving, or changing its durable cursor", async () => {
         const socket = new FakeSocket();
         const server = fakeServer();

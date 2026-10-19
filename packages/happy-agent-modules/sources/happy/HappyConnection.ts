@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { createHappySpawnSessionId } from "./createHappySpawnSessionId.js";
 import { mkdir, rm } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
@@ -43,7 +44,7 @@ import {
     type WorkspaceAgentPlacement,
     type WorkspaceEvent,
 } from "../workspaces/index.js";
-import { TasksModule } from "../tasks/index.js";
+import { TasksModule, type TaskRecord } from "../tasks/index.js";
 import { TeamModule, type TeamUser } from "../team/index.js";
 import { ConfigModule } from "../config/index.js";
 import type { SessionInputBlock, SessionUserMessage } from "@slopus/happy-providers";
@@ -189,7 +190,7 @@ interface AttachmentState {
 interface ReplaceableSubscription {
     readonly agentId: string;
     readonly attached: ConnectedAgent;
-    readonly bot: boolean;
+    readonly persistentRoot: boolean;
     readonly updatedAt: number;
 }
 
@@ -509,6 +510,32 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
      */
     #watchCatalog(ctx: Context): void {
         this.#unwatchCatalog.push(
+            this.#taskCatalog.onEvent((_eventCtx, event) => {
+                // Creation publishes task_joined in the same transaction; it is the list edge.
+                if (event.type === "task_created") return;
+                if ("membership" in event && event.membership.memberId !== this.#taskMember())
+                    return;
+                const taskId = "task" in event ? event.task.id : event.membership.taskId;
+                this.#runTask(async () => {
+                    const task = await this.#taskCatalog.get(ctx, taskId);
+                    if (task === undefined) return;
+                    await this.#botUpdates.runInLock(ctx, task.agentId, async () => {
+                        await this.#archivingAgents.get(task.agentId);
+                        if (!(await this.#userVisible(ctx, task.agentId))) {
+                            const archive = await this.#archiveRemoteProjection(ctx, task.agentId);
+                            await archive?.completion;
+                            return;
+                        }
+                        this.#retiredAgents.delete(task.agentId);
+                        const attached = await ctx.inTx(
+                            async (txCtx) => await this.#attach(txCtx, task.agentId),
+                        );
+                        attached?.client.kick();
+                    });
+                });
+            }),
+        );
+        this.#unwatchCatalog.push(
             this.#bots.onEvent((_eventCtx, event) => {
                 // Re-read after earlier archival finishes. An event can already be stale by the
                 // time the network catches up, especially when a bot is immediately restored.
@@ -535,6 +562,24 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
                 );
             }),
         );
+        if (this.#team !== undefined) {
+            this.#unwatchCatalog.push(
+                this.#team.onProfileUpdated((_eventCtx, event) => {
+                    const member = this.#taskMember();
+                    if (member === undefined) return;
+                    this.#runTask(async () => {
+                        for (const { task } of await this.#taskCatalog.listForMember(ctx, member)) {
+                            if (
+                                task.ownerUserId === event.user.id ||
+                                this.#connectionOwner?.id === event.user.id
+                            ) {
+                                this.#agents.get(task.agentId)?.client.kick();
+                            }
+                        }
+                    });
+                }),
+            );
+        }
         this.#unwatchCatalog.push(
             this.#git.onSnapshot((_eventCtx, entity) => {
                 for (const agentId of this.#gitAgentsByEntity.get(gitEntityKey(entity)) ?? []) {
@@ -1374,6 +1419,8 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
 
     /** Catalog ownership is authority. Metadata and caller-supplied working directories are not. */
     async #readRoot(ctx: Context, agentId: string): Promise<ProjectFileRoot> {
+        const task = await this.#accessibleTask(ctx, agentId);
+        if (task !== undefined) return await this.#files.resolveTaskRoot(ctx, task.workspaceId);
         const config = await this.#system().config(ctx, agentId);
         if (
             config === undefined ||
@@ -1442,9 +1489,12 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         const updatedAt = draft.updatedAt;
         const owner = this.#draftOwner();
         if (owner !== undefined) {
-            await owner.team.saveDraft(ctx, agentId, owner.userId, {
-                draft: draft.value,
-                updatedAt,
+            await ctx.inTx(async (txCtx) => {
+                await this.#accessibleTask(txCtx, agentId);
+                await owner.team.saveDraft(txCtx, agentId, owner.userId, {
+                    draft: draft.value,
+                    updatedAt,
+                });
             });
             return;
         }
@@ -1452,6 +1502,7 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         // The desktop API writes these same two fields, so comparing and writing has to be one
         // decision: otherwise a newer draft landing in between is compared against and then lost.
         await ctx.inTx(async (txCtx) => {
+            await this.#accessibleTask(txCtx, agentId);
             const config = await system.config(txCtx, agentId);
             if (config === undefined) return;
             const current = happyComposerDraftFromConfig(config);
@@ -1514,6 +1565,7 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         };
         try {
             await ctx.inTx(async (txCtx) => {
+                await this.#accessibleTask(txCtx, agentId);
                 const bot = await this.#bots.forAgent(txCtx, agentId);
                 if (bot?.status === "archived") {
                     throw new HappyMessageRefused(
@@ -1547,12 +1599,34 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
 
     /** Stops whatever the agent is doing. */
     async abort(ctx: Context, agentId: string): Promise<void> {
-        await this.#system().abort(ctx, agentId);
+        await ctx.inTx(async (txCtx) => {
+            await this.#accessibleTask(txCtx, agentId);
+            await this.#system().abort(txCtx, agentId);
+        });
     }
 
     /** Archives the local agent when the person archives its Happy session. */
     async archiveSession(ctx: Context, agentId: string): Promise<void> {
         const archivedBot = await ctx.inTx(async (txCtx) => {
+            const task = await this.#taskCatalog.forAgent(txCtx, agentId);
+            if (task !== undefined) {
+                const member = this.#taskMember();
+                if (
+                    member === undefined ||
+                    (await this.#taskCatalog.membership(txCtx, task.id, member)) === undefined
+                ) {
+                    throw new HappyMessageRefused("This task is not available to this connection.");
+                }
+                if (!(await this.#canArchiveTask(txCtx, task))) {
+                    throw new Error(
+                        "Only the task's owner or the team owner can archive this task.",
+                    );
+                }
+                if (task.status !== "archived")
+                    await this.#taskCatalog.archive(txCtx, task.id, task.version);
+                await this.#archiveRemoteProjection(txCtx, agentId);
+                return true;
+            }
             const bot = await this.#bots.forAgent(txCtx, agentId);
             if (bot === undefined) return false;
             await this.#bots.archive(txCtx, bot.id, bot.version);
@@ -1577,8 +1651,51 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         await this.#archiveRemoteProjection(ctx, agentId);
     }
 
+    /** Leaving changes only this connection owner's membership, never the task's lifecycle. */
+    async leaveTask(ctx: Context, agentId: string): Promise<void> {
+        await ctx.inTx(async (txCtx) => {
+            const task = await this.#taskCatalog.forAgent(txCtx, agentId);
+            if (task === undefined) throw new Error("This session is not a task.");
+            const member = this.#taskMember();
+            if (member === undefined)
+                throw new Error("This task is not available to this connection.");
+            await this.#taskCatalog.leave(txCtx, task.id, member);
+            await this.#archiveRemoteProjection(txCtx, agentId);
+        });
+    }
+
+    #taskMember() {
+        return this.#taskCatalog.memberFor(this.#connectionOwner?.id);
+    }
+
+    async #canArchiveTask(ctx: Context, task: TaskRecord): Promise<boolean> {
+        if (this.#team?.enabled !== true) return true;
+        const user =
+            this.#connectionOwner === undefined
+                ? undefined
+                : await this.#team.getUser(ctx, this.#connectionOwner.id);
+        return user !== undefined && (user.isOwner || task.ownerUserId === user.id);
+    }
+
+    /** Recheck task membership at the operation boundary, not just when its socket attached. */
+    async #accessibleTask(ctx: Context, agentId: string): Promise<TaskRecord | undefined> {
+        const task = await this.#taskCatalog.forAgent(ctx, agentId);
+        if (task === undefined) return undefined;
+        const member = this.#taskMember();
+        if (
+            task.status !== "active" ||
+            member === undefined ||
+            (await this.#taskCatalog.membership(ctx, task.id, member)) === undefined
+        ) {
+            throw new HappyMessageRefused("This task is not available to this connection.");
+        }
+        return task;
+    }
+
     /** The questions this agent is waiting on right now. */
     async pendingQuestions(ctx: Context, agentId: string): Promise<readonly UserInputRequest[]> {
+        const task = await this.#taskCatalog.forAgent(ctx, agentId);
+        if (task !== undefined && !(await this.#userVisible(ctx, agentId))) return [];
         return await this.#userInput.list(ctx, agentId, { status: "pending" });
     }
 
@@ -1589,19 +1706,29 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         requestId: string,
         answers: Record<string, unknown>,
     ): Promise<void> {
-        const pending = await this.#userInput.list(ctx, agentId, { status: "pending" });
-        const request = pending.find((candidate) => candidate.id === requestId);
-        if (request === undefined) {
-            throw new Error(`Question "${requestId}" is no longer waiting for an answer.`);
-        }
-        await this.#userInput.answer(ctx, agentId, resolveHappyUserInputAnswers(request, answers));
+        await ctx.inTx(async (txCtx) => {
+            await this.#accessibleTask(txCtx, agentId);
+            const pending = await this.#userInput.list(txCtx, agentId, { status: "pending" });
+            const request = pending.find((candidate) => candidate.id === requestId);
+            if (request === undefined) {
+                throw new Error(`Question "${requestId}" is no longer waiting for an answer.`);
+            }
+            await this.#userInput.answer(
+                txCtx,
+                agentId,
+                resolveHappyUserInputAnswers(request, answers),
+            );
+        });
     }
 
     /** Dismisses a question the person chose not to answer. */
     async cancelQuestion(ctx: Context, agentId: string, requestId: string): Promise<void> {
-        await this.#userInput.cancel(ctx, agentId, {
-            reason: "Dismissed from the phone.",
-            requestId,
+        await ctx.inTx(async (txCtx) => {
+            await this.#accessibleTask(txCtx, agentId);
+            await this.#userInput.cancel(txCtx, agentId, {
+                reason: "Dismissed from the phone.",
+                requestId,
+            });
         });
     }
 
@@ -1609,8 +1736,25 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         return this.#config.configuration.values.defaults.permissionMode;
     }
 
-    readSpawnResult(clientRequestId: string): HappySpawnResult | undefined {
-        return this.#served.get(clientRequestId);
+    async readSpawnResult(
+        clientRequestId: string,
+        ctx: Context,
+    ): Promise<HappySpawnResult | undefined> {
+        const served = this.#served.get(clientRequestId);
+        const machineId = this.#configuration?.machineId;
+        if (
+            served?.type === "success" &&
+            machineId !== undefined &&
+            (await this.#taskCatalog.get(
+                ctx,
+                createHappySpawnSessionId(machineId, `${clientRequestId}:task`),
+            )) !== undefined
+        ) {
+            // Success is not lasting authority: a task may have been archived or left since
+            // the first answer. Its deterministic creation path rechecks identity and membership.
+            return undefined;
+        }
+        return served;
     }
 
     rememberSpawnResult(clientRequestId: string, result: HappySpawnResult): void {
@@ -1626,6 +1770,9 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
 
     /** Starts the deterministic local agent behind either Happy spawn request. */
     async spawnSession(ctx: Context, request: HappySpawnRequest): Promise<HappySpawnStartResult> {
+        if ("target" in request && request.target.kind === "task") {
+            return await this.#spawnTask(ctx, request, request.target);
+        }
         if ("target" in request && request.target.kind === "bot") {
             return await this.#spawnBot(ctx, request, request.target);
         }
@@ -1668,6 +1815,49 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         }
         await ctx.inTx(async (txCtx) => await this.#attach(txCtx, request.sessionId, true));
         return { agentId: request.sessionId, type: "ready" };
+    }
+
+    async #spawnTask(
+        ctx: Context,
+        request: HappyTargetSpawnRequest,
+        target: Extract<HappySpawnTarget, { kind: "task" }>,
+    ): Promise<HappySpawnStartResult> {
+        if (this.#taskMember() === undefined) {
+            throw new Error("A task needs an authenticated connection owner.");
+        }
+        const selection = checkedSelection(this.#config.models, {
+            effort: request.effort,
+            modelId: request.modelId,
+            permissionMode: request.permissionMode,
+            providerId: request.providerId,
+        });
+        const task = await ctx.inTx(async (txCtx) => {
+            const made = await this.#taskCatalog.createWithResult(txCtx, {
+                agentId: request.sessionId,
+                id: target.id,
+                ...(target.name === undefined ? {} : { name: target.name }),
+                ...(this.#connectionOwner === undefined
+                    ? {}
+                    : { ownerUserId: this.#connectionOwner.id }),
+                workspaceId: request.workspaceId,
+            });
+            if (made.task.ownerUserId !== this.#connectionOwner?.id) {
+                throw new Error("That task belongs to another owner.");
+            }
+            if (made.task.status === "archived") throw new Error("That task was archived.");
+            await this.#accessibleTask(txCtx, made.task.agentId);
+            if (made.created) {
+                await this.saveDraft(txCtx, made.task.agentId, {
+                    updatedAt: Date.now(),
+                    value: { ...modeForSelection(selection), text: "" },
+                });
+            }
+            return made.task;
+        });
+        await this.#botUpdates.runInLock(ctx, task.agentId, async () => {
+            await ctx.inTx(async (txCtx) => await this.#attach(txCtx, task.agentId, true));
+        });
+        return { agentId: task.agentId, type: "ready" };
     }
 
     /**
@@ -1792,6 +1982,18 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
                 : undefined;
         if (
             (requestedWorkspace !== undefined &&
+                (await this.#taskCatalog.forWorkspace(ctx, requestedWorkspace)) !== undefined) ||
+            (requestedPath !== undefined &&
+                (await this.#taskCatalog.list(ctx)).some(
+                    (task) => resolve(task.path) === resolve(requestedPath),
+                ))
+        ) {
+            throw new Error(
+                "A task has one continuous conversation. Open the existing task instead.",
+            );
+        }
+        if (
+            (requestedWorkspace !== undefined &&
                 (await this.#bots.forWorkspace(ctx, requestedWorkspace)) !== undefined) ||
             (requestedPath !== undefined &&
                 (await this.#bots.list(ctx)).some(
@@ -1860,7 +2062,9 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         }
 
         // A bot has no project or workspace owner; `spawnSession` makes it before coming here.
-        if (target.kind === "bot") throw new Error("A bot is not started in a project.");
+        if (target.kind === "bot" || target.kind === "task") {
+            throw new Error("A bot or task is not started in a project.");
+        }
         const project = await this.#projects.get(ctx, target.projectId);
         if (project === undefined || project.status === "archived") {
             throw new Error("That project is not available in Happy Agent.");
@@ -1937,6 +2141,15 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         if ((await this.#system().parentOf(ctx, agentId)) !== null) return false;
         const bot = await this.#bots.forAgent(ctx, agentId);
         if (bot !== undefined) return bot.status === "active";
+        const task = await this.#taskCatalog.forAgent(ctx, agentId);
+        if (task !== undefined) {
+            const member = this.#taskMember();
+            return (
+                task.status === "active" &&
+                member !== undefined &&
+                (await this.#taskCatalog.membership(ctx, task.id, member)) !== undefined
+            );
+        }
         const workspaceId = await this.#workspaces.workspaceForAgent(ctx, agentId);
         if (workspaceId !== undefined) {
             const workspace = await this.#workspaces.get(ctx, workspaceId);
@@ -2087,6 +2300,12 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         const pending = this.#transactionAttachments.get(ctx.db);
         const agents = pending?.agents ?? this.#agents;
         const existing = agents.get(agentId);
+        // A task can be left while its client is still draining the retirement pass.
+        if (
+            (await this.#taskCatalog.forAgent(ctx, agentId)) !== undefined &&
+            !(await this.#userVisible(ctx, agentId))
+        )
+            return undefined;
         if (existing !== undefined) return existing;
         const configuration = this.#configuration;
         const context = this.#context;
@@ -2104,7 +2323,11 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         // creation can replace it. If every slot is publishing, a retry remains truly pending.
         const oldest =
             state.agents.size >= this.#capacity()
-                ? await this.#oldestSubscription(ctx, state.agents, session.bot !== undefined)
+                ? await this.#oldestSubscription(
+                      ctx,
+                      state.agents,
+                      session.bot !== undefined || session.task !== undefined,
+                  )
                 : undefined;
         if (state.agents.size >= this.#capacity() && oldest === undefined) return undefined;
         await this.#sync.ensureSession(
@@ -2201,17 +2424,19 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
     /**
      * The subscription a new one replaces once every slot is taken.
      *
-     * A bot is a person's standing conversation and the reason most of them open the phone, so
-     * a project session is always replaced before any bot, and never replaces one itself. Only
-     * another bot replaces a bot, once every slot already holds one.
+     * Bots and tasks are standing conversations: a project session is replaced before either,
+     * and never replaces one itself. Another standing conversation may replace the oldest once
+     * every slot already holds one.
      */
     async #oldestSubscription(
         ctx: Context,
         agents: ReadonlyMap<string, ConnectedAgent>,
-        forBot: boolean,
+        forPersistentRoot: boolean,
     ): Promise<ReplaceableSubscription | undefined> {
         const [oldest] = await this.#replaceableSubscriptions(ctx, agents);
-        return oldest === undefined || (oldest.bot && !forBot) ? undefined : oldest;
+        return oldest === undefined || (oldest.persistentRoot && !forPersistentRoot)
+            ? undefined
+            : oldest;
     }
 
     /**
@@ -2233,18 +2458,20 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
                 (await this.#sync.readSession(ctx, agentId))?.remoteSessionId === undefined
             )
                 continue;
-            const bot = (await this.#bots.forAgent(ctx, agentId)) !== undefined;
+            const persistentRoot =
+                (await this.#bots.forAgent(ctx, agentId)) !== undefined ||
+                (await this.#taskCatalog.forAgent(ctx, agentId)) !== undefined;
             const latest = await this.#events.latestAgentEvent(ctx, agentId);
             const config =
                 latest === undefined ? await this.#system().config(ctx, agentId) : undefined;
             const updatedAt =
                 latest?.occurredAt ??
                 (typeof config?.metadata?.updatedAt === "number" ? config.metadata.updatedAt : 0);
-            subscriptions.push({ agentId, attached, bot, updatedAt });
+            subscriptions.push({ agentId, attached, persistentRoot, updatedAt });
         }
         return subscriptions.sort(
             (left, right) =>
-                Number(left.bot) - Number(right.bot) ||
+                Number(left.persistentRoot) - Number(right.persistentRoot) ||
                 left.updatedAt - right.updatedAt ||
                 (left.agentId < right.agentId ? -1 : left.agentId > right.agentId ? 1 : 0),
         );
@@ -2391,6 +2618,12 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
             for (const bot of await this.#bots.list(ctx)) {
                 if (bot.status === "active" && !(await attach(bot.agentId))) return;
             }
+            const member = this.#taskMember();
+            if (member !== undefined) {
+                for (const { task } of await this.#taskCatalog.listForMember(ctx, member)) {
+                    if (task.status === "active" && !(await attach(task.agentId))) return;
+                }
+            }
             let workspaceCursor: number | undefined;
             do {
                 const page = await this.#workspaces.listCatalogPage(ctx, {
@@ -2458,6 +2691,12 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
                 sync: this.#sync,
                 version: this.#config.configuration.version,
             });
+        const task = await this.#taskCatalog.forAgent(ctx, agentId);
+        const member = this.#taskMember();
+        const metadataOnly =
+            task !== undefined &&
+            (member === undefined ||
+                (await this.#taskCatalog.membership(ctx, task.id, member)) === undefined);
         // Return the actual completion even before afterCommit has registered the task. A
         // restore must not mistake a missing map entry for an archive that already finished.
         let complete!: (value: void | PromiseLike<void>) => void;
@@ -2481,7 +2720,7 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
             this.#forgetGitAgent(agentId);
             const archiving = this.#runTask(async () => {
                 try {
-                    await client.archive();
+                    await client.archive({ metadataOnly });
                     this.#retiredAgents.add(agentId);
                 } finally {
                     this.#archivingAgents.delete(agentId);
@@ -2570,6 +2809,7 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
             agentId,
             ...(depth === undefined ? {} : { depth }),
             ...(owner.bot === undefined ? {} : { bot: owner.bot }),
+            ...(owner.task === undefined ? {} : { task: owner.task }),
             ...(owner.avatarVersion === undefined ? {} : { avatarVersion: owner.avatarVersion }),
             archived: typeof config.metadata?.archivedAt === "number",
             cwd,
@@ -2650,11 +2890,41 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         agentId: string,
     ): Promise<{
         bot?: HappySessionSnapshot["bot"];
+        task?: HappySessionSnapshot["task"];
         avatarVersion?: number;
         gitBranch?: string;
         project?: { id: string; kind: "home" | "regular"; name: string };
         workspace?: { id: string; name: string };
     }> {
+        // A task must never fall through to a synthetic project if its catalog read fails.
+        const task = await this.#taskCatalog.forAgent(ctx, agentId);
+        if (task !== undefined) {
+            const member = this.#taskMember();
+            const membership =
+                member === undefined
+                    ? undefined
+                    : await this.#taskCatalog.membership(ctx, task.id, member);
+            const owner =
+                task.ownerUserId === undefined || this.#team?.enabled !== true
+                    ? undefined
+                    : await this.#team.getUser(ctx, task.ownerUserId);
+            return {
+                task: {
+                    id: task.id,
+                    name: task.name,
+                    folderName: task.folderName,
+                    orderKey: membership?.orderKey ?? "0",
+                    canArchive: await this.#canArchiveTask(ctx, task),
+                    owner:
+                        owner === undefined
+                            ? null
+                            : {
+                                  userId: owner.id,
+                                  name: [owner.firstName, owner.lastName].filter(Boolean).join(" "),
+                              },
+                },
+            };
+        }
         try {
             const bot = await this.#bots.forAgent(ctx, agentId);
             if (bot !== undefined) {

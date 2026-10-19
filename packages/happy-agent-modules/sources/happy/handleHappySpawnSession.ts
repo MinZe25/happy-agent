@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { isAgentPermissionMode, type AgentPermissionMode } from "@slopus/happy-agent-base";
-import { botNameSchema } from "@slopus/happy-agent-client";
+import { botNameSchema, taskNameSchema } from "@slopus/happy-agent-client";
 import type { Context } from "@steve.kite/stdlib";
 
 import { createHappySpawnSessionId } from "./createHappySpawnSessionId.js";
@@ -26,7 +26,10 @@ export interface HappySpawnOperations {
     /** The daemon's configured permission default for a request that names none. */
     defaultSpawnPermissionMode: () => AgentPermissionMode;
     /** A terminal answer already served during this daemon lifetime. */
-    readSpawnResult: (clientRequestId: string) => HappySpawnResult | undefined;
+    readSpawnResult: (
+        clientRequestId: string,
+        ctx: Context,
+    ) => HappySpawnResult | undefined | Promise<HappySpawnResult | undefined>;
     /** Remembers one terminal answer. Pending work is deliberately never stored. */
     rememberSpawnResult: (clientRequestId: string, result: HappySpawnResult) => void;
     spawnSession: (ctx: Context, request: HappySpawnRequest) => Promise<HappySpawnStartResult>;
@@ -102,6 +105,10 @@ const happyAgentSpawnTargetSchema = Type.Union([
         { kind: Type.Literal("bot"), name: botNameSchema },
         { additionalProperties: false },
     ),
+    Type.Object(
+        { kind: Type.Literal("task"), name: Type.Optional(taskNameSchema) },
+        { additionalProperties: false },
+    ),
 ]);
 
 const happyAgentSpawnRequestSchema = Type.Object(
@@ -142,7 +149,10 @@ export async function handleHappySpawnSession(options: {
     signal?: AbortSignal;
 }): Promise<HappySpawnResult> {
     if (Value.Check(happyAgentSpawnIdentitySchema, options.params)) {
-        const cached = options.operations.readSpawnResult(options.params.clientRequestId);
+        const cached = await options.operations.readSpawnResult(
+            options.params.clientRequestId,
+            options.ctx,
+        );
         if (cached !== undefined) return cached;
         if (!Value.Check(happyAgentSpawnRequestSchema, options.params)) {
             return rememberTerminal(options.operations, options.params.clientRequestId, {
@@ -253,12 +263,12 @@ async function handleHappyAgentSpawn(
         const target: HappySpawnTarget =
             request.target.kind === "projectFolder"
                 ? { ...request.target, projectPath: resolveDirectory(request.target.projectPath) }
-                : request.target.kind === "bot"
+                : request.target.kind === "bot" || request.target.kind === "task"
                   ? {
                         ...request.target,
                         id: createHappySpawnSessionId(
                             options.machineId,
-                            `${request.clientRequestId}:bot`,
+                            `${request.clientRequestId}:${request.target.kind}`,
                         ),
                     }
                   : request.target;

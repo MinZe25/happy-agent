@@ -74,6 +74,24 @@ function metadata(session: HappySessionSnapshot = snapshot()) {
 }
 
 describe("describing a Happy Agent session in Happy's own terms", () => {
+    it("publishes a joined task without a synthetic project, workspace, or bot", () => {
+        const task = {
+            id: "task-1",
+            name: "Ship the mobile tasks",
+            folderName: "new_task",
+            orderKey: "0001",
+            canArchive: false,
+            owner: null,
+        };
+        const published = metadata({ ...snapshot(), task });
+        expect(published).toMatchObject({ task, name: task.name });
+        expect(published.summary?.text).toBe(task.name);
+        expect(published).not.toHaveProperty("project");
+        expect(published).not.toHaveProperty("workspace");
+        expect(published).not.toHaveProperty("bot");
+        expect(published.capabilities.rpcMethods).toContain("leaveTask");
+    });
+
     it("publishes a bot identity without inventing a project or worktree", () => {
         const bot = {
             id: "bot-1",

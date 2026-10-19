@@ -112,6 +112,7 @@ export interface HappySessionOperations {
 
     /** Ends a session, as the phone's kill switch does. */
     archiveSession: (ctx: Context, sessionId: string) => Promise<void>;
+    leaveTask?: (ctx: Context, agentId: string) => Promise<void>;
 
     /** Dismisses a question the person chose not to answer. */
     cancelQuestion: (ctx: Context, agentId: string, requestId: string) => Promise<void>;
@@ -291,6 +292,9 @@ export class HappySessionClient {
      */
     #lastMetadata: Record<string, unknown> | undefined;
     #metadataBase: Record<string, unknown> = {};
+    #taskSession = false;
+    #metadataOnlyArchive = false;
+    #onArchiveConnected: (() => void) | undefined;
     #metadataVersion: number | undefined;
     /** Ends the wait for the next paced pass early. */
     #hurry: (() => void) | undefined;
@@ -372,15 +376,25 @@ export class HappySessionClient {
     }
 
     /** Tells Happy the session has ended, and stops. */
-    async archive(): Promise<void> {
+    async archive(options: { readonly metadataOnly?: boolean } = {}): Promise<void> {
         if (this.#closed || this.#archiving) return;
         this.#archiving = true;
+        this.#metadataOnlyArchive = options.metadataOnly === true;
         this.#clearRetry();
         this.#clearAvatarRetry();
         try {
             this.#hurryNextPass();
-            this.kick();
+            if (!this.#metadataOnlyArchive) this.kick();
             await this.#syncPromise;
+            if (this.#metadataOnlyArchive) {
+                await this.#archiveStoredMetadata().catch((error) => {
+                    this.#options.context.log.debug(
+                        "Happy did not accept the membership retirement marker.",
+                        {},
+                        error,
+                    );
+                });
+            }
             await this.#sendSessionEnd();
             const remoteSessionId = await this.#remoteSessionId();
             if (remoteSessionId !== undefined) {
@@ -395,6 +409,80 @@ export class HappySessionClient {
         } finally {
             await this.close();
         }
+    }
+
+    /** Marks only the relay's stored snapshot retired, without reading the task again. */
+    async #archiveStoredMetadata(): Promise<void> {
+        const state = await this.#options.sync.readSession(
+            this.#options.context,
+            this.#options.agentId,
+        );
+        if (state?.remoteSessionId === undefined) return;
+        this.#ensureSocket(state.remoteSessionId);
+        const socket = this.#socket;
+        if (socket === undefined) return;
+        if (socket.connected === false) {
+            await new Promise<void>((resolve, reject) => {
+                const finish = (error?: Error) => {
+                    clearTimeout(timer);
+                    this.#onArchiveConnected = undefined;
+                    this.#unanswered.delete(disconnected);
+                    this.#closeController.signal.removeEventListener("abort", disconnected);
+                    if (error === undefined) resolve();
+                    else reject(error);
+                };
+                const disconnected = () =>
+                    finish(new Error("Happy disconnected before retirement."));
+                const timer = setTimeout(
+                    () => finish(new Error("Happy did not connect in time.")),
+                    HTTP_TIMEOUT_MS,
+                );
+                timer.unref();
+                this.#unanswered.add(disconnected);
+                this.#closeController.signal.addEventListener("abort", disconnected, {
+                    once: true,
+                });
+                this.#onArchiveConnected = () => finish();
+            });
+        }
+        // The relay's versions begin at zero. -1 guarantees a read-only conflict, including
+        // after restart when no local snapshot exists. Never POST by tag: a removed session
+        // must stay removed. Only already-published encrypted metadata is read here.
+        let version = -1;
+        const archived = {
+            lifecycleState: "archived",
+            archivedBy: "rig",
+            archiveReason: "You left this task.",
+            lifecycleStateSince: (this.#archiveStartedAt ??= Date.now()),
+        };
+        let metadata: Record<string, unknown> =
+            this.#metadataVersion === undefined ? archived : { ...this.#metadataBase };
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+            const answer = await this.#emitWithAck("update-metadata", {
+                sid: state.remoteSessionId,
+                expectedVersion: version,
+                metadata: this.#encode(state, metadata),
+            });
+            if (!Value.Check(acknowledgementSchema, answer))
+                throw new Error("Invalid retirement response.");
+            if (answer.result === "success" && version >= 0) return;
+            if (
+                answer.result !== "version-mismatch" ||
+                answer.version === undefined ||
+                answer.metadata === undefined
+            ) {
+                throw new Error("Happy refused the retirement marker.");
+            }
+            const published = this.#decode(state, answer.metadata);
+            if (!Value.Check(recordSchema, published))
+                throw new Error("Unreadable session metadata.");
+            version = answer.version;
+            metadata = {
+                ...published,
+                ...archived,
+            };
+        }
+        throw new Error("Happy metadata kept changing during retirement.");
     }
 
     /** Stops talking to Happy and releases everything held for it. */
@@ -433,13 +521,17 @@ export class HappySessionClient {
             this.#needsAnotherSync = false;
             this.#passStartedAt = Date.now();
             try {
+                if (this.#metadataOnlyArchive) return;
                 const state = await this.#ensureRemoteSession();
                 if (state?.remoteSessionId === undefined || this.#closed) return;
+                if (this.#metadataOnlyArchive) return;
                 this.#ensureSocket(state.remoteSessionId);
                 await this.#flushOutbox(state);
+                if (this.#metadataOnlyArchive) return;
                 if (!this.#archiving) await this.#fetchIncoming(state);
                 await this.#applyPendingMetadata(state);
                 const snapshot = await this.#session();
+                if (this.#metadataOnlyArchive) return;
                 this.#subject = {
                     ...(snapshot.project === undefined ? {} : { projectId: snapshot.project.id }),
                     providerId: snapshot.providerId,
@@ -791,10 +883,12 @@ export class HappySessionClient {
         if (this.#socket !== undefined) return;
         const socket = this.#options.socket(remoteSessionId);
         socket.on("connect", () => {
+            this.#onArchiveConnected?.();
             // Happy does not replay missed updates, including edits between HTTP hydration and
             // the first connection. A forced CAS retrieves them through a version conflict.
             this.#lastMetadata = undefined;
             for (const method of HAPPY_SESSION_RPC_METHODS) {
+                if (method === "leaveTask" && !this.#taskSession) continue;
                 socket.emit("rpc-register", { method: `${remoteSessionId}:${method}` });
             }
             this.kick();
@@ -1110,6 +1204,9 @@ export class HappySessionClient {
                           answerQuestion: (requestId, answers) =>
                               this.#answerQuestion(requestId, answers),
                           archive: () => operations.archiveSession(context, sessionId),
+                          ...(operations.leaveTask === undefined
+                              ? {}
+                              : { leaveTask: () => operations.leaveTask!(context, agentId) }),
                           cancelQuestion: (requestId) => this.#cancelQuestion(requestId),
                           gitState: () => operations.gitState(context, agentId),
                           readFile: (input) => operations.readFile(context, agentId, input),
@@ -1221,10 +1318,12 @@ export class HappySessionClient {
                 if (!Value.Check(recordSchema, latest)) {
                     throw new Error("Happy returned metadata Happy Agent could not read.");
                 }
-                await this.#applyRemoteComposerState(latest);
+                if (!this.#metadataOnlyArchive) await this.#applyRemoteComposerState(latest);
                 this.#metadataVersion = answer.version;
                 this.#metadataBase = latest;
-                rigMetadata = this.#metadataFor(await this.#session());
+                rigMetadata = this.#metadataFor(
+                    this.#metadataOnlyArchive ? snapshot : await this.#session(),
+                );
                 metadata = composeSessionMetadata(latest, rigMetadata);
                 continue;
             }
@@ -1251,6 +1350,7 @@ export class HappySessionClient {
 
     /** Only drafts are client-writable; lastMode is derived from accepted messages. */
     async #applyRemoteComposerState(latest: Record<string, unknown>): Promise<void> {
+        if (this.#archiving) return;
         const draft = { value: latest.draft, updatedAt: latest.draftUpdatedAt };
         if (!Value.Check(happyComposerDraftSnapshotSchema, draft) || draft.updatedAt === null) {
             this.#options.context.log.debug("Happy ignored a composer draft it could not read.", {
@@ -1354,6 +1454,7 @@ export class HappySessionClient {
     }
 
     #metadataFor(session: HappySessionSnapshot): Record<string, unknown> {
+        this.#taskSession = session.task !== undefined;
         if (session.title !== this.#summaryTitle) {
             this.#summaryTitle = session.title;
             this.#summaryUpdatedAt = Date.now();
@@ -1375,7 +1476,7 @@ export class HappySessionClient {
                       // new metadata write on every pass through the sync loop.
                       lifecycleStateSince: (this.#archiveStartedAt ??= Date.now()),
                   }
-                : session.bot === undefined
+                : session.bot === undefined && session.task === undefined
                   ? {}
                   : { lifecycleState: "active" }),
         } as Record<string, unknown>;
@@ -1491,7 +1592,7 @@ function composeSessionMetadata(
     rigMetadata: Record<string, unknown>,
 ): Record<string, unknown> {
     const composed = { ...base, ...rigMetadata };
-    if (rigMetadata.bot !== undefined) {
+    if (rigMetadata.bot !== undefined || rigMetadata.task !== undefined) {
         delete composed.project;
         delete composed.workspace;
         delete composed.git;

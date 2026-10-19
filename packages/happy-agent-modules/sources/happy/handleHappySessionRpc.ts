@@ -17,6 +17,7 @@ export const HAPPY_SESSION_RPC_METHODS = [
     "abort",
     "communication",
     "killSession",
+    "leaveTask",
     "gitState",
     "readFile",
     "readFileAtRevision",
@@ -31,6 +32,8 @@ const communicationSchema = Type.Object(
     },
     { additionalProperties: true },
 );
+
+const leaveTaskSchema = Type.Object({}, { additionalProperties: false });
 
 /**
  * A picture the phone has already put in this session's attachment store, named the way an
@@ -62,6 +65,7 @@ export async function handleHappySessionRpc(options: {
     abort: () => Promise<void>;
     answerQuestion: (requestId: string, answers: Record<string, unknown>) => Promise<void>;
     archive: () => Promise<void>;
+    leaveTask?: () => Promise<void>;
     cancelQuestion: (requestId: string) => Promise<void>;
     gitState: () => Promise<HappyGitStateResponse>;
     readFile: (request: HappyReadFileRequest) => Promise<HappyReadFileResponse>;
@@ -105,6 +109,14 @@ export async function handleHappySessionRpc(options: {
     }
     if (options.method === "killSession") {
         await options.archive();
+        return { success: true };
+    }
+    if (options.method === "leaveTask") {
+        if (!Value.Check(leaveTaskSchema, options.params)) {
+            return { error: "The leave task request is invalid." };
+        }
+        if (options.leaveTask === undefined) return { error: "This session is not a task." };
+        await options.leaveTask();
         return { success: true };
     }
     if (options.method === "communication") {

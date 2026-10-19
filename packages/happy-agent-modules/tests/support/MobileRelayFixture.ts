@@ -37,6 +37,8 @@ export async function createMobileRelayFixture(
     /** Every `update-metadata` received, by session id. */
     const metadataWrites: string[] = [];
     const endedSessions: string[] = [];
+    let nextRpc = 0;
+    const rpcAnswers = new Map<string, (value: string) => void>();
     let answersSubscriptions = options.sessionSubscribe !== false;
     /** The most session-scoped sockets each account had open at once. */
     const peakSessionSockets = new Map<string, number>();
@@ -49,6 +51,7 @@ export async function createMobileRelayFixture(
             metadata: string;
             version: number;
             botId?: string;
+            taskId?: string;
             machineId?: string;
         }
     >();
@@ -189,7 +192,10 @@ export async function createMobileRelayFixture(
             const key = `${token}:${body.tag}`;
             let session = sessions.get(key);
             if (session === undefined) {
-                const metadata = decode(token, body.metadata) as { bot?: { id: string } };
+                const metadata = decode(token, body.metadata) as {
+                    bot?: { id: string };
+                    task?: { id: string };
+                };
                 session = {
                     id: `remote-${String(nextSession++)}`,
                     token,
@@ -197,6 +203,7 @@ export async function createMobileRelayFixture(
                     metadata: body.metadata,
                     version: 0,
                     ...(metadata.bot === undefined ? {} : { botId: metadata.bot.id }),
+                    ...(metadata.task === undefined ? {} : { taskId: metadata.task.id }),
                 };
                 sessions.set(key, session);
             }
@@ -257,6 +264,11 @@ export async function createMobileRelayFixture(
         });
         socket.on("message", (value) => {
             const packet = value.toString();
+            const response = /^43(\d+)(\[.*)$/s.exec(packet);
+            if (response !== null) {
+                rpcAnswers.get(response[1]!)?.(JSON.parse(response[2]!)[0]);
+                return;
+            }
             if (packet.startsWith("40")) {
                 const auth = JSON.parse(packet.slice(2));
                 sockets.set(socket, auth);
@@ -364,7 +376,8 @@ export async function createMobileRelayFixture(
     });
     const sessionOf = (token: string, botId: string) => {
         const session = [...sessions.values()].find(
-            (session) => session.token === token && session.botId === botId,
+            (session) =>
+                session.token === token && (session.botId === botId || session.taskId === botId),
         );
         if (session === undefined) throw new Error("The account has no session.");
         return session;
@@ -477,6 +490,42 @@ export async function createMobileRelayFixture(
                 .map((session) => session.id);
         },
         /** The account's current session metadata as its phone would decrypt it. */
+        taskSessions(token: string, taskId: string) {
+            return [...sessions.values()]
+                .filter((session) => session.token === token && session.taskId === taskId)
+                .map((session) => session.id);
+        },
+        sessionMetadata(token: string, sessionId: string) {
+            const session = [...sessions.values()].find(
+                (session) => session.token === token && session.id === sessionId,
+            );
+            if (session === undefined) throw new Error("The account has no session.");
+            return decode(token, session.metadata) as Record<string, unknown>;
+        },
+        /** Calls the actual encrypted machine/session RPC over its registered socket. */
+        async callRpc(token: string, method: string, params: unknown): Promise<unknown> {
+            const socket = [...sockets.entries()].find(
+                ([socket, auth]) => auth.token === token && rpcMethods.get(socket)?.has(method),
+            )?.[0];
+            if (socket === undefined) throw new Error(`RPC not registered: ${method}`);
+            const id = String(++nextRpc);
+            const answer = await new Promise<string>((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    rpcAnswers.delete(id);
+                    reject(new Error(`RPC timed out: ${method}`));
+                }, 5_000);
+                rpcAnswers.set(id, (value) => {
+                    clearTimeout(timer);
+                    rpcAnswers.delete(id);
+                    resolve(value);
+                });
+                socket.send(
+                    `42${id}${JSON.stringify(["rpc-request", { method, params: encode(token, params) }])}`,
+                );
+            });
+            return decode(token, answer);
+        },
+        /** The account's current bot metadata as its phone would decrypt it. */
         metadata(token: string, botId: string) {
             return decode(token, sessionOf(token, botId).metadata) as Record<string, unknown>;
         },

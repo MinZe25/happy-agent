@@ -225,6 +225,60 @@ socket factory only so a test can drive one by hand. A machine that has never
 been paired with Happy has no credentials, and that is the whole of the decision
 about whether to connect.
 
+## Tasks on mobile
+
+Task roots use the same encrypted relay sessions as bots, with no synthetic project or
+workspace and no picture. Only active tasks joined by the connection owner are published;
+standalone connections use the tasks module's standalone member key. Hidden subagents and
+subtasks stay unpublished. Membership and order are personal, never inferred from the caller's
+request context or from being the team owner.
+
+The optional session field is:
+
+```ts
+task: {
+    id: string;
+    name: string;
+    folderName: string;
+    orderKey: string;
+    canArchive: boolean;
+    owner: { userId: string; name: string } | null;
+}
+```
+
+`name` and `summary.text` use the live task name. The member's order key is compared as a string.
+The owner is null on standalone installations, for ownerless tasks, or when the owner record is
+unavailable. No other memberships, photos, or profile fields are published. Rename, reorder,
+join, leave, archive, restore, and owner profile changes refresh the affected connections.
+
+Machines advertise `capabilities.tasks: true`. Creation uses the existing machine RPC and reply:
+
+```json
+{ "type": "happy-agent-spawn", "clientRequestId": "phone-request", "target": { "kind": "task" } }
+```
+
+`target.name` and the ordinary `agentConfiguration` are optional. Task, workspace, and agent IDs
+are derived by the daemon from the machine and request IDs; none may be supplied by the phone.
+The authenticated connection owns and joins the new task. Creation seeds its composer draft;
+the optional first message travels afterward through the normal message path and triggers
+automatic naming. Retries preserve the original identities and draft, never change owners or
+rejoin a task the person left, and refuse an archived task even after a cached success.
+
+Only task session metadata advertises `leaveTask`. That RPC takes `{}` and returns
+`{ success: true }`, removing only the caller's membership. `killSession` instead archives
+through `TasksModule`, and only the task owner or team owner may do so (everyone on standalone).
+All task operations recheck membership; stale messages receive the existing rejection receipt.
+Files resolve through the dedicated task workspace. Setting an avatar stays unsupported.
+
+Leaving archives only that account's remote projection. It does not archive the task or delete
+its folder. Retirement skips live content, draft, question, and catalog reads, including after
+restart: a bounded metadata CAS probe with `expectedVersion: -1` retrieves only the relay's
+already-published encrypted snapshot, then adds the archived lifecycle marker. A missing remote
+session is never recreated to retire it. Rejoin or desktop restoration waits for retirement and
+republishes the same remote identity with active lifecycle and fresh metadata. Mobile hides
+retired task projections rather than offering them in its archive list. Browsing unjoined tasks,
+joining, reordering, manual rename, and restoration remain desktop operations.
+
 ## The session client
 
 One `HappySessionClient` per attached agent keeps that session in step. Its loop

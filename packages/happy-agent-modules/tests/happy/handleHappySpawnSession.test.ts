@@ -260,6 +260,57 @@ describe("the session id one spawn request resolves to", () => {
 });
 
 describe("starting a catalog-owned Happy Agent session", () => {
+    it.each([undefined, "Release checklist"])(
+        "derives task identities with optional name %s",
+        async (name) => {
+            const spawn = spawner("remote-task");
+            const target = { kind: "task", ...(name === undefined ? {} : { name }) };
+            const options = {
+                ctx,
+                operations: spawn.operations,
+                machineId: "machine-1",
+                models: MODELS,
+                params: agentRequest({ target }),
+                remoteSessionId: spawn.remoteSessionId,
+            };
+            expect(await handleHappySpawnSession(options)).toEqual({
+                type: "success",
+                sessionId: "remote-task",
+            });
+            expect(await handleHappySpawnSession(options)).toEqual({
+                type: "success",
+                sessionId: "remote-task",
+            });
+            expect(spawn.started).toHaveLength(1);
+            expect(spawn.started[0]).toMatchObject({
+                sessionId: createHappySpawnSessionId("machine-1", "phone-1"),
+                workspaceId: createHappySpawnSessionId("machine-1", "phone-1:workspace"),
+                target: { ...target, id: createHappySpawnSessionId("machine-1", "phone-1:task") },
+            });
+        },
+    );
+
+    it.each([
+        { kind: "task", id: "supplied-id" },
+        { kind: "task", ownerUserId: "someone-else" },
+        { kind: "task", name: "" },
+        { kind: "task", name: "   " },
+        { kind: "task", name: "a\nb" },
+    ])("refuses invalid or caller-controlled task identity %j", async (target) => {
+        const spawn = spawner("remote-task");
+        expect(
+            await handleHappySpawnSession({
+                ctx,
+                operations: spawn.operations,
+                machineId: "machine-1",
+                models: MODELS,
+                params: agentRequest({ target }),
+                remoteSessionId: spawn.remoteSessionId,
+            }),
+        ).toMatchObject({ type: "error" });
+        expect(spawn.started).toHaveLength(0);
+    });
+
     it.each([
         { id: "project-1", kind: "project" },
         { id: "workspace-1", kind: "workspace" },

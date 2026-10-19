@@ -21,7 +21,7 @@ export interface HappyMachineMetadata {
      * `bots` says a session may be started as a new bot, named and given a face from the phone.
      * A phone reading an older daemon finds it absent and offers no such thing.
      */
-    capabilities: { bots: true; newSession: boolean; resume: false; worktrees: false };
+    capabilities: { bots: true; tasks: true; newSession: boolean; resume: false; worktrees: false };
     client: { id: "rig"; name: "Happy Agent"; version: string };
     defaults: { effort: string; modelId: string; permissionMode: "auto"; providerId: string };
     displayName: string;
@@ -81,7 +81,13 @@ export function createHappyMachineMetadata(options: {
         throw new Error("This Happy Agent has no model to offer Happy.");
     const host = hostname();
     return {
-        capabilities: { bots: true, newSession: true, resume: false, worktrees: false },
+        capabilities: {
+            bots: true,
+            tasks: true,
+            newSession: true,
+            resume: false,
+            worktrees: false,
+        },
         client: { id: "rig", name: "Happy Agent", version: options.version },
         defaults: {
             effort: defaultModel.defaultEffort,
