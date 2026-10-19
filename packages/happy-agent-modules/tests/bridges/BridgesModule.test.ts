@@ -1,5 +1,5 @@
 import { connect, createServer, type Server, type Socket } from "node:net";
-import { duplexPair, type Duplex } from "node:stream";
+import type { Duplex } from "node:stream";
 
 import type { WorkspaceBridge } from "@slopus/happy-agent-client";
 import type { Context } from "@steve.kite/stdlib";
@@ -524,12 +524,22 @@ class FakeUsbHostController implements UsbHostController {
 
     async attach(_ctx: Context, device: { readonly devid: number; readonly speed: number }) {
         if (this.failure !== undefined) throw this.failure;
-        const [daemon, kernel] = duplexPair();
+        const listener = await listening();
+        const kernel = connect(portOf(listener), "127.0.0.1");
+        let daemon: Socket;
+        try {
+            daemon = await new Promise<Socket>((resolve, reject) => {
+                listener.once("connection", resolve);
+                kernel.once("error", reject);
+            });
+        } finally {
+            listener.close();
+        }
         this.attached.push({
             device: { devid: device.devid, speed: device.speed },
             socket: kernel,
         });
-        return { port: this.attached.length - 1, socket: daemon as unknown as Socket };
+        return { port: this.attached.length - 1, socket: daemon };
     }
 }
 

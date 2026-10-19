@@ -129,7 +129,10 @@ async function serveInspection(
 async function serveFetch(
     listener: RequestListener,
 ): Promise<{ fetch: typeof globalThis.fetch; socketPath: string }> {
-    const localRoot = resolve(import.meta.dirname, "../../../.local");
+    const localRoot = resolve(
+        process.env.HAPPY_AGENT_GYM_SCRATCH_DIRECTORY ??
+            resolve(import.meta.dirname, "../../../.local"),
+    );
     await mkdir(localRoot, { recursive: true });
     const root = await mkdtemp(join(localRoot, "gym-fetch-"));
     roots.push(root);

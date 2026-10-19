@@ -67,7 +67,12 @@ it("opens a routed attachment's requests and tunnels from the route's network", 
     const received: Array<string | string[] | undefined> = [];
     const target = createServer((incoming, response) => {
         received.push(incoming.headers[WORKSPACE_PROXY_ROUTE_HEADER]);
-        response.end(`from ${incoming.url}`);
+        response.setHeader("content-length", Buffer.byteLength(`from ${incoming.url}`));
+        response.flushHeaders();
+        setImmediate(() => {
+            response.write("from ");
+            setImmediate(() => response.end(incoming.url));
+        });
     });
     target.listen(0, "127.0.0.1");
     await once(target, "listening");
@@ -109,20 +114,31 @@ it("opens a routed attachment's requests and tunnels from the route's network", 
 
         const tunnel = connect(port, "127.0.0.1");
         await once(tunnel, "connect");
+        const closed = once(tunnel, "close");
+        let ended = false;
+        tunnel.once("end", () => (ended = true));
         const headers = Object.entries(routed(route()))
             .map(([name, value]) => `${name}: ${value}\r\n`)
             .join("");
         tunnel.write(`CONNECT localhost:3000 HTTP/1.1\r\nHost: localhost:3000\r\n${headers}\r\n`);
         let reply = "";
+        let innerRequests = 0;
         tunnel.on("data", (chunk: Buffer) => {
             reply += chunk.toString();
-            if (reply.startsWith("HTTP/1.1 200") && !reply.includes("GET")) {
+            if (
+                innerRequests === 0 &&
+                reply.startsWith("HTTP/1.1 200") &&
+                reply.includes("\r\n\r\n")
+            ) {
+                innerRequests++;
                 tunnel.write(
                     "GET /inside HTTP/1.1\r\nHost: localhost:3000\r\nConnection: close\r\n\r\n",
                 );
             }
         });
-        await once(tunnel, "end");
+        await closed;
+        expect(ended).toBe(true);
+        expect(innerRequests).toBe(1);
         expect(reply).toMatch(/^HTTP\/1.1 200 Connection Established/u);
         expect(reply).toContain("from /inside");
         expect(opened).toEqual(["localhost:3000", "localhost:3000"]);
