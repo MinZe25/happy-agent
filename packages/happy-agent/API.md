@@ -4344,12 +4344,18 @@ Two agents have the same `networkId` exactly when their connections leave from t
   including across daemon restarts. When that environment changes, the agent gets a new
   `networkId` and the old one is no longer served.
 
+A `networkId` names a logical compute environment, not an address or a particular machine
+instance. It promises nothing about the public address connections arrive from: agents sharing one
+may reach the internet from different addresses, and different ones may share an address. A
+container recreated in the same environment, such as after its machine restarts, keeps its
+`networkId`.
+
 The network is the one the agent's machine actually runs with. A setting changed after the machine
 started, such as its bot choosing another compute, takes effect only once the machine starts again.
 
-The read is refused exactly as the agent's `CONNECT` above is. Reading it starts the agent's
-machine if it is not running yet, as opening the agent's tunnel does, but never starts an agent
-turn. The `networkId` is not part of the agent object, listings, or events.
+The read is refused exactly as the agent's `CONNECT` above is. Reading it resolves the agent's
+machine, as opening the agent's tunnel does, but never starts an agent turn. It does not promise
+that a container is already running when it answers. The `networkId` is not part of the agent object, listings, or events.
 
 ### `CONNECT /v0/networks/:networkId/proxy`
 
@@ -4362,13 +4368,15 @@ The `CONNECT` is refused, before the tunnel opens, with:
 - `404 not_found` — the daemon does not serve this `networkId` right now: it is malformed or
   unknown, it names a runner that is no longer configured, it names this computer while work here
   is disabled, or it names an agent's container whose agent is archived, whose environment
-  changed, or whose machine has not started since the daemon did.
+  changed, or whose machine has not been resolved since the daemon started.
 - `501 unsupported` — the network's machine cannot open network connections.
 - `503 runner_unavailable` — the network is a runner's and that runner is away.
 - `503 draining` — as for every new proxy attachment.
 
-A client that receives `404` reads the agent's network again, which starts its machine, and opens
-the `networkId` it returns, which may be the same one. Archiving an agent that works in a container
+A client that receives `404` reads the agent's network again, which resolves its machine, and
+opens the `networkId` it returns. When that is the same `networkId`, the client reopens it with the
+same browser state. A different `networkId` is a different network: the client gives it a new
+profile of its own and never moves the old profile, its cookies, or its storage to it. Archiving an agent that works in a container
 closes every connection opened through its network's tunnels and answers later requests on them
 with `502`. The daemon never opens such a tunnel in another network.
 

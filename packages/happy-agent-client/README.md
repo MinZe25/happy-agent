@@ -326,8 +326,9 @@ protocol 28 or newer, `getWorkspaceAgentNetwork(workspaceId, agentId)` answers `
 network that agent's connections leave from, and `networkProxyUrl(networkId)` opens a tunnel in it.
 Agents on this computer share one `networkId`, agents on one runner share that runner's, and an
 agent in a container has its own, so a browser keeps one profile per `networkId`. Treat the ID as
-opaque. A `404` from the network's `CONNECT` means it is not served right now: read the agent's
-network again and use what it returns.
+opaque; `networkProxyUrl` throws for one outside its specified form. A `404` from the network's
+`CONNECT` means it is not served right now: read the agent's network again and use what it
+returns. A different `networkId` gets a new profile; never move the old profile's cookies to it.
 
 `HAPPY_AGENT_PROTOCOL_VERSION` is 28; `HAPPY_AGENT_MIN_PROTOCOL_VERSION` is 22. The range
 is additive, so clients should not require exact protocol equality for existing features.
