@@ -43,8 +43,12 @@ interface CachedCatalog {
     readonly fingerprint: string;
 }
 
-/** How many restored agents load their catalogs at once while the daemon already serves. */
-const RESTORE_LOAD_CONCURRENCY = 4;
+/**
+ * How many restored agents load their catalogs at once while the daemon already serves. One:
+ * with four, the file system work kept the first requests after a restart waiting several times
+ * as long, most of all under Bun.
+ */
+const RESTORE_LOAD_CONCURRENCY = 1;
 
 /**
  * The fingerprint of the catalog last announced for each agent, so a restart compares a restored
@@ -178,7 +182,7 @@ export class SlashCommandsModule implements AgentModule {
      * Restoring every agent at startup would otherwise keep the daemon from serving until
      * hundreds of catalogs were discovered. A catalog read, an invocation, and a turn each load
      * the catalog themselves when it is not there yet, so none of them sees less than before.
-     * A few loads run at a time, so requests arriving meanwhile are not queued behind them, and
+     * Loads run one at a time, so requests arriving meanwhile are not queued behind them, and
      * none starts until every restored agent has: the restart waits for the other restoration
      * observers, and loads running beside them only made that wait longer.
      */

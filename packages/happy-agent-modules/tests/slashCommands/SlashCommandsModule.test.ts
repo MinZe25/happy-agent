@@ -312,7 +312,7 @@ describe("SlashCommandsModule", () => {
         }
     });
 
-    it("loads restored catalogs a few at a time once every agent has started", async () => {
+    it("loads restored catalogs one at a time once every agent has started", async () => {
         const events = new EventsModule();
         const database = moduleDatabase(slashMigrations(events), "slash-command-restore-test");
         ensureAgentDatabaseConnection(database.database);
@@ -350,16 +350,16 @@ describe("SlashCommandsModule", () => {
             await new Promise((resolve) => setTimeout(resolve, 20));
             expect(scanned).toEqual([]);
             await hooks?.afterStart?.(database.context, agents);
-            await vi.waitFor(() => expect(scanned).toHaveLength(4));
+            await vi.waitFor(() => expect(scanned).toHaveLength(1));
             // A read of an agent still waiting its turn loads the catalog itself.
             const read = commands.catalog(database.context, "agent-6");
-            await vi.waitFor(() => expect(scanned).toHaveLength(5));
+            await vi.waitFor(() => expect(scanned).toHaveLength(2));
             release();
 
             await expect(read).resolves.toMatchObject([{ name: "first" }]);
             await vi.waitFor(() => expect(scanned).toHaveLength(6));
             await commands.close();
-            expect(mostRunning).toBe(5);
+            expect(mostRunning).toBe(2);
             expect([...scanned].sort()).toEqual(restored);
             for (const id of restored) {
                 await expect(commands.catalog(database.context, id)).resolves.toMatchObject([
