@@ -110,3 +110,13 @@ jobs:
             - name: Run the complete API gym
               if: ${{ github.event_name == 'workflow_dispatch' && inputs.exhaustive }}
               run: pnpm test:gym:api
+
+            - name: Preserve exhaustive API gym reports
+              if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.exhaustive }}
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: happy-agent-api-gym-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: .local/gym-api-suite/*.json
+                  include-hidden-files: true
+                  if-no-files-found: warn
+                  retention-days: 7
