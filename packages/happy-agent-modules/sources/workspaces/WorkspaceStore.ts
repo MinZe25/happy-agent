@@ -1,4 +1,5 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
+import { TypeCompiler, type TypeCheck } from "@sinclair/typebox/compiler";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
@@ -259,8 +260,12 @@ export function assertWorkspaceStore(value: unknown): asserts value is Workspace
     }
 }
 
+let compiledWorkspacePage: TypeCheck<typeof workspacePageSchema> | undefined;
+
+/** Checked on every page the store returns, so compiled once rather than interpreted each time. */
 export function assertWorkspacePage(value: unknown): asserts value is WorkspacePage {
-    if (!Value.Check(workspacePageSchema, value)) {
+    compiledWorkspacePage ??= TypeCompiler.Compile(workspacePageSchema);
+    if (!compiledWorkspacePage.Check(value)) {
         throw new Error("Workspace store returned an invalid page.");
     }
 }

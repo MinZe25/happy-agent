@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { agentDatabaseRows, agentDatabaseRun, type AgentDatabase } from "@slopus/happy-agent-base";
-import { Value } from "@sinclair/typebox/value";
+import { TypeCompiler, type TypeCheck } from "@sinclair/typebox/compiler";
 
 import { workspaceSchema, type Workspace } from "../Workspace.js";
 import { workspaceNameKey } from "../WorkspaceIdentity.js";
@@ -40,8 +40,12 @@ type WorkspaceRow = {
     readonly service_cleanup: string | null;
 };
 
+let compiledWorkspace: TypeCheck<typeof workspaceSchema> | undefined;
+
+/** Every workspace read is checked, so the schema is compiled once rather than interpreted each time. */
 export function assertWorkspace(value: unknown): asserts value is Workspace {
-    if (!Value.Check(workspaceSchema, value)) {
+    compiledWorkspace ??= TypeCompiler.Compile(workspaceSchema);
+    if (!compiledWorkspace.Check(value)) {
         throw new Error("Workspace store returned an invalid workspace.");
     }
 }
