@@ -8385,6 +8385,9 @@ observations; unavailable initial values are null. Windows load averages are nul
 excludes reclaimable page cache, using the operating system's available-memory accounting;
 macOS derives it from `vm_stat` and `sysctl`. `cachedBytes`, `swapTotalBytes`, and `swapUsedBytes`
 are nullable. Byte counts and rates are nonnegative numbers, not necessarily safe integers.
+When platform-native memory accounting is unavailable, the daemon falls back to Node's
+`os.totalmem()` and `os.freemem()`: `usedBytes` is total minus free, `availableBytes` is free,
+and `cachedBytes` is null. This fallback may include reclaimable cache in used memory.
 
 `gpus` is empty when no GPU can be discovered. GPU `name` is a string and `vendor` is `nvidia`,
 `amd`, `apple`, `intel`, or `other`. Every GPU measurement is nullable. Percentages are from 0
