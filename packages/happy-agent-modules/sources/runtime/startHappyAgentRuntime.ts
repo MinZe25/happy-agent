@@ -42,6 +42,7 @@ import { SubtasksModule } from "../subtasks/index.js";
 import { CompactionsModule } from "../compactions/index.js";
 import { CloudModule } from "../cloud/index.js";
 import { CodeModeModule } from "../codeMode/index.js";
+import { CodexExecModule } from "../codexExec/index.js";
 import { ComputeModule, createComputeModules, type HostCompute } from "../compute/index.js";
 import {
     ConfigModule,
@@ -153,6 +154,7 @@ export interface HappyAgentRuntimeModules {
     readonly subtasks: SubtasksModule;
     readonly cloud: CloudModule;
     readonly codeMode: CodeModeModule;
+    readonly codexExec: CodexExecModule;
     readonly compactions: CompactionsModule;
     readonly compute: ComputeModule;
     readonly config: ConfigModule;
@@ -655,6 +657,7 @@ export async function startHappyAgentRuntime(
         const slashCommands = new SlashCommandsModule(events, compactions, compute.skillsModule);
         const contextWindow = new ContextWindowModule(config);
         const workflows = new WorkflowsModule(config, collaboration, compute.computeModule);
+        const codexExec = new CodexExecModule(config, permissions);
         const codeMode = new CodeModeModule(config, compute.computeModule);
         registerShutdown("code-mode", async (shutdownCtx) => {
             await system?.close(shutdownCtx);
@@ -720,6 +723,7 @@ export async function startHappyAgentRuntime(
             subtasks,
             cloud,
             codeMode,
+            codexExec,
             compactions,
             compute: compute.computeModule,
             config,
@@ -837,6 +841,9 @@ export async function startHappyAgentRuntime(
             happy,
             installation,
             menuBar,
+            // Codex code mode nests the finished ordinary surface inside `exec`, so it follows every
+            // contribution and precedes only the complete replacement below.
+            codexExec,
             // Complete replacement modules must remain last so their overrides see and replace
             // every ordinary contribution and every earlier override.
             codeMode,

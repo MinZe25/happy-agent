@@ -8,7 +8,7 @@ import { assembleComputeTools } from "../../sources/compute/tools/assembleComput
 import { assembleReviewerTools } from "../../sources/compute/tools/assembleReviewerTools.js";
 
 const sourcesRoot = join(dirname(fileURLToPath(import.meta.url)), "../../sources");
-const eagerDirectories = ["codeMode", "compute", "userInput"];
+const eagerDirectories = ["codeMode", "codexExec", "compute", "userInput"];
 /** Feature tools both native harnesses expose eagerly: Agent/spawn_agent and SendMessage/send_message. */
 const eagerFiles = ["collaboration/tools/create_agent.ts", "collaboration/tools/send_message.ts"];
 
