@@ -179,6 +179,14 @@ from every included commit since the previous release of that channel. Write a p
 user-facing Markdown summary rather than pasting commit subjects or a raw changelog. Monitor to
 completion and verify the resulting GitHub Release and its assets before reporting success.
 
+Before choosing production and again before dispatching it, verify that the user explicitly
+requested a production or stable Agent release in the current task. Generic release or ship
+requests mean preview; push permission does not authorize production. Do not ask again when
+production was already explicitly requested. Use the
+candidate ourselves in the affected workflows for at least a brief soak before production. Tests
+and CI alone are not a soak. If it has not been used, keep it in preview and explain what remains
+to be tried; a fixed duration or published preview tag is not required.
+
 When the user explicitly names another product or library but does not name a version:
 
 - Release libraries as the next patch version.

@@ -24,6 +24,16 @@ product before reporting completion.
 An unqualified "release" means **a Happy Agent preview**. Production must be explicit.
 Neither means a library unless that library is named.
 
+Before choosing production, check that the user explicitly requested a production or stable
+release for this product in the current task. A request to "release", "ship", or push is not
+production authorization; default to preview. An existing explicit request is sufficient:
+do not ask for redundant confirmation.
+
+Use the candidate ourselves in the affected workflows for at least a brief soak before releasing
+it to production. Passing tests or CI alone does not count as that use. If the candidate has not
+been used, keep it in preview and explain what still needs to be tried. No fixed soak duration or
+previously published preview is required.
+
 | Request              | Product      | Version                              |
 | -------------------- | ------------ | ------------------------------------ |
 | "release"            | Happy Agent  | next patch followed by `-preview.N`  |
@@ -124,7 +134,8 @@ gh workflow run release-happy-agent.yml --ref main \
 `-f` is a literal string; `-F` reads a file only when the value begins with `@`. For short
 single-line values `-f` is fine.
 
-For production, supply the stable version and `-F prerelease=false`.
+Immediately before a production dispatch, verify both the explicit user request for this product
+and our actual use of this candidate. Only then supply the stable version and `-F prerelease=false`.
 CI builds, tests, signs, and publishes the same artifacts within one workflow run.
 Do not introduce a separate prepare/publish dispatch or bump commit between those jobs.
 Source verification and platform builds overlap after release-input validation;
