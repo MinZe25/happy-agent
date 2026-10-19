@@ -26,12 +26,7 @@ import { outsideAgentDatabaseOperation } from "./AgentDatabaseConnection.js";
 import type { AgentKV } from "./AgentKV.js";
 import type { AgentPersistence } from "./AgentPersistence.js";
 import { baseContextMessages, storedContextToolIds } from "./AgentProviderContext.js";
-import {
-    agentConfigSchema,
-    ownAgentConfig,
-    withAgentConfig,
-    type AgentConfig,
-} from "./AgentConfig.js";
+import { isAgentConfig, ownAgentConfig, withAgentConfig, type AgentConfig } from "./AgentConfig.js";
 import type {
     AgentModule,
     AgentModuleAgentLifecycle,
@@ -428,7 +423,7 @@ export class AgentSystemLocal<
                 await this.#waitForTransition(ctx, agentId);
             }
             this.#assertNotDeletedInTransaction(ctx, agentId);
-            if (!Value.Check(agentConfigSchema, config)) {
+            if (!isAgentConfig(config)) {
                 throw new Error(`The configuration for agent "${agentId}" is not valid.`);
             }
             const parent =
@@ -619,7 +614,7 @@ export class AgentSystemLocal<
         if (indexed === undefined) return undefined;
         const local = await this.#persistenceFor(agentId).readValues(ctx, "agentConfig");
         const stored = local.find(({ key }) => key === "agentConfig")?.value ?? indexed;
-        if (!Value.Check(agentConfigSchema, stored)) {
+        if (!isAgentConfig(stored)) {
             throw new Error(`The stored configuration of agent "${agentId}" is not valid.`);
         }
         return ownAgentConfig(stored);

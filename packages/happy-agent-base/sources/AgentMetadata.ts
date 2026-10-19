@@ -1,4 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
+import { TypeCompiler, type TypeCheck } from "@sinclair/typebox/compiler";
 import { Value } from "@sinclair/typebox/value";
 
 /** A cuid2 identity: two to thirty-two lowercase alphanumeric characters, opening with a letter. */
@@ -77,7 +78,7 @@ export function ownAgentMessageMetadata(
 /** @internal Validate, clone, and deeply freeze agent metadata at its ownership boundary. */
 export function ownAgentMetadata(metadata: AgentMetadata | undefined): AgentMetadata | undefined {
     if (metadata === undefined) return undefined;
-    if (!Value.Check(agentMetadataSchema, metadata)) {
+    if (!agentMetadataCheck().Check(metadata)) {
         throw new Error("The agent metadata is not valid.");
     }
     return immutableClone(metadata);
@@ -99,4 +100,15 @@ function deepFreeze<Value>(value: Value, seen: WeakSet<object>): Value {
         }
     }
     return Object.freeze(value);
+}
+
+let compiledAgentMetadata: TypeCheck<typeof agentMetadataSchema> | undefined;
+
+/**
+ * The metadata check, compiled on first use. Every configuration read validates its metadata, and
+ * interpreting the schema each time cost more than reading the row it came from.
+ */
+function agentMetadataCheck(): TypeCheck<typeof agentMetadataSchema> {
+    compiledAgentMetadata ??= TypeCompiler.Compile(agentMetadataSchema);
+    return compiledAgentMetadata;
 }

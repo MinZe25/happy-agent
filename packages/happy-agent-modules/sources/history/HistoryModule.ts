@@ -980,20 +980,20 @@ export class HistoryModule implements AgentModule {
         if (!Value.Check(historyAgentIdSchema, agentId)) {
             throw new Error("The history module received an invalid running-run lookup.");
         }
-        return await this.#direct(ctx, async (txCtx) => {
-            const rows = await agentDatabaseRows<HistoryRunRow>(
-                txCtx.db,
-                sql`SELECT agent_id, sequence, run_id, status, reason, started_at, ended_at
-                    FROM ${sql.raw(HISTORY_RUNS_TABLE)}
-                    WHERE agent_id = ${agentId} AND status = 'running'
-                    ORDER BY sequence DESC
-                    LIMIT 2`,
-            );
-            if (rows.length > 1) {
-                throw new Error("The history module found multiple running runs for one agent.");
-            }
-            return rows[0] === undefined ? undefined : runStateFromRow(rows[0]);
-        });
+        // One statement needs no transaction of its own: it reads inside the caller's when there
+        // is one, and otherwise waits its turn behind any that is open, as a transaction would.
+        const rows = await agentDatabaseRows<HistoryRunRow>(
+            ctx.db,
+            sql`SELECT agent_id, sequence, run_id, status, reason, started_at, ended_at
+                FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+                WHERE agent_id = ${agentId} AND status = 'running'
+                ORDER BY sequence DESC
+                LIMIT 2`,
+        );
+        if (rows.length > 1) {
+            throw new Error("The history module found multiple running runs for one agent.");
+        }
+        return rows[0] === undefined ? undefined : runStateFromRow(rows[0]);
     }
 
     /** Read the run immediately preceding one exact run in the agent's durable sequence. */

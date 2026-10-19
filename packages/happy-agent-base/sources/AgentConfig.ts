@@ -1,7 +1,7 @@
 import { release } from "node:os";
 
 import { Type, type Static } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import { TypeCompiler, type TypeCheck } from "@sinclair/typebox/compiler";
 import { createContextNamespace, type Context } from "@steve.kite/stdlib";
 
 import {
@@ -94,9 +94,21 @@ export const agentConfigSchema = Type.Object({
 /** The TypeScript type inferred from {@link agentConfigSchema}. */
 export type AgentConfig = Static<typeof agentConfigSchema>;
 
+let compiledAgentConfig: TypeCheck<typeof agentConfigSchema> | undefined;
+
+/**
+ * @internal Whether a value is a valid agent configuration. The schema is compiled on first use:
+ * every configuration read validates what it read, and interpreting the schema each time cost
+ * more than reading the row.
+ */
+export function isAgentConfig(value: unknown): value is AgentConfig {
+    compiledAgentConfig ??= TypeCompiler.Compile(agentConfigSchema);
+    return compiledAgentConfig.Check(value);
+}
+
 /** @internal Validate and own one configuration while deeply freezing its metadata. */
 export function ownAgentConfig(config: AgentConfig): AgentConfig {
-    if (!Value.Check(agentConfigSchema, config)) {
+    if (!isAgentConfig(config)) {
         throw new Error("The agent configuration is not valid.");
     }
     const cloned = structuredClone(config);
