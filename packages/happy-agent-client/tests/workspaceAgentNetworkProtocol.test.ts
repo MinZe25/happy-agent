@@ -1,0 +1,42 @@
+import { Value } from "@sinclair/typebox/value";
+import { describe, expect, it } from "vitest";
+
+import { HappyAgentClient, workspaceAgentNetworkResponseSchema } from "../sources/index.js";
+
+describe("agent networks", () => {
+    it("reads an agent's network beneath its workspace and opens a network's proxy", async () => {
+        const requests: Request[] = [];
+        const client = new HappyAgentClient({
+            endpoint: "http://daemon/prefix?transport=key",
+            token: "daemon-credential",
+            fetch: async (input, init) => {
+                requests.push(new Request(input, init));
+                return Response.json({ networkId: "host" });
+            },
+        });
+
+        expect(await client.getWorkspaceAgentNetwork("workspace1", "agent1")).toEqual({
+            networkId: "host",
+        });
+        const [read] = requests;
+        expect(read?.method).toBe("GET");
+        expect(new URL(read!.url).pathname).toBe(
+            "/prefix/v0/workspaces/workspace1/agents/agent1/proxy",
+        );
+        expect(read?.headers.get("authorization")).toBe("Bearer daemon-credential");
+
+        const network = new URL(client.networkProxyUrl("r-build-box"));
+        expect(network.pathname).toBe("/prefix/v0/networks/r-build-box/proxy");
+        expect(network.searchParams.get("transport")).toBe("key");
+        expect(new URL(client.connection("build-box").networkProxyUrl("host")).pathname).toBe(
+            "/prefix/v0/connections/build-box/api/v0/networks/host/proxy",
+        );
+    });
+
+    it("bounds a network identifier to the specified opaque form", () => {
+        for (const networkId of ["host", "r-build_box", "c-a1b2-0f9e", "a".repeat(128)])
+            expect(Value.Check(workspaceAgentNetworkResponseSchema, { networkId })).toBe(true);
+        for (const networkId of ["", "-host", "Host", "a/b", "a".repeat(129), "a b"])
+            expect(Value.Check(workspaceAgentNetworkResponseSchema, { networkId })).toBe(false);
+    });
+});

@@ -88,6 +88,13 @@ export type WorkspaceListResponse = Static<typeof workspaceListResponseSchema>;
 export const workspaceResponseSchema = Type.Object({ workspace: workspaceSchema });
 export type WorkspaceResponse = Static<typeof workspaceResponseSchema>;
 
+/** Names the network an agent's connections leave from; opaque, compared only for equality. */
+export const networkIdSchema = Type.String({ pattern: "^[a-z0-9][a-z0-9_-]{0,127}$" });
+
+/** `GET /v0/workspaces/:workspaceId/agents/:agentId/proxy`, protocol 28 or newer. */
+export const workspaceAgentNetworkResponseSchema = Type.Object({ networkId: networkIdSchema });
+export type WorkspaceAgentNetworkResponse = Static<typeof workspaceAgentNetworkResponseSchema>;
+
 /** `GET /v0/workspaces` query parameters. */
 export const listWorkspacesQuerySchema = Type.Object({
     /** Archived and archiving workspaces are history; default `false`. */

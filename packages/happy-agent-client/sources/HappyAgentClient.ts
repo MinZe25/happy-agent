@@ -248,6 +248,7 @@ import type {
     ListWorkspacesQuery,
     RenameWorkspaceRequest,
     ReorderWorkspaceRequest,
+    WorkspaceAgentNetworkResponse,
     WorkspaceListResponse,
     WorkspaceResponse,
 } from "./protocol/workspaces.js";
@@ -2271,6 +2272,30 @@ export class HappyAgentClient {
             this.#endpoint,
             `v0/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/proxy`,
         );
+    }
+
+    /**
+     * `GET /v0/workspaces/:workspaceId/agents/:agentId/proxy` — the network that agent's
+     * connections leave from. Protocol 28 or newer; an older daemon answers `404`.
+     */
+    async getWorkspaceAgentNetwork(
+        workspaceId: Cuid2,
+        agentId: Cuid2,
+        options: RequestOptions = {},
+    ): Promise<WorkspaceAgentNetworkResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/proxy`,
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * The URL of `CONNECT /v0/networks/:networkId/proxy`: the same tunnel, opened in the network
+     * that `getWorkspaceAgentNetwork` named.
+     */
+    networkProxyUrl(networkId: string): string {
+        return endpointUrl(this.#endpoint, `v0/networks/${encodeURIComponent(networkId)}/proxy`);
     }
 
     // Sandboxed workspace services: creation belongs to the agent's service_start tool.

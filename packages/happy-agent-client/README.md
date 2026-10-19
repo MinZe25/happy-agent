@@ -321,7 +321,15 @@ and `WorkspacePortBridgeClientMessage` define the port bridge's JSON control mes
 Forwarding a local port into a workspace uses `workspaceProxyUrl()` with a nested `CONNECT`. All of
 these work through `client.connection(id)`.
 
-`HAPPY_AGENT_PROTOCOL_VERSION` is 26; `HAPPY_AGENT_MIN_PROTOCOL_VERSION` is 22. The range
+`workspaceAgentProxyUrl(workspaceId, agentId)` opens the same tunnel in one agent's network. On
+protocol 28 or newer, `getWorkspaceAgentNetwork(workspaceId, agentId)` answers `{ networkId }`, the
+network that agent's connections leave from, and `networkProxyUrl(networkId)` opens a tunnel in it.
+Agents on this computer share one `networkId`, agents on one runner share that runner's, and an
+agent in a container has its own, so a browser keeps one profile per `networkId`. Treat the ID as
+opaque. A `404` from the network's `CONNECT` means it is not served right now: read the agent's
+network again and use what it returns.
+
+`HAPPY_AGENT_PROTOCOL_VERSION` is 28; `HAPPY_AGENT_MIN_PROTOCOL_VERSION` is 22. The range
 is additive, so clients should not require exact protocol equality for existing features.
 Creating a bot without `name` requires a daemon advertising protocol 24 or newer. With
 an older compatible daemon, supply a deliberate name or leave unnamed creation unavailable.

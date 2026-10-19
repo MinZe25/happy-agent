@@ -17,9 +17,10 @@ import {
  * across that range; unnamed bot creation requires protocol 24 or newer, and
  * client-chosen bot workspace and agent identities require protocol 25 or newer, and
  * runners require protocol 26 or newer, and the mobile connector requires protocol 27
- * or newer. Global skill management is additive and detected through its catalog endpoint.
+ * or newer, and agent networks require protocol 28 or newer. Global skill management is
+ * additive and detected through its catalog endpoint.
  */
-export const HAPPY_AGENT_PROTOCOL_VERSION = 27;
+export const HAPPY_AGENT_PROTOCOL_VERSION = 28;
 
 /** The oldest additive protocol supported for existing capabilities. */
 export const HAPPY_AGENT_MIN_PROTOCOL_VERSION = 22;
