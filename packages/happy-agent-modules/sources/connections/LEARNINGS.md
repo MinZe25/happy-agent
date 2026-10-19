@@ -20,6 +20,15 @@ its own carrier stream immediately, with no count limit, no queue, and no idle-s
 idle timeout. Per-request deadlines, response bounds on health checks, and stream backpressure
 remain.
 
+## Tunnels and upgrades never reuse a pooled connection
+
+A browser tab on a remote agent failed with `ERR_TUNNEL_CONNECTION_FAILED` once the connection had
+answered any ordinary request. The keep-alive pool handed the `CONNECT` to a socket that had already
+carried a request such as the health check, and the remote's Bun front door routes a connection by
+its first request: that socket belonged to its HTTP server, which never answered the tunnel. Each
+upgrade and `CONNECT` now opens a fresh carrier through a separate non-pooled agent with the same
+transport, while ordinary requests keep sharing the pool.
+
 ## Display order is required, durable public state
 
 Sorting connections by ID prevented user reordering and inserted new connections into the middle

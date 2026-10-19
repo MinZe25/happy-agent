@@ -28,9 +28,14 @@ const HOP_HEADERS = [
  * One reusable HTTP pool. Every request and attachment gets its own carrier stream at once, so a
  * burst never waits behind another request or an open event stream. A failed exchange is never
  * retried by this layer.
+ *
+ * Upgrades and `CONNECT` tunnels always open a fresh carrier of their own. The remote front door
+ * routes a connection by its first request, so a tunnel sent on a pooled connection that already
+ * carried an ordinary request never reaches the tunnel's handler.
  */
 export class RemoteProxyConnection {
     readonly #agent: Agent;
+    readonly #attachments: Agent;
     readonly #active = new Set<AbortController>();
     #closed = false;
 
@@ -41,7 +46,8 @@ export class RemoteProxyConnection {
             keepAlive: true,
             timeout: 30_000,
         });
-        this.#agent.createConnection = (_options, callback) => {
+        this.#attachments = new Agent({ keepAlive: false });
+        const createConnection: Agent["createConnection"] = (_options, callback) => {
             void Promise.resolve()
                 .then(connect)
                 .then(
@@ -55,12 +61,15 @@ export class RemoteProxyConnection {
                 );
             return undefined;
         };
+        this.#agent.createConnection = createConnection;
+        this.#attachments.createConnection = createConnection;
     }
 
     async close(): Promise<void> {
         this.#closed = true;
         for (const controller of this.#active) controller.abort(unavailable());
         this.#agent.destroy();
+        this.#attachments.destroy();
         await this.#closeTransport?.();
     }
 
@@ -196,7 +205,7 @@ export class RemoteProxyConnection {
             }
             await new Promise<void>((resolve, reject) => {
                 const upstream = httpRequest({
-                    agent: this.#agent,
+                    agent: upgraded ? this.#attachments : this.#agent,
                     hostname: "happy-agent.invalid",
                     method: request.method,
                     path,

@@ -360,6 +360,54 @@ describe("remote HTTP proxy", () => {
     });
 
     it.each(["CONNECT", "websocket"])(
+        "opens %s on a connection of its own, never one an earlier request used",
+        async (kind) => {
+            // Like the Bun front door, the remote routes a connection by its first request, so an
+            // attachment that arrives on a connection which already carried a request is lost.
+            const served = new WeakSet<Socket>();
+            const f = await fixture((req, res) => {
+                served.add(req.socket);
+                res.end("ok");
+            });
+            f.remote.on(kind === "CONNECT" ? "connect" : "upgrade", (_req, socket: Socket) => {
+                if (served.has(socket)) {
+                    socket.destroy();
+                    return;
+                }
+                socket.write(
+                    kind === "CONNECT"
+                        ? "HTTP/1.1 200 Connection Established\r\n\r\n"
+                        : "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+                );
+                socket.pipe(socket);
+            });
+            expect(await (await fetch(`${f.url}/v0/health`)).text()).toBe("ok");
+            expect(f.opened()).toBe(1);
+
+            const req = request(f.url + "/v0/workspaces/test/proxy", {
+                method: kind === "CONNECT" ? "CONNECT" : "GET",
+                headers: kind === "CONNECT" ? {} : { connection: "Upgrade", upgrade: "websocket" },
+            });
+            const attached = once(req, kind === "CONNECT" ? "connect" : "upgrade");
+            req.end();
+            const [response, socket] = (await attached) as [IncomingMessage, Socket, Buffer];
+            try {
+                expect(response.statusCode).toBe(kind === "CONNECT" ? 200 : 101);
+                let echoed = "";
+                socket.on("data", (chunk) => (echoed += chunk.toString()));
+                socket.write("through a fresh carrier");
+                await expect.poll(() => echoed).toBe("through a fresh carrier");
+                expect(f.opened()).toBe(2);
+            } finally {
+                socket.destroy();
+            }
+            // Ordinary requests still share the pooled connection.
+            expect(await (await fetch(`${f.url}/v0/health`)).text()).toBe("ok");
+            expect(f.opened()).toBe(2);
+        },
+    );
+
+    it.each(["CONNECT", "websocket"])(
         "forwards %s with initial bytes and bidirectional traffic",
         async (kind) => {
             const f = await fixture((_req, res) => res.end());
