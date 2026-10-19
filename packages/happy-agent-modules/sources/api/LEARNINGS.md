@@ -285,6 +285,16 @@ client's own `Authorization` and `Cookie` pass through and nothing is added. Tun
 end of stream as a half-close and a reset or early close as a close. IPv6 literals reach the
 connector without brackets.
 
+## Agent networks let a browser keep state per network
+
+Browser state kept per agent or workspace either leaked cookies between containers or split one
+machine's sessions. `GET /v0/workspaces/:workspaceId/agents/:agentId/proxy` answers the agent's
+`networkId` from `ComputeModule.networkId`, refused exactly as that agent's `CONNECT` is, and
+`CONNECT /v0/networks/:networkId/proxy` routes through `ComputeModule.namedNetwork`. A malformed,
+unknown, or no-longer-served ID is `404`; the daemon never opens such a tunnel in another network.
+Both proxy routes share `prepareWorkspaceProxySocket`, so the Node and Bun front doors admit them
+the same way. Protocol 28 marks the routes.
+
 ## Artifact files are matched on the request target as sent
 
 `new URL` resolves `..` and `%2e%2e` segments before routing, so matching artifact file paths on

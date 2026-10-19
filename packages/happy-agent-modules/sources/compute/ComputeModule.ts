@@ -14,6 +14,7 @@ import {
 import {
     createDockerCompute,
     createHostCompute,
+    createHostNetwork,
     HOST_SESSION_STOP_GRACE_MS,
     hostComputeProvider,
     killProcessGroup,
@@ -21,6 +22,7 @@ import {
     type Compute,
     type ComputeConnectOptions,
     type ComputeHostPolicy,
+    type ComputeNetwork,
     type HostComputeConfig,
 } from "@slopus/happy-agent-compute";
 import { createId } from "@paralleldrive/cuid2";
@@ -46,6 +48,7 @@ import {
 } from "./ComputeProcess.js";
 import { ComputeProcessRegistry } from "./ComputeProcessRegistry.js";
 import { computeToolVendor, type ComputeToolVendor } from "./ComputeToolVendor.js";
+import { agentNetworkId, HOST_NETWORK_ID, RUNNER_NETWORK_PREFIX } from "./impl/agentNetworkId.js";
 import { computeInstructionsForVendor } from "./impl/computeInstructionsForVendor.js";
 import { computePermissionsForContext } from "./impl/computePermissionsForContext.js";
 import { createAttachedSecretsHostShell } from "./impl/createAttachedSecretsHostShell.js";
@@ -216,11 +219,16 @@ interface CachedCompute {
     closing: boolean;
     readonly cwd: string;
     readonly compute: HostCompute;
+    /** The network this machine was built to leave from; see {@link agentNetworkId}. */
+    readonly networkId: string;
     /** Connections opened from this machine on the product's behalf, ended with the machine. */
     readonly connections: Set<Duplex>;
     readonly processContext: Context;
     readonly processManager: NativeProcessManager | undefined;
 }
+
+/** Opens connections from one network; refuses once that network is no longer served. */
+export type ComputeConnector = (ctx: Context, options: ComputeConnectOptions) => Promise<Duplex>;
 
 /** Running work visible at the instant an agent subtree is aborted. */
 export interface ComputeAbortSnapshot {
@@ -381,6 +389,7 @@ export class ComputeModule implements AgentModule {
                     closing: false,
                     cwd: config.cwd,
                     compute,
+                    networkId: agentNetworkId(agentId, effective),
                     connections: new Set(),
                     processContext: created.processContext,
                     processManager: created.processManager,
@@ -401,26 +410,85 @@ export class ComputeModule implements AgentModule {
      * that exact machine and is ended when the agent is archived or this module is disposed. Once
      * the machine is gone, the function refuses instead of starting another one.
      */
-    async network(
-        ctx: Context,
-        agentId: string,
-    ): Promise<(ctx: Context, options: ComputeConnectOptions) => Promise<Duplex>> {
+    async network(ctx: Context, agentId: string): Promise<ComputeConnector> {
         const compute = await this.resolve(ctx, agentId);
-        if (compute?.network === undefined) {
-            throw Object.assign(
-                new Error("This agent's machine cannot open network connections."),
-                {
-                    code: "ENOTSUP",
-                },
-            );
+        if (compute?.network === undefined) throw machineWithoutNetwork();
+        return this.#connector(agentId, compute, compute.network);
+    }
+
+    /**
+     * The network one agent's machine leaves from, so a browser can keep its state per network.
+     *
+     * The context must carry the agent's configuration, as for {@link resolve}; the machine is
+     * resolved now. The name comes from the machine actually built, not the current settings: every
+     * agent on this computer shares one, every agent on a runner shares the runner's, and an agent
+     * in a container has one of its own that changes only when its container's environment does.
+     */
+    async networkId(ctx: Context, agentId: string): Promise<string> {
+        const compute = await this.resolve(ctx, agentId);
+        if (compute?.network === undefined) throw machineWithoutNetwork();
+        const cached = this.#computes.get(agentId);
+        if (cached === undefined || cached.compute !== compute || cached.closing) {
+            throw machineStopped();
         }
-        const network = compute.network;
+        return cached.networkId;
+    }
+
+    /**
+     * Open connections in the network a {@link networkId} names, or `undefined` when it is not
+     * served now.
+     *
+     * This computer's and a runner's networks belong to the machine, not to any agent: they are
+     * served while work runs there, whichever agents have come and gone. A container's network is
+     * served only while the agent's machine that named it is running, and its connections end with
+     * that machine. Nothing here starts a machine or falls back to another network.
+     */
+    async namedNetwork(networkId: string): Promise<ComputeConnector | undefined> {
+        if (this.#closed) return undefined;
+        if (networkId === HOST_NETWORK_ID) {
+            if (this.#runners?.enabled === true) return undefined;
+            return await this.#machineNetwork(undefined);
+        }
+        if (networkId.startsWith(RUNNER_NETWORK_PREFIX)) {
+            const runnerId = networkId.slice(RUNNER_NETWORK_PREFIX.length);
+            if (this.#runners?.has(runnerId) !== true) return undefined;
+            return await this.#machineNetwork(runnerId);
+        }
+        for (const [agentId, cached] of this.#computes) {
+            if (cached.networkId !== networkId || cached.closing) continue;
+            if (cached.compute.network === undefined) throw machineWithoutNetwork();
+            return this.#connector(agentId, cached.compute, cached.compute.network);
+        }
+        return undefined;
+    }
+
+    /**
+     * Connections from this computer or a runner, asked of its product machine on every connection
+     * since a runner may have reconnected. The machine is checked now, so a runner that is away is
+     * refused here instead of on every connection.
+     */
+    async #machineNetwork(runnerId: string | undefined): Promise<ComputeConnector> {
+        const runners = this.#runners;
+        if (runners === undefined) {
+            const network = createHostNetwork();
+            return async (connectCtx, options) => await network.connect(connectCtx, options);
+        }
+        const reachable = async (): Promise<ComputeNetwork> => {
+            const network = (await runners.machine(runnerId)).network;
+            if (network === undefined) throw machineWithoutNetwork();
+            return network;
+        };
+        await reachable();
+        return async (connectCtx, options) =>
+            await (await reachable()).connect(connectCtx, options);
+    }
+
+    /** Connections from one agent's exact machine, ended with it and refused once it is gone. */
+    #connector(agentId: string, compute: HostCompute, network: ComputeNetwork): ComputeConnector {
         const current = (): CachedCompute => {
             const cached = this.#computes.get(agentId);
             if (cached === undefined || cached.compute !== compute || cached.closing) {
-                throw Object.assign(new Error("This agent's machine has stopped."), {
-                    code: "ECONNREFUSED",
-                });
+                throw machineStopped();
             }
             return cached;
         };
@@ -1151,6 +1219,18 @@ function vendorFor(scope: AgentModuleScope): ComputeToolVendor {
 function endConnections(cached: CachedCompute): void {
     for (const connection of cached.connections) connection.destroy();
     cached.connections.clear();
+}
+
+function machineWithoutNetwork(): Error {
+    return Object.assign(new Error("This agent's machine cannot open network connections."), {
+        code: "ENOTSUP",
+    });
+}
+
+function machineStopped(): Error {
+    return Object.assign(new Error("This agent's machine has stopped."), {
+        code: "ECONNREFUSED",
+    });
 }
 
 function runtimeCompute(compute: Compute): unknown {

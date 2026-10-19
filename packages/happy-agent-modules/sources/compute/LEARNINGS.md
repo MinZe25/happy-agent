@@ -56,6 +56,23 @@ them when the agent is archived or the module is disposed, whatever kind of mach
 connector refuses once its machine is gone instead of starting another. A machine without a
 network is refused with `ENOTSUP`; nothing falls back to the daemon's own network.
 
+## Agent networks are named from the machine that was built
+
+A browser keeps its cookies and storage per network, so the name must change exactly when the
+network does. `networkId` is recorded on the cached machine when `resolve` builds it, from the
+environment actually used after the bot's compute choice: `host` for this computer (including work
+run as another Linux user), `r-<runnerId>` for a runner, and for a container `c-` and a digest of
+the agent, image, and runner. A running machine is never moved, so a newer setting renames nothing
+until the machine is rebuilt; a rebuilt container in the same environment keeps its name.
+
+`namedNetwork` serves only what is true now and never starts a machine. `host` is served while
+work runs here and `r-<id>` while that runner is configured, through the runners module's product
+machine, and neither belongs to an agent: archiving the agent that first named one leaves its
+tunnels open. A container's name is served only by its agent's cached, running machine, with the
+same tracked connector as `network`, so archival ends its connections. An unknown or stale name is
+`undefined`, never another network; after a restart a container's name is unserved until its
+machine is resolved again.
+
 ## File mutations can explicitly request reviewed elevation
 
 Patch, write, and edit tools previously inferred elevation only from their target paths, so a model

@@ -72,6 +72,7 @@ import {
     updateArtifactRequestSchema,
     providerVerificationRequestSchema,
     userIdsSchema,
+    networkIdSchema,
     skillPageQuerySchema,
     updateGlobalSkillRequestSchema,
     type ArtifactFileInput as ArtifactRequestFile,
@@ -339,7 +340,7 @@ import {
 } from "./projectCredentialDiagnostics.js";
 import { SubtaskInputError, SubtasksModule } from "../subtasks/index.js";
 
-const API_PROTOCOL_VERSION = 27;
+const API_PROTOCOL_VERSION = 28;
 
 /**
  * How many archived agents the desktop bootstrap carries. Recent history is what the desktop
@@ -2238,6 +2239,9 @@ export class ApiModule implements AgentModule {
         pathname: string,
         authorization: string | string[] | undefined,
     ): Promise<PreparedWorkspaceProxySocket> {
+        const network = /^\/v0\/networks\/([^/]*)\/proxy$/.exec(pathname);
+        if (network !== null)
+            return await this.#prepareNetworkProxy(ctx, network[1]!, authorization);
         const match =
             /^\/v0\/workspaces\/([a-z][a-z0-9]*)(?:\/services\/([a-z][a-z0-9]*)|\/agents\/([a-z][a-z0-9]*))?\/proxy$/.exec(
                 pathname,
@@ -2277,28 +2281,85 @@ export class ApiModule implements AgentModule {
     }
 
     /**
+     * A route through the network a `networkId` names. Only a network served right now is opened;
+     * an unknown or stale one is `404`, never another network.
+     */
+    async #prepareNetworkProxy(
+        ctx: Context,
+        networkId: string,
+        authorization: string | string[] | undefined,
+    ): Promise<PreparedWorkspaceProxySocket> {
+        try {
+            ctx = await this.#authenticate(ctx, authorization);
+            this.#assertTeamUser(ctx);
+            this.#assertSocketReady();
+            if (!Value.Check(networkIdSchema, networkId))
+                throw notFound("The network was not found.");
+            const connect = await this.#machineNetwork(() => this.#compute.namedNetwork(networkId));
+            if (connect === undefined) throw notFound("The network was not found.");
+            // Connections outlive the request that opened the attachment.
+            const connectCtx = detach(ctx).named("network-proxy-connections");
+            const route = this.#workspaceProxy.route(
+                async (host, port) => await connect(connectCtx, { host, port }),
+            );
+            const revoked = mobileDevice(ctx)?.revoked;
+            return { handled: true, route, ...(revoked === undefined ? {} : { revoked }) };
+        } catch (error: unknown) {
+            return {
+                handled: true,
+                rejection: this.#socketRejection(ctx, error, "The network was not found."),
+            };
+        }
+    }
+
+    /**
      * A route through one agent's own machine. The agent must belong to this workspace; every
      * connection is then opened from its machine and nowhere else.
      */
     async #agentProxyRoute(ctx: Context, workspaceId: string, agentId: string): Promise<string> {
+        const agentCtx = await this.#proxiedAgent(ctx, workspaceId, agentId);
+        // Connections outlive the request that opened the attachment.
+        const connectCtx = detach(ctx).named("workspace-agent-proxy-connections");
+        const connect = await this.#machineNetwork(() => this.#compute.network(agentCtx, agentId));
+        return this.#workspaceProxy.route(
+            async (host, port) => await connect(connectCtx, { host, port }),
+        );
+    }
+
+    /** `GET /v0/workspaces/:workspaceId/agents/:agentId/proxy`, refused as its `CONNECT` is. */
+    async #agentNetwork(
+        ctx: Context,
+        workspaceId: string,
+        agentId: string,
+    ): Promise<{ readonly networkId: string }> {
+        this.#assertSocketReady();
+        await this.#resolveWorkspaceScope(ctx, workspaceId);
+        const agentCtx = await this.#proxiedAgent(ctx, workspaceId, agentId);
+        const networkId = await this.#machineNetwork(() =>
+            this.#compute.networkId(agentCtx, agentId),
+        );
+        return { networkId };
+    }
+
+    /** The agent's own context, once it is known to belong to this workspace and is not archived. */
+    async #proxiedAgent(ctx: Context, workspaceId: string, agentId: string): Promise<Context> {
         const config = await this.#agentSystem().config(ctx, agentId);
         if (config === undefined || (await this.#workspaceIdForAgent(ctx, agentId)) !== workspaceId)
             throw notFound("The agent was not found.");
         if (typeof config.metadata?.["archivedAt"] === "number")
             throw new ApiError(409, "conflict", "The agent is archived.");
-        // Connections outlive the request that opened the attachment.
-        const connectCtx = detach(ctx).named("workspace-agent-proxy-connections");
-        let connect;
+        return withAgentConfig(ctx, config);
+    }
+
+    /** Ask Compute about a machine's network, refusing one that cannot open connections. */
+    async #machineNetwork<Result>(ask: () => Promise<Result>): Promise<Result> {
         try {
-            connect = await this.#compute.network(withAgentConfig(ctx, config), agentId);
+            return await ask();
         } catch (error: unknown) {
             if ((error as { code?: unknown } | null)?.code === "ENOTSUP")
                 throw unsupported("This agent's machine cannot open network connections.");
             throw error;
         }
-        return this.#workspaceProxy.route(
-            async (host, port) => await connect(connectCtx, { host, port }),
-        );
     }
 
     /**
@@ -6931,6 +6992,19 @@ export class ApiModule implements AgentModule {
         response: ServerResponse,
         url: URL,
     ): Promise<boolean> {
+        const agentProxy =
+            /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/agents\/([a-z][a-z0-9]*)\/proxy$/.exec(
+                url.pathname,
+            );
+        if (agentProxy !== null) {
+            if (request.method !== "GET") return false;
+            sendJson(
+                response,
+                200,
+                await this.#agentNetwork(ctx, agentProxy[1] as string, agentProxy[2] as string),
+            );
+            return true;
+        }
         const terminals = /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/terminals$/.exec(url.pathname);
         if (terminals !== null) {
             const workspaceId = terminals[1] as string;
