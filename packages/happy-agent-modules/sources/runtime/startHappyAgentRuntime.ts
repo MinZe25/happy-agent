@@ -374,6 +374,7 @@ export async function startHappyAgentRuntime(
                 "cloud",
                 "happy",
                 "projects-and-workspaces",
+                "slash-commands",
                 "terminals",
                 "titles",
             ]);

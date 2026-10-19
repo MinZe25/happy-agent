@@ -88,12 +88,13 @@ export class SlashCommandsModule implements AgentModule {
     }
 
     async image(
-        _ctx: Context,
+        ctx: Context,
         agentId: string,
         name: string,
     ): Promise<SlashCommandImageAsset | undefined> {
-        const cached = this.#cache.get(agentId);
-        if (cached === undefined) return undefined;
+        // A catalog loaded in this process is served as cached. One not loaded yet, such as a
+        // restored agent still waiting its turn, is loaded now, as its restore would have.
+        const cached = this.#cache.get(agentId) ?? (await this.refresh(ctx, agentId));
         const image = cached.commands.find((command) => command.descriptor.name === name)?.image;
         return image === undefined ? undefined : { ...image, blob: new Uint8Array(image.blob) };
     }

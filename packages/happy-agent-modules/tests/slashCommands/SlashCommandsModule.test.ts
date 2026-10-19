@@ -220,6 +220,33 @@ describe("SlashCommandsModule", () => {
         }
     });
 
+    it("loads a catalog nothing has loaded yet when its command image is asked for", async () => {
+        const events = new EventsModule();
+        const database = moduleDatabase(slashMigrations(events), "slash-command-early-image-test");
+        await database.ready;
+        try {
+            await events.beforeStart?.(database.context);
+            const owner = new Contributor("feature", [
+                {
+                    description: "Review.",
+                    hasArguments: true,
+                    image: { blob: new Uint8Array([7]), mediaType: "image/png", thumbhash: "t" },
+                    name: "review",
+                },
+            ]);
+            const commands = new SlashCommandsModule(events, owner);
+            await commands.beforeStart?.(database.context, agents);
+
+            const image = await commands.image(database.context, "agent-1", "review");
+            expect([...(image?.blob ?? [])]).toEqual([7]);
+            await expect(commands.image(database.context, "agent-1", "missing")).resolves.toBe(
+                undefined,
+            );
+        } finally {
+            database.close();
+        }
+    });
+
     it("rejects duplicate names, unknown commands, and arguments on argument-free commands", async () => {
         const events = new EventsModule();
         const database = moduleDatabase(slashMigrations(events), "slash-command-errors-test");
