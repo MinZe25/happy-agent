@@ -21,6 +21,7 @@ import {
     textTurn,
     user,
 } from "./gym/fixtures.js";
+import { ownAgentConfig } from "../sources/AgentConfig.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 
@@ -287,6 +288,19 @@ describe("message metadata and identity", () => {
 });
 
 describe("agent metadata, custom identity, and parentage", () => {
+    it("freezes an owned configuration's metadata without freezing module settings it shares", () => {
+        const shared = { value: 1 };
+        const owned = ownAgentConfig({
+            metadata: { title: "Shared", shared },
+            modules: { demo: { shared } },
+        });
+        expect(Object.isFrozen(owned.metadata?.["shared"])).toBe(true);
+        const settings = owned.modules?.["demo"] as { shared: { value: number } };
+        settings.shared.value = 2;
+        expect(settings.shared.value).toBe(2);
+        expect(owned.metadata?.["shared"]).toEqual({ value: 1 });
+    });
+
     it("updates metadata directly through AgentBase with transactional notifications", async () => {
         const persistence = new InMemoryPersistence();
         const observed: unknown[] = [];

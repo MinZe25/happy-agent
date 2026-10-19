@@ -7,7 +7,7 @@ import { createContextNamespace, type Context } from "@steve.kite/stdlib";
 import {
     agentMetadataSchema,
     cuid2Schema,
-    freezeOwnedAgentMetadata,
+    immutableAgentMetadata,
     type AgentMetadata,
 } from "./AgentMetadata.js";
 
@@ -112,11 +112,12 @@ export function ownAgentConfig(config: AgentConfig): AgentConfig {
         throw new Error("The agent configuration is not valid.");
     }
     const cloned = structuredClone(config);
-    // The clone is already this configuration's own and the check covered its metadata, so the
-    // metadata needs freezing only, not a second check and copy.
+    // The check above covered the metadata, so it is not checked again. It is still copied apart
+    // before freezing: the configuration may share objects between metadata and module settings,
+    // and only the metadata's are frozen.
     return cloned.metadata === undefined
         ? cloned
-        : { ...cloned, metadata: freezeOwnedAgentMetadata(cloned.metadata) };
+        : { ...cloned, metadata: immutableAgentMetadata(cloned.metadata) };
 }
 
 /**
