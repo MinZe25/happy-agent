@@ -312,7 +312,7 @@ describe("SlashCommandsModule", () => {
         }
     });
 
-    it("loads restored catalogs a few at a time without holding the restore", async () => {
+    it("loads restored catalogs a few at a time once every agent has started", async () => {
         const events = new EventsModule();
         const database = moduleDatabase(slashMigrations(events), "slash-command-restore-test");
         ensureAgentDatabaseConnection(database.database);
@@ -346,6 +346,10 @@ describe("SlashCommandsModule", () => {
                     undefined,
                 );
             }
+            // Nothing loads beside the rest of the restore.
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            expect(scanned).toEqual([]);
+            await hooks?.afterStart?.(database.context, agents);
             await vi.waitFor(() => expect(scanned).toHaveLength(4));
             // A read of an agent still waiting its turn loads the catalog itself.
             const read = commands.catalog(database.context, "agent-6");

@@ -76,6 +76,8 @@ export class SlashCommandsModule implements AgentModule {
     readonly #restoreLoaders = new Set<Promise<void>>();
     #agents: AgentSystemRef | undefined;
     #closed = false;
+    /** Whether every restored agent has started, so loading their catalogs no longer competes. */
+    #started = false;
 
     constructor(events: EventsModule, ...contributors: SlashCommandContributor[]) {
         this.#events = events;
@@ -152,6 +154,10 @@ export class SlashCommandsModule implements AgentModule {
             agentRestored: (ctx, _scope, agent) => {
                 this.#restoreLoad(ctx, agent.id);
             },
+            afterStart: () => {
+                this.#started = true;
+                this.#startRestoreLoaders();
+            },
             beforeTurn: async (ctx, scope) => {
                 await this.refresh(ctx, scope.agent.id);
                 return undefined;
@@ -172,14 +178,27 @@ export class SlashCommandsModule implements AgentModule {
      * Restoring every agent at startup would otherwise keep the daemon from serving until
      * hundreds of catalogs were discovered. A catalog read, an invocation, and a turn each load
      * the catalog themselves when it is not there yet, so none of them sees less than before.
-     * A few loads run at a time, so requests arriving meanwhile are not queued behind them.
+     * A few loads run at a time, so requests arriving meanwhile are not queued behind them, and
+     * none starts until every restored agent has: the restart waits for the other restoration
+     * observers, and loads running beside them only made that wait longer.
      */
     #restoreLoad(ctx: Context, agentId: string): void {
         if (this.#closed) return;
         this.#restoreQueue.push({ agentId, ctx: withAgentDatabase(detach(ctx), ctx.db) });
-        if (this.#restoreLoaders.size >= RESTORE_LOAD_CONCURRENCY) return;
-        const loader = this.#restoreLoadNext().finally(() => this.#restoreLoaders.delete(loader));
-        this.#restoreLoaders.add(loader);
+        if (this.#started) this.#startRestoreLoaders();
+    }
+
+    #startRestoreLoaders(): void {
+        while (
+            this.#restoreLoaders.size < RESTORE_LOAD_CONCURRENCY &&
+            this.#restoreQueue.length > 0
+        ) {
+            // Each loader takes its first agent before this loop looks at the queue again.
+            const loader = this.#restoreLoadNext().finally(() =>
+                this.#restoreLoaders.delete(loader),
+            );
+            this.#restoreLoaders.add(loader);
+        }
     }
 
     async #restoreLoadNext(): Promise<void> {
