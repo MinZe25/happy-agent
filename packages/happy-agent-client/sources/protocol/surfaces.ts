@@ -160,6 +160,14 @@ export const createArtifactSurfaceRequestSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+export const createSystemMonitorSurfaceRequestSchema = Type.Object(
+    {
+        ...surfaceCreationFields,
+        image: Type.Optional(surfaceImageInputSchema),
+        type: Type.Literal("system_monitor"),
+    },
+    { additionalProperties: false },
+);
 export const createBotSurfaceRequestSchema = Type.Object(
     {
         ...surfaceCreationFields,
@@ -182,6 +190,7 @@ export const createSurfaceRequestSchema = Type.Union([
     createTodoSurfaceRequestSchema,
     createDocumentSurfaceRequestSchema,
     createCalendarSurfaceRequestSchema,
+    createSystemMonitorSurfaceRequestSchema,
     createArtifactSurfaceRequestSchema,
     createBotSurfaceRequestSchema,
     createTaskSurfaceRequestSchema,
@@ -779,3 +788,107 @@ export type UpdateCalendarEventRequest = Static<typeof updateCalendarEventReques
 /** Delete accepts this optional echo-only body. */
 export const calendarEventMutationRequestSchema = surfaceMemberRequestSchema;
 export type CalendarEventMutationRequest = Static<typeof calendarEventMutationRequestSchema>;
+
+const monitorBytes = Type.Number({ minimum: 0 });
+const monitorPercent = Type.Number({ minimum: 0, maximum: 100 });
+export const systemMonitorGpuSchema = Type.Object({
+    name: Type.String(),
+    vendor: Type.Union([
+        Type.Literal("nvidia"),
+        Type.Literal("amd"),
+        Type.Literal("apple"),
+        Type.Literal("intel"),
+        Type.Literal("other"),
+    ]),
+    usagePercent: Nullable(monitorPercent),
+    memoryTotalBytes: Nullable(monitorBytes),
+    memoryUsedBytes: Nullable(monitorBytes),
+    temperatureCelsius: Nullable(Type.Number()),
+    powerWatts: Nullable(monitorBytes),
+});
+export type SystemMonitorGpu = Static<typeof systemMonitorGpuSchema>;
+export const systemMonitorDiskSchema = Type.Object({
+    mountPoint: Type.String(),
+    device: Type.String(),
+    fileSystem: Nullable(Type.String()),
+    totalBytes: monitorBytes,
+    usedBytes: monitorBytes,
+    availableBytes: monitorBytes,
+});
+export type SystemMonitorDisk = Static<typeof systemMonitorDiskSchema>;
+export const systemMonitorHistoryPointSchema = Type.Object({
+    sampledAt: timestampSchema,
+    cpuPercent: Nullable(monitorPercent),
+    memoryUsedBytes: monitorBytes,
+    gpuPercent: Nullable(monitorPercent),
+    diskReadBytesPerSecond: Nullable(monitorBytes),
+    diskWriteBytesPerSecond: Nullable(monitorBytes),
+});
+export type SystemMonitorHistoryPoint = Static<typeof systemMonitorHistoryPointSchema>;
+/** Process identity and resource usage; command-line arguments and environments are never exposed. */
+export const systemMonitorProcessSchema = Type.Object({
+    pid: Type.Integer({ minimum: 0 }),
+    parentPid: Nullable(Type.Integer({ minimum: 0 })),
+    name: Type.String(),
+    user: Nullable(Type.String()),
+    state: Nullable(
+        Type.Union([
+            Type.Literal("running"),
+            Type.Literal("sleeping"),
+            Type.Literal("stopped"),
+            Type.Literal("zombie"),
+            Type.Literal("idle"),
+            Type.Literal("other"),
+        ]),
+    ),
+    /** Share of the entire machine, not a single core; null before a CPU baseline exists. */
+    cpuPercent: Nullable(monitorPercent),
+    memoryBytes: monitorBytes,
+    threads: Nullable(Type.Integer({ minimum: 0 })),
+    startedAt: Nullable(timestampSchema),
+});
+export type SystemMonitorProcess = Static<typeof systemMonitorProcessSchema>;
+export const systemMonitorProcessesSchema = Type.Object({
+    total: Type.Integer({ minimum: 0 }),
+    threads: Nullable(Type.Integer({ minimum: 0 })),
+    /** Union of the top 50 by CPU and top 50 by resident memory, sorted by CPU descending. */
+    items: Type.Array(systemMonitorProcessSchema, { maxItems: 100 }),
+});
+export type SystemMonitorProcesses = Static<typeof systemMonitorProcessesSchema>;
+/** Ephemeral host telemetry; returned directly, without an envelope or journal cursor. */
+export const systemMonitorSnapshotSchema = Type.Object({
+    sampledAt: timestampSchema,
+    intervalMs: Type.Integer({ minimum: 1 }),
+    host: Type.Object({
+        hostname: Type.String(),
+        platform: Type.String(),
+        arch: Type.String(),
+        osName: Type.String(),
+        uptimeSeconds: monitorBytes,
+    }),
+    cpu: Type.Object({
+        model: Type.String(),
+        logicalCores: Type.Integer({ minimum: 0 }),
+        usagePercent: Nullable(monitorPercent),
+        perCoreUsagePercent: Nullable(Type.Array(monitorPercent)),
+        loadAverage: Nullable(Type.Tuple([monitorBytes, monitorBytes, monitorBytes])),
+        speedMhz: Nullable(monitorBytes),
+        temperatureCelsius: Nullable(Type.Number()),
+    }),
+    memory: Type.Object({
+        totalBytes: monitorBytes,
+        usedBytes: monitorBytes,
+        availableBytes: monitorBytes,
+        cachedBytes: Nullable(monitorBytes),
+        swapTotalBytes: Nullable(monitorBytes),
+        swapUsedBytes: Nullable(monitorBytes),
+    }),
+    gpus: Type.Array(systemMonitorGpuSchema),
+    disks: Type.Array(systemMonitorDiskSchema),
+    diskIo: Nullable(
+        Type.Object({ readBytesPerSecond: monitorBytes, writeBytesPerSecond: monitorBytes }),
+    ),
+    processes: Nullable(systemMonitorProcessesSchema),
+    history: Type.Array(systemMonitorHistoryPointSchema, { maxItems: 300 }),
+});
+export type SystemMonitorSnapshot = Static<typeof systemMonitorSnapshotSchema>;

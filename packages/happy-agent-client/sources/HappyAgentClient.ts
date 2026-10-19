@@ -84,6 +84,7 @@ import type {
     CalendarEventVersionListResponse,
     CalendarEventVersionResponse,
     CalendarRangeResponse,
+    SystemMonitorSnapshot,
     CreateCalendarEventRequest,
     UpdateCalendarEventRequest,
     EnsureSurfaceChatRequest,
@@ -1786,10 +1787,19 @@ export class HappyAgentClient {
         });
     }
 
-    /**
-     * Every occurrence overlapping `[from, to)` with the events it belongs to, expanded by the
-     * daemon. `timeZone` places all-day dates against the instant range.
-     */
+    /** Current daemon-host telemetry, shared by every System Monitor Surface. */
+    async getSystemMonitor(
+        surfaceId: SurfaceId,
+        options: RequestOptions = {},
+    ): Promise<SystemMonitorSnapshot> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/surfaces/system-monitor/${encodeURIComponent(surfaceId)}`,
+            signal: options.signal,
+        });
+    }
+
+    /** Occurrences overlapping `[from, to)`, expanded by the daemon in `timeZone`. */
     async listCalendarEvents(
         surfaceId: SurfaceId,
         range: { readonly from: number; readonly to: number; readonly timeZone: string },
