@@ -75,7 +75,7 @@ try {
 async function serve(): Promise<void> {
     let started: { socketPath: string; tokenPath: string } | undefined;
     for (let i = 0; started === undefined; i += 1) {
-        if (daemon.exitCode !== null || i > 12_000)
+        if (daemon.exitCode !== null || daemon.signalCode !== null || i > 12_000)
             throw new Error("The remote gym daemon did not start.");
         const written = await readFile(join(scratch, "daemon.json"), "utf8").catch(() => undefined);
         if (written !== undefined) started = JSON.parse(written) as typeof started;
