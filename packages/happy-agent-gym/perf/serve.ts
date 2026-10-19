@@ -6,17 +6,23 @@
  * machine is just-bash. The scripted model streams realistically: reasoning, many small text
  * deltas at model-like cadence, and shell tool calls with sizable output, over several inferences
  * per run, so the daemon and every connected client see production-shaped event traffic.
+ *
+ * PERF_REMOTE_CARRIER, a Unix socket path, replaces the Tailcat carrier to every configured remote
+ * connection with that socket (`perf/latencyRelay.ts` in front of another gym daemon), so remotes
+ * are measured offline while the proxy, its pool, and both daemons' APIs stay the real ones.
  */
 import { readFileSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { Session } from "node:inspector";
 import { ServerResponse } from "node:http";
 import { createRequire } from "node:module";
+import { connect, type Socket } from "node:net";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { join } from "node:path";
 
 import type { AgentModel } from "@slopus/happy-agent-base";
 import { startHappyAgentDaemon } from "@slopus/happy-agent";
+import { TailcatModule } from "@slopus/happy-agent-modules";
 
 import { createGymCompute } from "../sources/createGymCompute.js";
 import {
@@ -31,6 +37,20 @@ const scratch = required("PERF_SCRATCH");
 const textChunk = Number(process.env.PERF_TEXT_CHUNK ?? "4");
 const textDelayMs = Number(process.env.PERF_TEXT_DELAY_MS ?? "12");
 const toolRounds = Number(process.env.PERF_TOOL_ROUNDS ?? "6");
+
+const remoteCarrier = process.env.PERF_REMOTE_CARRIER;
+if (remoteCarrier !== undefined) {
+    TailcatModule.prototype.openRemote = () =>
+        ({
+            connect: () =>
+                new Promise<Socket>((resolve, reject) => {
+                    const socket = connect(remoteCarrier);
+                    socket.once("connect", () => resolve(socket));
+                    socket.once("error", reject);
+                }),
+            close: async () => undefined,
+        }) as never;
+}
 
 /** The production provider catalog, so existing agents resolve their real selection. */
 const CATALOG: Record<string, readonly string[]> = {
