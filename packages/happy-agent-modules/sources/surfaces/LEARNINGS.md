@@ -140,6 +140,24 @@ series repeat the start's wall-clock time in the event's own zone, using Tempora
 start outside a weekly rule's weekdays still occurs once. Range reads stay cheap by keeping the
 current record in its own table with padded instant bounds, filtering in SQL before decoding.
 
+## System Monitors observe the daemon host and keep probes independent
+
+A System Monitor is a Surface instance, but its readings describe the daemon's machine and are
+shared by every monitor. Telemetry has no catalog mutation or journal event: clients poll a
+bounded in-memory history while visible. A single lazy sampler owns its named daemon lifetime,
+stops after a minute without reads, and gives each slow probe one bounded outstanding operation
+so process scans or mounted volumes cannot stall CPU and memory updates or accumulate work.
+Memory follows OS available accounting rather than counting reclaimable cache as occupied.
+When native accounting fails, the required memory totals use Node's total/free counters with
+cache null; this fallback can include reclaimable cache in used memory.
+
+Steve asked for a live task list alongside the charts. That means the host's processes: the
+union of its top CPU and memory users, with whole-machine CPU percentages, resident memory,
+and start identities that reset reused PIDs. Every authenticated person and model may read
+Surfaces, so process probes collect executable names only and never command-line arguments or
+environments. The read tool includes the top five by CPU and memory. Cache is a separate
+measurement, not another disjoint segment to stack with used and available memory.
+
 ## Calendar history restores through ordinary update
 
 Steve asked that event history allow anything to be restored, like todos. Every create, edit,

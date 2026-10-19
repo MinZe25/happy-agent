@@ -45,6 +45,7 @@ import {
     type SurfaceDocumentRevision,
     type SurfaceDocumentStateResponse,
     type SurfaceDocumentVersionListResponse,
+    type SystemMonitorSnapshot,
 } from "@slopus/happy-agent-client";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -78,6 +79,7 @@ import {
 } from "./documents/SurfaceDocumentLive.js";
 import { SurfaceDocuments, type DocumentProjection } from "./documents/SurfaceDocuments.js";
 import { SurfaceCalendars, type CalendarRange } from "./calendar/SurfaceCalendars.js";
+import { SystemMonitorSampler } from "./systemMonitor/SystemMonitorSampler.js";
 
 const eventSchema = Type.Union([
     Type.Object({ type: Type.Literal("surface.created"), payload: surfaceCreatedPayloadSchema }),
@@ -106,6 +108,7 @@ const CHAT_TYPES: ReadonlySet<string> = new Set([
     "todo",
     "document",
     "calendar",
+    "system_monitor",
     "artifact",
     "bot",
     "task",
@@ -133,6 +136,7 @@ export class SurfacesModule implements AgentModule {
     #kv!: AgentKV;
     #documents!: SurfaceDocuments;
     #calendars!: SurfaceCalendars;
+    #systemMonitor!: SystemMonitorSampler;
     #agents: AgentSystemRef | undefined;
     constructor(
         readonly durable: DurableFunctionsModule,
@@ -166,6 +170,7 @@ export class SurfacesModule implements AgentModule {
         });
     }
     readonly beforeStart = (ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
+        this.#systemMonitor = new SystemMonitorSampler(ctx);
         this.#store = new SurfacesPersistence(agentDatabase(ctx)!);
         this.#kv = this.#store.kv();
         this.#documents = new SurfaceDocuments(this.#store, this.#kv, this.#live);
@@ -723,6 +728,11 @@ export class SurfacesModule implements AgentModule {
                 maxOccurrences,
             );
         });
+    }
+    /** Validate the caller's catalog snapshot, then wait outside the database lock for telemetry. */
+    async systemMonitor(ctx: Context, surfaceId: string): Promise<SystemMonitorSnapshot> {
+        await this.#surfaceOf(ctx, surfaceId, "system_monitor");
+        return this.#systemMonitor.read();
     }
     async getCalendarEvent(ctx: Context, surfaceId: string, id: string): Promise<CalendarEvent> {
         return ctx.inTx(async (tx) => {

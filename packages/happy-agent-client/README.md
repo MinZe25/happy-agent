@@ -25,6 +25,13 @@ restoring command. Todo access never joins the caller.
 Follow shared `todo.created` and `todo.updated` from the list cursor, refetching on a version gap.
 The client exposes these events without adding an automatic Todo store to `HappyReducer`.
 
+System Monitor Surfaces are served at `/v0/surfaces/system-monitor/:surfaceId` when health reports
+`capabilities.systemMonitorSurfaces`. `getSystemMonitor(surfaceId)` returns the host snapshot
+directly, including CPU, GPU, memory, disks, disk activity, bounded history, and a nullable live
+process list. Poll at `intervalMs` while visible. Missing readings are null or empty arrays;
+there are no telemetry events or content versions. Process CPU uses a whole-machine percentage,
+and process names never include arguments or environments.
+
 Calendar Surfaces are served at `/v0/surfaces/calendar/:surfaceId` when health reports
 `capabilities.calendarSurfaces`. `listCalendarEvents(surfaceId, { from, to, timeZone })` reads at
 most 100 days of daemon-expanded occurrences with the events they belong to; never expand

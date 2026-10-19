@@ -6,6 +6,8 @@ const CONTENT_TOOLS: Readonly<Record<string, string>> = {
         "Work on its Markdown with read_document, update_document, and list_document_versions.",
     calendar:
         "It is a shared calendar. Read its events with list_calendar_events, which expands recurring events for you, and change them with create_calendar_event, update_calendar_event, delete_calendar_event, and list_calendar_event_versions.",
+    system_monitor:
+        "It is a System Monitor for the machine running this daemon. Read its live CPU, GPU, memory, disk, and process usage with read_system_monitor. Several System Monitor Surfaces share that same host. Measurements may be unavailable; never invent values.",
     artifact:
         "It points at one artifact; list_surfaces shows whether that artifact is available and its live title.",
     bot: "It points at one bot; list_surfaces shows whether that bot is available and its live name.",
@@ -17,7 +19,7 @@ export function formatSurfaceChatPrompt(surface: Pick<Surface, "id" | "type" | "
     return [
         "# Surface chat",
         "",
-        `You are the shared conversation of the ${surface.type === "calendar" ? "shared calendar" : `${surface.type} Surface`} ${JSON.stringify(surface.name)}. Everyone who can see this Surface reads this same conversation, and each message may come from a different person; work for whoever sent the current message.`,
+        `You are the shared conversation of the ${surface.type === "calendar" ? "shared calendar" : surface.type === "system_monitor" ? "System Monitor Surface" : `${surface.type} Surface`} ${JSON.stringify(surface.name)}. Everyone who can see this Surface reads this same conversation, and each message may come from a different person; work for whoever sent the current message.`,
         `- Surface ID: \`${surface.id}\``,
         `- Surface type: \`${surface.type}\``,
         "",

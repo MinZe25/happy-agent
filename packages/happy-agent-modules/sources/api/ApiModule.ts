@@ -5891,6 +5891,16 @@ export class ApiModule implements AgentModule {
                 }
                 return false;
             }
+            const monitorMatch = /^\/v0\/surfaces\/system-monitor\/([a-z][a-z0-9]*)$/.exec(
+                url.pathname,
+            );
+            if (monitorMatch !== null) {
+                const surfaceId = monitorMatch[1]!;
+                if (request.method !== "GET" || !Value.Check(surfaceIdSchema, surfaceId))
+                    return false;
+                sendJson(response, 200, await surfaces.systemMonitor(ctx, surfaceId));
+                return true;
+            }
             const calendarMatch =
                 /^\/v0\/surfaces\/calendar\/([a-z][a-z0-9]*)(?:\/([a-z][a-z0-9]*)(?:\/(versions)(?:\/([^/]+))?)?)?$/.exec(
                     url.pathname,
@@ -8410,7 +8420,11 @@ export class ApiModule implements AgentModule {
                     : { desktopLiveCapabilities: [...this.#live.desktopCapabilities] }),
                 ...(this.#surfaces === undefined
                     ? {}
-                    : { collaborativeDocuments: true, calendarSurfaces: true }),
+                    : {
+                          collaborativeDocuments: true,
+                          calendarSurfaces: true,
+                          systemMonitorSurfaces: true,
+                      }),
             },
             version: {
                 protocol: API_PROTOCOL_VERSION,

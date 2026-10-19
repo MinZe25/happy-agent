@@ -21,9 +21,11 @@ import {
     surfaceDocumentTextSchema,
     surfaceDocumentChangeListResponseSchema,
     resourceVersionSchema,
+    systemMonitorSnapshotSchema,
 } from "@slopus/happy-agent-client";
 import type { SurfacesModule } from "../SurfacesModule.js";
 import { calendarTools } from "./calendarTools.js";
+import { formatSystemMonitor } from "../systemMonitor/formatSystemMonitor.js";
 
 const identity = { surfaceId: surfaceIdSchema, todoId: cuid2Schema };
 const guard = { ...identity, version: resourceVersionSchema };
@@ -82,12 +84,34 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
     };
     const ordinary = [
         defineAgentTool({
+            name: "read_system_monitor",
+            defer: true,
+            capabilities: ["Read live host CPU, GPU, memory, disk, and process usage."],
+            searchKeywords: [
+                "system monitor",
+                "cpu gpu memory disk usage",
+                "running processes",
+                "task manager",
+            ],
+            description:
+                "Read the machine running this daemon through one System Monitor Surface. Includes CPU, GPU, memory, mounted disks, disk activity, recent history, and top processes by CPU and resident memory. Several System Monitors show the same host. Unavailable measurements are null. Process names exclude command-line arguments and environments. Reading never changes membership.",
+            parameters: Type.Object(
+                { surfaceId: surfaceIdSchema },
+                { additionalProperties: false },
+            ),
+            returnType: systemMonitorSnapshotSchema,
+            durable: false,
+            shouldReviewInAutoMode: () => false,
+            execute: (ctx, input) => surfaces.systemMonitor(ctx, input.surfaceId),
+            toLLM: (snapshot) => [{ type: "text" as const, text: formatSystemMonitor(snapshot) }],
+        }),
+        defineAgentTool({
             name: "list_surfaces",
             defer: true,
             capabilities: ["Find shared Surfaces and their members."],
             searchKeywords: ["list surfaces", "shared todo lists", "sidebar members"],
             description:
-                "List shared Surface instances, their IDs, names, types, and joined people. Artifact, bot, and task Surfaces include their target's live name and ID while it is available, or an unavailable state without them. Each todo, document, or calendar tool requires a Surface ID. Results are paged.",
+                "List shared Surface instances, their IDs, names, types, and joined people. Artifact, bot, and task Surfaces include their target's live name and ID while it is available, or an unavailable state without them. Each todo, document, calendar, or System Monitor tool requires a Surface ID. Results are paged.",
             parameters: Type.Object(page, { additionalProperties: false }),
             returnType: Type.Object({
                 surfaces: Type.Array(surfaceSchema),
@@ -385,6 +409,46 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
         }),
     ];
     const administration = [
+        defineAgentTool({
+            name: "create_system_monitor_surface",
+            defer: true,
+            capabilities: ["Create a System Monitor Surface as an admin bot."],
+            searchKeywords: [
+                "create system monitor",
+                "host resource dashboard",
+                "new task manager",
+            ],
+            description:
+                "Admin bots only: create a named System Monitor Surface for the machine running this daemon. Explicitly supply creatorUserId as a local Happy user ID or null; only null is allowed in standalone mode. The immutable creator joins their sidebar; null joins nobody in team mode and the local person in standalone mode. Optionally supply an absolute PNG, JPEG, or WebP image path (8 MiB maximum).",
+            parameters: Type.Object(
+                {
+                    name: surfaceNameSchema,
+                    creatorUserId: surfaceMemberSchema.properties.userId,
+                    imagePath,
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: (input, ctx) =>
+                surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath),
+            describeAutoPermissionAction: (input) =>
+                `creating a shared System Monitor Surface${fromImage(input.imagePath)}. ${imageAccess}`,
+            execute: async (ctx, input, call) =>
+                surfaces.create(
+                    ctx,
+                    {
+                        ...(await creation(ctx, call, input.imagePath)),
+                        type: "system_monitor",
+                        name: input.name,
+                    },
+                    input.creatorUserId,
+                    scope.agent.id,
+                ),
+            toLLM: textResult,
+        }),
         defineAgentTool({
             name: "create_todo_surface",
             defer: true,

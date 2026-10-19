@@ -52,6 +52,13 @@ target reads as unavailable without its ID. Shared events carry the stored recor
 the resolved projection. The three admin creation tools share the image and replay handling of
 the other typed creation tools.
 
+System Monitor Surfaces share one daemon-host sampler in `systemMonitor/`. Reads lazily start
+independent bounded probes for CPU, GPU, memory, disks, and live processes. Its five-minute
+history stays in memory, sampling stops after a minute without reads, and telemetry never writes
+catalog versions or journal events. Process lists expose names and resource measurements only,
+never arguments or environments. The common read tool summarizes the top CPU and memory users;
+active admin bots can create named monitors through the ordinary managed-image creation path.
+
 Every Surface type can own one shared chat, created only when a person opens
 it. The request reserves the agent ID, workspace ID, and folder path in `chat.*` and invokes the
 durable `surfaces.prepareChat` function in the same transaction. Preparation belongs to the

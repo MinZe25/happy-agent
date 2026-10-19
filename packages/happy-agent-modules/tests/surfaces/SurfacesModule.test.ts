@@ -212,6 +212,7 @@ describe("installation-owned Surface state", () => {
             agent: { id: "ordinary" },
         } as AgentModuleScope);
         expect(ordinary.map((tool) => tool.name)).toEqual([
+            "read_system_monitor",
             "list_surfaces",
             "list_todos",
             "create_todo",
@@ -229,7 +230,10 @@ describe("installation-owned Surface state", () => {
             "list_calendar_event_versions",
         ]);
         for (const tool of ordinary) {
-            const read = tool.name.startsWith("list_") || tool.name === "read_document";
+            const read =
+                tool.name.startsWith("list_") ||
+                tool.name === "read_document" ||
+                tool.name === "read_system_monitor";
             expect(tool.shouldReviewInAutoMode!({}, ctx)).toBe(!read);
             if (!read) {
                 expect(tool.requiresAutoOrFullAccess).toBe(true);
@@ -248,6 +252,9 @@ describe("installation-owned Surface state", () => {
             }
         }
         const create = tools.find((tool) => tool.name === "create_todo_surface")!;
+        const createMonitor = tools.find((tool) => tool.name === "create_system_monitor_surface")!;
+        expect(createMonitor.shouldReviewInAutoMode!({}, ctx)).toBe(true);
+        expect(await createMonitor.shouldRunInFullAccessInAutoMode!({}, ctx)).toBe(false);
         const add = tools.find((tool) => tool.name === "add_surface_user")!;
         expect(create.shouldReviewInAutoMode!({}, ctx)).toBe(true);
         expect(await create.shouldRunInFullAccessInAutoMode!({}, ctx)).toBe(false);
@@ -264,6 +271,15 @@ describe("installation-owned Surface state", () => {
         expect(
             create.describeAutoPermissionAction!({ imagePath: "/outside/image.png" }, ctx),
         ).toContain("outside-workspace");
+        expect(
+            await createMonitor.shouldRunInFullAccessInAutoMode!(
+                { imagePath: "/outside/image.png" },
+                ctx,
+            ),
+        ).toBe(true);
+        expect(
+            createMonitor.describeAutoPermissionAction!({ imagePath: "/outside/image.png" }, ctx),
+        ).toContain("shared System Monitor");
         f.revoke();
         await expect(
             add.execute(
@@ -275,6 +291,9 @@ describe("installation-owned Surface state", () => {
         await expect(create.execute(ctx, { name: "Denied" }, {} as never)).rejects.toMatchObject({
             code: "forbidden",
         });
+        await expect(
+            createMonitor.execute(ctx, { name: "Denied", creatorUserId: null }, {} as never),
+        ).rejects.toMatchObject({ code: "forbidden" });
     });
 
     it("attributes explicit tool users independently of the executing person's audit identity", async () => {

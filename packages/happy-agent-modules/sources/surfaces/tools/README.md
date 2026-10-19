@@ -15,6 +15,11 @@ Calendar tools live in their own fixed array merged into the common one. They re
 timed values as local ISO 8601 date-times in an IANA zone, list occurrences the daemon expanded,
 and restore history through ordinary update. Admin bots also receive `create_calendar_surface`.
 
+`read_system_monitor` is an ordinary read tool with no Auto review. It reads a shared daemon-host
+snapshot and presents CPU, GPU, memory, disk, and top-five CPU/memory process summaries. Active
+admin bots receive `create_system_monitor_surface`, with the same explicit creator, image,
+durable replay, authority checks, and permission boundary as other Surface creation tools.
+
 Admin bots receive `create_artifact_surface`, `create_bot_surface`, and `create_task_surface`.
 Each names its own target field, requires an explicit creator, and accepts an optional image.
 They reject missing or inactive targets as not found and never change the target's own access,
