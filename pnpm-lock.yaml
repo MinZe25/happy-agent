@@ -12,7 +12,7 @@ packageExtensionsChecksum: sha256-+0PWOZzYyGh0J39IGr31jzXVhDJkMVXsQSzcdAJjSio=
 
 patchedDependencies:
   '@libsql/client@0.18.0':
-    hash: 3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa
+    hash: 90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8
     path: patches/@libsql__client@0.18.0.patch
   '@parcel/watcher@2.6.0':
     hash: a595e20a32e8eff3ee4484f4fcb3c627b188f13e7dbd03be03547caf54ae4bbd
@@ -30,7 +30,7 @@ importers:
         version: 24.13.2
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.18.0(patch_hash=3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa))(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
+        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.18.0(patch_hash=90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8))(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
       husky:
         specifier: ^9.1.7
         version: 9.1.7
@@ -130,7 +130,7 @@ importers:
         version: 0.5.5
       '@libsql/client':
         specifier: 0.18.0
-        version: 0.18.0(patch_hash=3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa)
+        version: 0.18.0(patch_hash=90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8)
       '@paralleldrive/cuid2':
         specifier: ^3.3.0
         version: 3.3.0
@@ -145,7 +145,7 @@ importers:
         version: 0.0.12
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.18.0(patch_hash=3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa))(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
+        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.18.0(patch_hash=90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8))(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
@@ -312,7 +312,7 @@ importers:
         version: 0.9.6
       '@libsql/client':
         specifier: 0.18.0
-        version: 0.18.0(patch_hash=3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa)
+        version: 0.18.0(patch_hash=90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8)
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -375,7 +375,7 @@ importers:
         version: 10.10.0
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.18.0(patch_hash=3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa))(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
+        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.18.0(patch_hash=90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8))(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
       jose:
         specifier: ^6.2.10
         version: 6.2.10
@@ -4670,7 +4670,7 @@ snapshots:
 
   '@js-sdsl/ordered-map@4.4.2': {}
 
-  '@libsql/client@0.18.0(patch_hash=3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa)':
+  '@libsql/client@0.18.0(patch_hash=90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8)':
     dependencies:
       '@libsql/core': 0.18.0
       '@libsql/hrana-client': 0.10.0
@@ -5227,12 +5227,12 @@ snapshots:
   '@slopus/happy-agent-base@0.0.63(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
     dependencies:
       '@electric-sql/pglite': 0.5.5
-      '@libsql/client': 0.18.0(patch_hash=3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa)
+      '@libsql/client': 0.18.0(patch_hash=90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8)
       '@paralleldrive/cuid2': 3.3.0
       '@sinclair/typebox': 0.34.49
       '@slopus/happy-providers': 0.0.47(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib': 0.0.12
-      drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.18.0(patch_hash=3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa))(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
+      drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.18.0(patch_hash=90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8))(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
       postgres: 3.4.9
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
@@ -6088,10 +6088,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  drizzle-orm@0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.18.0(patch_hash=3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa))(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1):
+  drizzle-orm@0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.18.0(patch_hash=90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8))(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1):
     optionalDependencies:
       '@electric-sql/pglite': 0.5.5
-      '@libsql/client': 0.18.0(patch_hash=3bce7b073378d1b7c0380b19e5b714650a8b4710b65ab671e1608c88658e10fa)
+      '@libsql/client': 0.18.0(patch_hash=90434d5ce5f0f99730247b66b6916a4a40d3019cdf938903efa57e36177f75f8)
       '@opentelemetry/api': 1.9.1
       '@types/pg': 8.15.6
       postgres: 3.4.9

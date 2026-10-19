@@ -1,48 +1,222 @@
 diff --git a/lib-cjs/sqlite3.js b/lib-cjs/sqlite3.js
 --- a/lib-cjs/sqlite3.js
 +++ b/lib-cjs/sqlite3.js
-@@ -548,8 +548,9 @@ function executeStmt(db, stmt, intMode) {
+@@ -229,6 +229,7 @@
+ }
+ exports.ConnectionPool = ConnectionPool;
+ function closeQuietly(db) {
++    finalizeStatements(db);
+     try {
+         if (db.open) {
+             db.close();
+@@ -548,21 +549,18 @@
              }
          }
      }
-+    let sqlStmt;
++    let cached;
      try {
 -        const sqlStmt = db.prepare(sql);
-+        sqlStmt = db.prepare(sql);
-         sqlStmt.safeIntegers(true);
-         let returnsData = true;
-         try {
-@@ -580,6 +581,9 @@ function executeStmt(db, stmt, intMode) {
-     catch (e) {
-         throw mapSqliteError(e);
+-        sqlStmt.safeIntegers(true);
+-        let returnsData = true;
+-        try {
+-            sqlStmt.raw(true);
+-        }
+-        catch {
+-            // raw() throws an exception if the statement does not return data
+-            returnsData = false;
+-        }
++        cached = preparedStatement(db, sql);
++        const { statement: sqlStmt, returnsData } = cached;
+         if (returnsData) {
+-            const columns = Array.from(sqlStmt.columns().map((col) => col.name));
+-            const columnTypes = Array.from(sqlStmt.columns().map((col) => col.type ?? ""));
+-            const rows = sqlStmt.all(args).map((sqlRow) => {
++            // Described after running, on every run: a schema change since the last run
++            // recompiles the statement as it steps, and may change its columns.
++            const sqlRows = sqlStmt.all(args);
++            const described = sqlStmt.columns();
++            const columns = Array.from(described.map((col) => col.name));
++            const columnTypes = Array.from(described.map((col) => col.type ?? ""));
++            const rows = sqlRows.map((sqlRow) => {
+                 return rowFromSql(sqlRow, columns, intMode);
+             });
+             // TODO: can we get this info from better-sqlite3?
+@@ -578,9 +576,67 @@
+         }
      }
-+    finally {
-+        sqlStmt?.finalize?.();
+     catch (e) {
++        if (cached !== undefined) {
++            forgetStatement(db, sql, cached);
++        }
+         throw mapSqliteError(e);
 +    }
++}
++// Each connection keeps the statements it ran most recently prepared: preparing and
++// inspecting a statement cost more than running it, and the same few hundred statements
++// run over and over. A statement leaves when it is evicted, when it fails, or when its
++// connection closes, and is finalized then rather than whenever it is collected.
++const STATEMENT_CACHE_SIZE = 256;
++const statementCaches = new WeakMap();
++function preparedStatement(db, sql) {
++    let cache = statementCaches.get(db);
++    if (cache === undefined) {
++        cache = new Map();
++        statementCaches.set(db, cache);
++    }
++    const hit = cache.get(sql);
++    if (hit !== undefined) {
++        // Map order is recency order: the first entry is the least recently used.
++        cache.delete(sql);
++        cache.set(sql, hit);
++        return hit;
+     }
++    const statement = db.prepare(sql);
++    statement.safeIntegers(true);
++    let returnsData = true;
++    try {
++        statement.raw(true);
++    }
++    catch {
++        // raw() throws an exception if the statement does not return data
++        returnsData = false;
++    }
++    const prepared = { statement, returnsData };
++    cache.set(sql, prepared);
++    if (cache.size > STATEMENT_CACHE_SIZE) {
++        const [oldestSql, oldest] = cache.entries().next().value;
++        cache.delete(oldestSql);
++        oldest.statement.finalize?.();
++    }
++    return prepared;
  }
++function forgetStatement(db, sql, prepared) {
++    const cache = statementCaches.get(db);
++    if (cache?.get(sql) === prepared) {
++        cache.delete(sql);
++    }
++    prepared.statement.finalize?.();
++}
++function finalizeStatements(db) {
++    const cache = statementCaches.get(db);
++    if (cache === undefined) {
++        return;
++    }
++    statementCaches.delete(db);
++    for (const { statement } of cache.values()) {
++        statement.finalize?.();
++    }
++}
  function rowFromSql(sqlRow, columns, intMode) {
      const row = {};
+     // make sure that the "length" property is not enumerable
 diff --git a/lib-esm/sqlite3.js b/lib-esm/sqlite3.js
 --- a/lib-esm/sqlite3.js
 +++ b/lib-esm/sqlite3.js
-@@ -523,8 +523,9 @@ function executeStmt(db, stmt, intMode) {
+@@ -206,6 +206,7 @@
+     }
+ }
+ function closeQuietly(db) {
++    finalizeStatements(db);
+     try {
+         if (db.open) {
+             db.close();
+@@ -523,21 +524,18 @@
              }
          }
      }
-+    let sqlStmt;
++    let cached;
      try {
 -        const sqlStmt = db.prepare(sql);
-+        sqlStmt = db.prepare(sql);
-         sqlStmt.safeIntegers(true);
-         let returnsData = true;
-         try {
-@@ -555,6 +556,9 @@ function executeStmt(db, stmt, intMode) {
-     catch (e) {
-         throw mapSqliteError(e);
+-        sqlStmt.safeIntegers(true);
+-        let returnsData = true;
+-        try {
+-            sqlStmt.raw(true);
+-        }
+-        catch {
+-            // raw() throws an exception if the statement does not return data
+-            returnsData = false;
+-        }
++        cached = preparedStatement(db, sql);
++        const { statement: sqlStmt, returnsData } = cached;
+         if (returnsData) {
+-            const columns = Array.from(sqlStmt.columns().map((col) => col.name));
+-            const columnTypes = Array.from(sqlStmt.columns().map((col) => col.type ?? ""));
+-            const rows = sqlStmt.all(args).map((sqlRow) => {
++            // Described after running, on every run: a schema change since the last run
++            // recompiles the statement as it steps, and may change its columns.
++            const sqlRows = sqlStmt.all(args);
++            const described = sqlStmt.columns();
++            const columns = Array.from(described.map((col) => col.name));
++            const columnTypes = Array.from(described.map((col) => col.type ?? ""));
++            const rows = sqlRows.map((sqlRow) => {
+                 return rowFromSql(sqlRow, columns, intMode);
+             });
+             // TODO: can we get this info from better-sqlite3?
+@@ -553,9 +551,67 @@
+         }
      }
-+    finally {
-+        sqlStmt?.finalize?.();
+     catch (e) {
++        if (cached !== undefined) {
++            forgetStatement(db, sql, cached);
++        }
+         throw mapSqliteError(e);
 +    }
++}
++// Each connection keeps the statements it ran most recently prepared: preparing and
++// inspecting a statement cost more than running it, and the same few hundred statements
++// run over and over. A statement leaves when it is evicted, when it fails, or when its
++// connection closes, and is finalized then rather than whenever it is collected.
++const STATEMENT_CACHE_SIZE = 256;
++const statementCaches = new WeakMap();
++function preparedStatement(db, sql) {
++    let cache = statementCaches.get(db);
++    if (cache === undefined) {
++        cache = new Map();
++        statementCaches.set(db, cache);
++    }
++    const hit = cache.get(sql);
++    if (hit !== undefined) {
++        // Map order is recency order: the first entry is the least recently used.
++        cache.delete(sql);
++        cache.set(sql, hit);
++        return hit;
+     }
++    const statement = db.prepare(sql);
++    statement.safeIntegers(true);
++    let returnsData = true;
++    try {
++        statement.raw(true);
++    }
++    catch {
++        // raw() throws an exception if the statement does not return data
++        returnsData = false;
++    }
++    const prepared = { statement, returnsData };
++    cache.set(sql, prepared);
++    if (cache.size > STATEMENT_CACHE_SIZE) {
++        const [oldestSql, oldest] = cache.entries().next().value;
++        cache.delete(oldestSql);
++        oldest.statement.finalize?.();
++    }
++    return prepared;
  }
++function forgetStatement(db, sql, prepared) {
++    const cache = statementCaches.get(db);
++    if (cache?.get(sql) === prepared) {
++        cache.delete(sql);
++    }
++    prepared.statement.finalize?.();
++}
++function finalizeStatements(db) {
++    const cache = statementCaches.get(db);
++    if (cache === undefined) {
++        return;
++    }
++    statementCaches.delete(db);
++    for (const { statement } of cache.values()) {
++        statement.finalize?.();
++    }
++}
  function rowFromSql(sqlRow, columns, intMode) {
      const row = {};
+     // make sure that the "length" property is not enumerable

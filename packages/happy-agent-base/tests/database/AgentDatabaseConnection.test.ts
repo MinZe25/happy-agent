@@ -54,6 +54,50 @@ describe("Agent Database SQLite concurrency", () => {
         }
     });
 
+    it("runs a repeated statement again after schema changes, failures, and a reopen", async () => {
+        const directory = await createTestDirectory();
+        const path = join(directory, "agent.sqlite");
+        const opened = await openAgentSQLiteDatabase(path);
+        const { database } = opened;
+        const insert = (id: number) =>
+            agentDatabaseRun(database, sql`INSERT INTO probe (id) VALUES (${id})`);
+        const all = () => agentDatabaseRows(database, sql`SELECT * FROM probe ORDER BY id`);
+        try {
+            await agentDatabaseRun(database, sql`CREATE TABLE probe (id INTEGER PRIMARY KEY)`);
+            await insert(1);
+            await expect(all()).resolves.toEqual([{ id: 1 }]);
+            // The same statement describes the columns a schema change added.
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE probe ADD COLUMN label TEXT NOT NULL DEFAULT 'none'`,
+            );
+            await expect(all()).resolves.toEqual([{ id: 1, label: "none" }]);
+            // A statement that failed runs again with other values.
+            await expect(insert(1)).rejects.toThrow();
+            await insert(2);
+            await expect(all()).resolves.toEqual([
+                { id: 1, label: "none" },
+                { id: 2, label: "none" },
+            ]);
+            // One whose table is gone fails, and works again once the table is back.
+            await agentDatabaseRun(database, sql`DROP TABLE probe`);
+            await expect(all()).rejects.toThrow();
+            await agentDatabaseRun(database, sql`CREATE TABLE probe (id INTEGER PRIMARY KEY)`);
+            await insert(3);
+            await expect(all()).resolves.toEqual([{ id: 3 }]);
+        } finally {
+            await opened.close();
+        }
+        const reopened = await openAgentSQLiteDatabase(path);
+        try {
+            await expect(
+                agentDatabaseRows(reopened.database, sql`SELECT * FROM probe ORDER BY id`),
+            ).resolves.toEqual([{ id: 3 }]);
+        } finally {
+            await reopened.close();
+        }
+    });
+
     it("rejects a second connection until the process owner closes", async () => {
         const directory = await createTestDirectory();
         const path = join(directory, "agent.sqlite");
