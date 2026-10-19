@@ -29,12 +29,17 @@ const MODE = {
     providerId: "claude",
     serviceTier: null,
 };
+// Every wait is bounded, so a build that hangs fails its own step instead of using up the job.
+const START_TIMEOUT_MS = 120_000;
+const REQUEST_TIMEOUT_MS = 60_000;
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 const root = await mkdtemp(join(tmpdir(), "happy-ci-bench-"));
 const happyHome = join(root, "home");
 const scratch = join(root, "scratch");
 const projectPath = join(root, "project");
-let daemon: { child: ChildProcess; socketPath: string; token: string } | undefined;
+let child: ChildProcess | undefined;
+let daemon: { socketPath: string; token: string } | undefined;
 
 try {
     await start({ PERF_SYNTHETIC: "1", PERF_TEXT_CHUNK: "400", PERF_TEXT_DELAY_MS: "0" });
@@ -133,7 +138,7 @@ async function seed(): Promise<{ heavy: string[]; counts: Record<string, number>
 
 async function start(env: Record<string, string>): Promise<void> {
     await rm(join(scratch, "daemon.json"), { force: true });
-    const child = spawn(
+    const spawned = spawn(
         process.execPath,
         ["--import", "tsx", join(import.meta.dirname, "serve.ts")],
         {
@@ -142,22 +147,31 @@ async function start(env: Record<string, string>): Promise<void> {
             stdio: ["ignore", "ignore", "inherit"],
         },
     );
+    child = spawned;
     let exited = false;
-    child.once("exit", () => (exited = true));
-    for (;;) {
+    spawned.once("exit", () => (exited = true));
+    const deadline = performance.now() + START_TIMEOUT_MS;
+    const waiting = () => {
         if (exited) throw new Error("The benchmark daemon exited while starting.");
+        if (performance.now() > deadline) {
+            throw new Error("The benchmark daemon was not ready within two minutes.");
+        }
+    };
+    for (;;) {
+        waiting();
         const written = await readFile(join(scratch, "daemon.json"), "utf8").catch(() => undefined);
         if (written !== undefined) {
             const { socketPath, tokenPath } = JSON.parse(written) as {
                 socketPath: string;
                 tokenPath: string;
             };
-            daemon = { child, socketPath, token: (await readFile(tokenPath, "utf8")).trim() };
+            daemon = { socketPath, token: (await readFile(tokenPath, "utf8")).trim() };
             break;
         }
         await sleep(10);
     }
     for (;;) {
+        waiting();
         const health = await call<{ ready?: boolean }>("GET", "/v0/health").catch(() => undefined);
         if (health?.ready === true) return;
         await sleep(10);
@@ -165,13 +179,16 @@ async function start(env: Record<string, string>): Promise<void> {
 }
 
 async function shutdown(): Promise<void> {
-    const running = daemon;
+    const running = child;
     if (running === undefined) return;
+    child = undefined;
     daemon = undefined;
-    if (running.child.exitCode !== null) return;
-    const exited = new Promise((resolve) => running.child.once("exit", resolve));
-    running.child.kill("SIGINT");
+    if (running.exitCode !== null || running.signalCode !== null) return;
+    const exited = new Promise((resolve) => running.once("exit", resolve));
+    running.kill("SIGINT");
+    const kill = setTimeout(() => running.kill("SIGKILL"), SHUTDOWN_TIMEOUT_MS);
     await exited;
+    clearTimeout(kill);
 }
 
 /** Wait until `count` runs of one agent have finished; a status read can precede the first. */
@@ -213,6 +230,7 @@ function call<T = unknown>(
                 method,
                 path,
                 socketPath: running.socketPath,
+                timeout: REQUEST_TIMEOUT_MS,
             },
             (res) => {
                 const chunks: Buffer[] = [];
@@ -234,6 +252,7 @@ function call<T = unknown>(
             },
         );
         req.on("error", reject);
+        req.on("timeout", () => req.destroy(new Error(`${method} ${path} did not answer.`)));
         req.end(payload);
     });
 }
