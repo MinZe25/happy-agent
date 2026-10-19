@@ -2,8 +2,11 @@ import { createHash } from "node:crypto";
 
 import { Value } from "@sinclair/typebox/value";
 import {
+    agentDatabaseRows,
+    agentDatabaseRun,
     withAgentConfig,
     withAgentDatabase,
+    type AgentDatabase,
     type AgentModule,
     type AgentModuleHooks,
     type AgentSystemRef,
@@ -16,6 +19,7 @@ import {
     type SlashCommand,
 } from "@slopus/happy-agent-client";
 import { detach, type Context } from "@steve.kite/stdlib";
+import { sql } from "drizzle-orm";
 
 import { EventsModule, eventAgentIdSchema } from "../events/index.js";
 import {
@@ -42,9 +46,27 @@ interface CachedCatalog {
 /** How many restored agents load their catalogs at once while the daemon already serves. */
 const RESTORE_LOAD_CONCURRENCY = 4;
 
+/**
+ * The fingerprint of the catalog last announced for each agent, so a restart compares a restored
+ * catalog with what clients were last told instead of announcing every agent's catalog again.
+ */
+const announcementsMigration = [
+    "001-slash-command-announcements",
+    async (_ctx: Context, database: AgentDatabase) => {
+        await agentDatabaseRun(
+            database,
+            sql`CREATE TABLE IF NOT EXISTS happy_agent_module_slash_command_announcements (
+                agent_id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL
+            )`,
+        );
+    },
+] as const;
+
 /** Merges module-owned slash commands into one current per-agent command surface. */
 export class SlashCommandsModule implements AgentModule {
     readonly name = "slash-commands";
+    readonly migrations = [announcementsMigration];
     readonly #cache = new Map<string, CachedCatalog>();
     readonly #contributors: readonly SlashCommandContributor[];
     readonly #events: EventsModule;
@@ -252,13 +274,25 @@ export class SlashCommandsModule implements AgentModule {
             )
             .digest("hex");
         const next = { commands, fingerprint };
-        const previous = this.#cache.get(agentId);
-        if (previous?.fingerprint !== fingerprint) {
+        // The first load in this process compares with what clients were last told, before a
+        // restart included, so restoring an unchanged catalog announces nothing.
+        const previous =
+            this.#cache.get(agentId)?.fingerprint ?? (await announcedFingerprint(ctx.db, agentId));
+        if (previous !== fingerprint) {
             await ctx.span("slash_commands.publish", (ctx) =>
-                this.#events.record(ctx, {
-                    agentId,
-                    payload: { slashCommands: descriptors },
-                    type: "slash_commands.updated",
+                ctx.inTx(async (txCtx) => {
+                    await this.#events.record(txCtx, {
+                        agentId,
+                        payload: { slashCommands: descriptors },
+                        type: "slash_commands.updated",
+                    });
+                    await agentDatabaseRun(
+                        txCtx.db,
+                        sql`INSERT INTO happy_agent_module_slash_command_announcements
+                                (agent_id, fingerprint)
+                            VALUES (${agentId}, ${fingerprint})
+                            ON CONFLICT(agent_id) DO UPDATE SET fingerprint = excluded.fingerprint`,
+                    );
                 }),
             );
         }
@@ -279,4 +313,16 @@ export class SlashCommandsModule implements AgentModule {
 
 function contentEtag(bytes: Uint8Array): string {
     return `"${createHash("sha256").update(bytes).digest("hex")}"`;
+}
+
+async function announcedFingerprint(
+    database: AgentDatabase,
+    agentId: string,
+): Promise<string | undefined> {
+    const rows = await agentDatabaseRows<{ fingerprint: string }>(
+        database,
+        sql`SELECT fingerprint FROM happy_agent_module_slash_command_announcements
+            WHERE agent_id = ${agentId}`,
+    );
+    return rows[0]?.fingerprint;
 }

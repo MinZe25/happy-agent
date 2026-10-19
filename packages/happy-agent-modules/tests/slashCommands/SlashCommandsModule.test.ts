@@ -28,6 +28,11 @@ const agents = {
     config: () => Promise.resolve({}),
 } as never;
 
+/** What a slash command module needs from its database: the journal it publishes to and its own tables. */
+function slashMigrations(events: EventsModule) {
+    return [...(events.migrations ?? []), ...new SlashCommandsModule(events).migrations];
+}
+
 class Contributor implements SlashCommandContributor {
     readonly name: string;
     definitions: SlashCommandDefinition[];
@@ -62,7 +67,7 @@ class Contributor implements SlashCommandContributor {
 describe("SlashCommandsModule", () => {
     it("traces loading stages and contributor children without changing caching or coalescing", async () => {
         const events = new EventsModule();
-        const database = moduleDatabase(events.migrations ?? [], "slash-command-tracing-test");
+        const database = moduleDatabase(slashMigrations(events), "slash-command-tracing-test");
         await database.ready;
         try {
             await events.beforeStart?.(database.context);
@@ -127,7 +132,7 @@ describe("SlashCommandsModule", () => {
 
     it("keeps image bytes private, dispatches to the owner, and emits only real changes", async () => {
         const events = new EventsModule();
-        const database = moduleDatabase(events.migrations ?? [], "slash-command-catalog-test");
+        const database = moduleDatabase(slashMigrations(events), "slash-command-catalog-test");
         await database.ready;
         try {
             await events.beforeStart?.(database.context);
@@ -199,6 +204,17 @@ describe("SlashCommandsModule", () => {
             };
             await commands.refresh(database.context, "agent-1");
             expect(events.replay(origin)?.events).toHaveLength(3);
+
+            // A restarted process compares with the last announcement instead of announcing again.
+            const restarted = new SlashCommandsModule(events, owner);
+            await restarted.beforeStart?.(database.context, agents);
+            await restarted.refresh(database.context, "agent-1");
+            expect(events.replay(origin)?.events).toHaveLength(3);
+            owner.definitions[0] = { ...owner.definitions[0]!, description: "Review it all." };
+            const changed = new SlashCommandsModule(events, owner);
+            await changed.beforeStart?.(database.context, agents);
+            await changed.refresh(database.context, "agent-1");
+            expect(events.replay(origin)?.events).toHaveLength(4);
         } finally {
             database.close();
         }
@@ -206,7 +222,7 @@ describe("SlashCommandsModule", () => {
 
     it("rejects duplicate names, unknown commands, and arguments on argument-free commands", async () => {
         const events = new EventsModule();
-        const database = moduleDatabase(events.migrations ?? [], "slash-command-errors-test");
+        const database = moduleDatabase(slashMigrations(events), "slash-command-errors-test");
         await database.ready;
         try {
             await events.beforeStart?.(database.context);
@@ -243,7 +259,7 @@ describe("SlashCommandsModule", () => {
 
     it("refreshes discovery from the before-turn hook", async () => {
         const events = new EventsModule();
-        const database = moduleDatabase(events.migrations ?? [], "slash-command-turn-test");
+        const database = moduleDatabase(slashMigrations(events), "slash-command-turn-test");
         await database.ready;
         try {
             await events.beforeStart?.(database.context);
@@ -271,7 +287,7 @@ describe("SlashCommandsModule", () => {
 
     it("loads restored catalogs a few at a time without holding the restore", async () => {
         const events = new EventsModule();
-        const database = moduleDatabase(events.migrations ?? [], "slash-command-restore-test");
+        const database = moduleDatabase(slashMigrations(events), "slash-command-restore-test");
         ensureAgentDatabaseConnection(database.database);
         await database.ready;
         try {
