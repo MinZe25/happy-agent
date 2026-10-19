@@ -325,3 +325,14 @@ age of the oldest of each. A drain source may supply `work`, which the runtime t
 Observation's active tools and inferences. Lines carry names, counts, and ages only, never
 arguments, commands, prompts, or output. The report runs in its own `daemon-drain` context
 because it outlives the request or signal that started the drain.
+
+## Large JSON responses are compressed for clients that accept it
+
+macOS gives a local stream socket an 8 KiB send buffer, so a response leaves the daemon a few
+kilobytes per event-loop turn. Idle, that is invisible; while other agents stream, the loop turns
+every 15–30 ms and a 600 KB history page took 1.3 s to flush after it was ready. JSON bodies of 64
+KiB or more are therefore sent Brotli-compressed at quality 1 (or gzip at level 1) when the
+request's `Accept-Encoding` allows it: about a sixth of the bytes for roughly a millisecond per half
+megabyte. A client that does not ask, such as the SDK's socket fetch, gets the body exactly as
+before. Desktop's proxy forwards Chromium's `Accept-Encoding` and pipes the response through
+unchanged, so the renderer decodes it natively.

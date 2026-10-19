@@ -250,6 +250,7 @@ import {
     type MobileCredential,
 } from "../mobileConnector/index.js";
 import { isMobileTransport, mobileDevice, withMobileDevice } from "./impl/apiMobileTransport.js";
+import { jsonResponseBody } from "./impl/jsonResponseBody.js";
 import {
     createNodeBinaryWebSocket,
     createSseWriter,
@@ -9404,13 +9405,14 @@ function setImageCacheHeaders(response: ServerResponse): void {
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
-    const encoded = JSON.stringify(body);
+    const { bytes, encoding } = jsonResponseBody(response.req, JSON.stringify(body));
     response.writeHead(status, {
         "cache-control": "no-store",
-        "content-length": Buffer.byteLength(encoded),
+        "content-length": bytes.byteLength,
         "content-type": "application/json; charset=utf-8",
+        ...(encoding === undefined ? {} : { "content-encoding": encoding }),
     });
-    response.end(encoded);
+    response.end(bytes);
 }
 
 function writeSocketError(
