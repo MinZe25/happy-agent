@@ -24,8 +24,16 @@ function delayed(from: Socket, to: Socket): void {
 }
 
 await rm(listenPath, { force: true });
+/** Every socket still open, so stopping need not wait for clients that keep theirs alive. */
+const open = new Set<Socket>();
+const track = (socket: Socket): void => {
+    open.add(socket);
+    socket.once("close", () => open.delete(socket));
+};
 const server = createServer((client) => {
     const remote = connect(remotePath);
+    track(client);
+    track(remote);
     delayed(client, remote);
     delayed(remote, client);
 });
@@ -33,5 +41,8 @@ server.listen(listenPath, () =>
     console.log(`latency relay ${listenPath} → ${remotePath}, ${roundTrip} ms`),
 );
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.once(signal, () => server.close(() => process.exit(0)));
+    process.once(signal, () => {
+        server.close(() => process.exit(0));
+        for (const socket of open) socket.destroy();
+    });
 }

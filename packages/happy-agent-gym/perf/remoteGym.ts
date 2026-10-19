@@ -22,6 +22,7 @@ const heavy = Number(process.env.PERF_HEAVY ?? "8");
 const sends = Number(process.env.PERF_SENDS ?? "3");
 const light = Number(process.env.PERF_LIGHT ?? "60");
 const scratch = join(dir, "scratch");
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 const carrier = join(dir, "carrier.sock");
 const MODE = {
     effort: "medium",
@@ -59,43 +60,64 @@ const daemon = spawn(process.execPath, ["--import", "tsx", join(gym, "perf", "se
     stdio: ["ignore", "inherit", "inherit"],
 });
 children.push(daemon);
-const stop = () => {
-    for (const child of children) child.kill("SIGINT");
-};
-process.once("SIGINT", stop);
-process.once("SIGTERM", stop);
+process.once("SIGINT", () => void stop());
+process.once("SIGTERM", () => void stop());
 
-let started: { socketPath: string; tokenPath: string } | undefined;
-for (let i = 0; started === undefined; i += 1) {
-    if (daemon.exitCode !== null || i > 12_000)
-        throw new Error("The remote gym daemon did not start.");
-    const written = await readFile(join(scratch, "daemon.json"), "utf8").catch(() => undefined);
-    if (written !== undefined) started = JSON.parse(written) as typeof started;
-    else await sleep(10);
+let socketPath = "";
+let token = "";
+try {
+    await serve();
+} finally {
+    // Whatever failed, no daemon is left holding the data's lock.
+    await stop();
 }
-const { socketPath } = started;
-const token = (await readFile(started.tokenPath, "utf8")).trim();
 
-const seededMarker = join(dir, "seeded");
-if (
-    source === undefined &&
-    (await readFile(seededMarker, "utf8").catch(() => undefined)) === undefined
-) {
-    await seed();
-    await writeFile(seededMarker, "seeded\n");
+async function serve(): Promise<void> {
+    let started: { socketPath: string; tokenPath: string } | undefined;
+    for (let i = 0; started === undefined; i += 1) {
+        if (daemon.exitCode !== null || i > 12_000)
+            throw new Error("The remote gym daemon did not start.");
+        const written = await readFile(join(scratch, "daemon.json"), "utf8").catch(() => undefined);
+        if (written !== undefined) started = JSON.parse(written) as typeof started;
+        else await sleep(10);
+    }
+    socketPath = started.socketPath;
+    token = (await readFile(started.tokenPath, "utf8")).trim();
+
+    const seededMarker = join(dir, "seeded");
+    if (
+        source === undefined &&
+        (await readFile(seededMarker, "utf8").catch(() => undefined)) === undefined
+    ) {
+        await seed();
+        await writeFile(seededMarker, "seeded\n");
+    }
+    await call("POST", "/v0/onboarding/complete");
+
+    const relay = spawn(
+        process.execPath,
+        ["--import", "tsx", join(gym, "perf", "latencyRelay.ts"), carrier, socketPath, roundTripMs],
+        { cwd: gym, stdio: ["ignore", "inherit", "inherit"] },
+    );
+    children.push(relay);
+    await writeFile(join(dir, "remote.json"), JSON.stringify({ carrier, token, roundTripMs }));
+    console.log(`remote gym ready: ${carrier} (${roundTripMs} ms round trip)`);
+    await new Promise((resolve) => daemon.once("exit", resolve));
 }
-await call("POST", "/v0/onboarding/complete");
 
-const relay = spawn(
-    process.execPath,
-    ["--import", "tsx", join(gym, "perf", "latencyRelay.ts"), carrier, socketPath, roundTripMs],
-    { cwd: gym, stdio: ["ignore", "inherit", "inherit"] },
-);
-children.push(relay);
-await writeFile(join(dir, "remote.json"), JSON.stringify({ carrier, token, roundTripMs }));
-console.log(`remote gym ready: ${carrier} (${roundTripMs} ms round trip)`);
-await new Promise((resolve) => daemon.once("exit", resolve));
-stop();
+/** Asks every child to stop, and kills one still running after SHUTDOWN_TIMEOUT_MS. */
+async function stop(): Promise<void> {
+    await Promise.all(
+        children.map(async (child) => {
+            if (child.exitCode !== null || child.signalCode !== null) return;
+            const exited = new Promise((resolve) => child.once("exit", resolve));
+            child.kill("SIGINT");
+            const timer = setTimeout(() => child.kill("SIGKILL"), SHUTDOWN_TIMEOUT_MS);
+            await exited;
+            clearTimeout(timer);
+        }),
+    );
+}
 
 async function seed(): Promise<void> {
     const projectPath = join(dir, "project");
