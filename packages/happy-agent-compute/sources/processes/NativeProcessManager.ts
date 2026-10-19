@@ -7,6 +7,7 @@ import {
     isProcessGroupAlive,
     killProcessGroup,
     ProcessGroupReaper,
+    waitForProcessGroupsExit,
 } from "./impl/ProcessGroupReaper.js";
 import { startProcessTransport, type ProcessTransport } from "./impl/startProcessTransport.js";
 import { BoundedOutputBuffer } from "./impl/BoundedOutputBuffer.js";
@@ -400,15 +401,15 @@ export class ManagedProcess {
         startedAt: number,
     ): Promise<void> {
         if (this.pid === null) return;
-        const remainingMs = forceAfterMs - (Date.now() - startedAt);
-        if (remainingMs > 0 && isProcessGroupAlive(this.pid)) {
-            await new Promise((resolve) => {
-                setTimeout(resolve, remainingMs).unref();
-            });
-        }
+        const survivors = await waitForProcessGroupsExit(
+            [this.pid],
+            forceAfterMs - (Date.now() - startedAt),
+        );
         // Group only, never the bare number: the launcher is already gone, so
         // its process id may now belong to a stranger.
-        if (isProcessGroupAlive(this.pid)) await killProcessGroup(ctx, this.pid, "SIGKILL");
+        if (survivors.length > 0 && isProcessGroupAlive(this.pid)) {
+            await killProcessGroup(ctx, this.pid, "SIGKILL");
+        }
     }
 
     wait(ctx: Context): Promise<ProcessRunResult> {

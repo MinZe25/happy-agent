@@ -44,12 +44,7 @@ export class ProcessGroupReaper {
             for (const processGroupId of groups) {
                 await signalProcessGroup(ctx, processGroupId, "SIGTERM");
             }
-            if (forceAfterMs > 0) {
-                await new Promise((resolve) => {
-                    setTimeout(resolve, forceAfterMs).unref();
-                });
-            }
-            for (const processGroupId of groups) {
+            for (const processGroupId of await waitForProcessGroupsExit(groups, forceAfterMs)) {
                 if (isProcessGroupAlive(processGroupId)) {
                     await signalProcessGroup(ctx, processGroupId, "SIGKILL");
                 }
@@ -95,6 +90,31 @@ async function signalProcessGroup(
     } catch {
         // The group is already gone.
     }
+}
+
+const GROUP_EXIT_POLL_MS = 20;
+
+/**
+ * Waits out a grace period for groups that were asked to stop, ending it as soon as all of them
+ * have, and returns the ones still alive. A shutdown should not sit through the whole grace for
+ * groups that are already gone. A group seen gone is never reported again, so its identifier,
+ * which the system may hand to a stranger, is not signalled later.
+ */
+export async function waitForProcessGroupsExit(
+    groups: readonly number[],
+    timeoutMs: number,
+): Promise<readonly number[]> {
+    const deadline = Date.now() + timeoutMs;
+    let alive = groups.filter(isProcessGroupAlive);
+    while (alive.length > 0) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        await new Promise((resolve) => {
+            setTimeout(resolve, Math.min(GROUP_EXIT_POLL_MS, remainingMs)).unref();
+        });
+        alive = alive.filter(isProcessGroupAlive);
+    }
+    return alive;
 }
 
 function isUsableProcessGroupId(processGroupId: number): boolean {
