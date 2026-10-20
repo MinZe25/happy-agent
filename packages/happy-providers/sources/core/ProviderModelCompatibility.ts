@@ -1,8 +1,14 @@
 import { providerModelFamily } from "@/core/providerModelFamily.js";
 
-export type ProviderModelCompatibilityType = "bedrock" | "claude" | "codex" | "grok" | "gym";
+export type ProviderModelCompatibilityType =
+    | "bedrock"
+    | "claude"
+    | "codex"
+    | "foreign"
+    | "grok"
+    | "gym";
 
-export type ProviderModelFamily = "claude" | "codex" | "grok" | "kimi" | "glm";
+export type ProviderModelFamily = "claude" | "codex" | "foreign" | "grok" | "kimi" | "glm";
 
 export interface ProviderModelSelection {
     modelId: string;
@@ -23,11 +29,17 @@ export const PROVIDER_MODEL_COMPATIBILITY_MATRIX: Readonly<
     bedrock: {
         bedrock: ["claude", "codex", "kimi", "glm"],
     },
+    // A foreign agent keeps its own native context, and Happy replays its transcript into
+    // whichever foreign agent continues the conversation: Claude Code and Codex CLI move between
+    // accounts of their vendor, and agents with their own login between each other.
     claude: {
-        claude: ["claude"],
+        claude: ["claude", "foreign"],
     },
     codex: {
-        codex: ["codex"],
+        codex: ["codex", "foreign"],
+    },
+    foreign: {
+        foreign: ["foreign"],
     },
     grok: {
         grok: ["grok"],

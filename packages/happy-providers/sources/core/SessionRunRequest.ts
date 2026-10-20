@@ -30,4 +30,10 @@ export interface SessionRunRequest {
     effort?: SessionReasoningEffort;
     serviceTier?: SessionServiceTier;
     structuredOutput?: SessionStructuredOutput;
+    /**
+     * Raised when the user steers while this response streams. A provider whose agent runs its
+     * own loop ends the response soon after, or hands the steering to that loop, so it is not
+     * held back until the whole loop finishes. Providers that answer in one model call ignore it.
+     */
+    steered?: AbortSignal;
 }

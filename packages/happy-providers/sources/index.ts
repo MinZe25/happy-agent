@@ -273,3 +273,27 @@ export {
     tryLoadCredentials,
     type TryLoadCredentialsOptions,
 } from "@/vendors/tryLoadCredentials.js";
+export {
+    AcpProvider,
+    type AcpAgentLaunch,
+    type AcpAgentProfile,
+    type AcpBridgeDirectoryFile,
+    type AcpConfigOptionValue,
+    type AcpPermissionMode,
+    type AcpProviderOptions,
+    type AcpTurnEnvironment,
+} from "@/protocol/acp/AcpProvider.js";
+export { AcpSession, type AcpSessionOptions } from "@/protocol/acp/AcpSession.js";
+export { acpDiscoverModels } from "@/protocol/acp/acpDiscoverModels.js";
+export type { AcpSelectValue } from "@/protocol/acp/impl/acpConfigOptions.js";
+export {
+    FOREIGN_AGENT_TYPES,
+    foreignAgentModelName,
+    isForeignAgentModel,
+    type ForeignAgent,
+    type ForeignAgentCredentials,
+    type ForeignAgentModel,
+    type ForeignAgentStart,
+    type ForeignAgentType,
+} from "@/vendors/foreignAgents/ForeignAgent.js";
+export { FOREIGN_AGENTS, foreignAgent } from "@/vendors/foreignAgents/foreignAgents.js";

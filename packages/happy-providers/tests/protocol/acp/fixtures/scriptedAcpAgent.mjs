@@ -1,0 +1,161 @@
+// A scripted ACP agent for AcpSession tests. It speaks real ACP over stdio and calls Happy's
+// tools through the real MCP bridge it is given. Every request it receives is appended to the
+// JSON-lines file named by SCRIPTED_ACP_LOG so a test can assert what was sent.
+//
+// Prompt directives: "use happy" calls the bridged happy_secret tool and replies with its answer;
+// "wait" holds the prompt open until cancelled or steered; anything else is echoed back.
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { Readable, Writable } from "node:stream";
+
+import * as acp from "@agentclientprotocol/sdk";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+const log = (entry) =>
+    appendFileSync(
+        process.env.SCRIPTED_ACP_LOG,
+        `${JSON.stringify({ ...entry, pid: process.pid })}\n`,
+    );
+const sessionsFile = `${process.env.SCRIPTED_ACP_LOG}.sessions`;
+const known = () =>
+    existsSync(sessionsFile) ? JSON.parse(readFileSync(sessionsFile, "utf8")) : {};
+
+class ScriptedAgent {
+    #conn;
+    #servers = new Map();
+    #cancelled = new Map();
+
+    constructor(conn) {
+        this.#conn = conn;
+    }
+
+    async initialize() {
+        return {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            agentCapabilities: { loadSession: true, mcpCapabilities: { http: true, sse: false } },
+        };
+    }
+
+    async newSession(params) {
+        const sessionId = `s${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
+        this.#servers.set(sessionId, params.mcpServers);
+        writeFileSync(sessionsFile, JSON.stringify({ ...known(), [sessionId]: true }));
+        log({ method: "newSession", sessionId, mcpServers: params.mcpServers.length });
+        return {
+            sessionId,
+            configOptions: [
+                {
+                    id: "model",
+                    name: "Model",
+                    category: "model",
+                    type: "select",
+                    currentValue: "m1",
+                    options: [
+                        { value: "m1", name: "Model One" },
+                        {
+                            group: "more",
+                            name: "More",
+                            options: [{ value: "m2-high", name: "Model Two (High)" }],
+                        },
+                    ],
+                },
+            ],
+        };
+    }
+
+    async loadSession(params) {
+        if (known()[params.sessionId] !== true)
+            throw acp.RequestError.resourceNotFound(params.sessionId);
+        this.#servers.set(params.sessionId, params.mcpServers);
+        log({ method: "loadSession", sessionId: params.sessionId });
+        // A real agent replays history here; the client must ignore it.
+        await this.#say(params.sessionId, "REPLAYED-HISTORY");
+        return {};
+    }
+
+    async setSessionConfigOption(params) {
+        log({ method: "setSessionConfigOption", configId: params.configId, value: params.value });
+        return { configOptions: [] };
+    }
+
+    async authenticate() {
+        return {};
+    }
+
+    // "_happy/steer" hands text to a waiting prompt, standing in for a vendor's mid-turn input.
+    async extMethod(method, params) {
+        log({ method, sessionId: params.sessionId, text: params.text });
+        const waiting = this.#cancelled.get(params.sessionId);
+        this.#cancelled.delete(params.sessionId);
+        waiting?.(params.text);
+        return { taken: waiting !== undefined };
+    }
+
+    async prompt(params) {
+        const text = params.prompt
+            .map((block) => (block.type === "text" ? block.text : ""))
+            .join("\n");
+        log({ method: "prompt", sessionId: params.sessionId, text });
+        // "silent" reports nothing at all, as an agent may before it binds its conversation.
+        if (!text.includes("silent"))
+            await this.#conn.sessionUpdate({
+                sessionId: params.sessionId,
+                update: {
+                    sessionUpdate: "tool_call",
+                    toolCallId: `own-${Date.now()}`,
+                    title: "Read README.md",
+                    kind: "read",
+                    status: "completed",
+                    content: [{ type: "content", content: { type: "text", text: "# readme" } }],
+                },
+            });
+        if (text.includes("wait")) {
+            const steered = await new Promise((resolve) =>
+                this.#cancelled.set(params.sessionId, resolve),
+            );
+            if (typeof steered !== "string") return { stopReason: "cancelled" };
+            await this.#say(params.sessionId, `steered:${steered}`);
+            return { stopReason: "end_turn" };
+        }
+        if (text.includes("use happy")) {
+            const server = this.#servers.get(params.sessionId)?.[0];
+            const client = new Client({ name: "scripted", version: "1" });
+            await client.connect(
+                new StreamableHTTPClientTransport(new URL(server.url), {
+                    requestInit: {
+                        headers: Object.fromEntries(server.headers.map((h) => [h.name, h.value])),
+                    },
+                }),
+            );
+            const tools = await client.listTools();
+            log({ method: "mcp.listTools", names: tools.tools.map((tool) => tool.name) });
+            const result = await client.callTool({
+                name: "happy_secret",
+                arguments: { why: "test" },
+            });
+            await client.close();
+            await this.#say(params.sessionId, `secret=${result.content[0].text}`);
+            return { stopReason: "end_turn" };
+        }
+        await this.#say(params.sessionId, `echo:${text}`);
+        return {
+            stopReason: "end_turn",
+            usage: { inputTokens: 10, outputTokens: 3, totalTokens: 13 },
+        };
+    }
+
+    async cancel(params) {
+        log({ method: "cancel", sessionId: params.sessionId });
+        this.#cancelled.get(params.sessionId)?.();
+    }
+
+    async #say(sessionId, text) {
+        await this.#conn.sessionUpdate({
+            sessionId,
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+        });
+    }
+}
+
+const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
+new acp.AgentSideConnection((conn) => new ScriptedAgent(conn), stream);
