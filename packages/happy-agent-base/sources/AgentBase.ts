@@ -672,6 +672,12 @@ export class AgentBase {
     readonly #callLifetimes = new Map<string, AbortController>();
     /** Active tool executions whose own definition opts into cooperative steering cancellation. */
     readonly #steerableToolExecutions = new Set<AbortController>();
+    /**
+     * Raised when steering is accepted while this response streams. A provider that runs its own
+     * agent loop ends its response early on it, so the steering lands now instead of after that
+     * whole loop.
+     */
+    #steeredResponse: AbortController | undefined;
     /** Raised once sticky drain or shutdown stops accepting steerable execution latency. */
     readonly #stopSteerableToolsController = new AbortController();
     /** One shared race edge, so completed tools do not leave listeners behind until shutdown. */
@@ -1516,9 +1522,13 @@ export class AgentBase {
         this.#startRun();
     }
 
-    /** Abort only active tool execution signals that explicitly opted into steering. */
+    /**
+     * Abort only active tool execution signals that explicitly opted into steering, and tell the
+     * response in flight, if any, that steering is waiting for it.
+     */
     #interruptSteerableTools(): void {
         for (const execution of this.#steerableToolExecutions) execution.abort();
+        this.#steeredResponse?.abort();
     }
 
     /** Make one committed pending record the exact in-memory lifecycle state. */
@@ -3108,6 +3118,8 @@ export class AgentBase {
         // established behavior: once its inference hook has begun, graceful shutdown lets that
         // operation proceed through the provider request before stopping.
         if (this.#draining) return undefined;
+        const steered = new AbortController();
+        this.#steeredResponse = steered;
         const stream = session.run(this.#workContext(ctx), {
             context: {
                 instructions,
@@ -3116,13 +3128,16 @@ export class AgentBase {
             ...(this.#model === undefined ? {} : { model: this.#model }),
             ...(this.#effort === undefined ? {} : { effort: this.#effort }),
             ...(this.#serviceTier === undefined ? {} : { serviceTier: this.#serviceTier }),
+            steered: steered.signal,
         });
         const { content, state, errorMessage, tokens } = await this.#collect(
             ctx,
             stream,
             abortPromise,
             tools,
-        );
+        ).finally(() => {
+            if (this.#steeredResponse === steered) this.#steeredResponse = undefined;
+        });
         // A cancellation or a stream ending without a done event did not answer an appended
         // notice. Keep that obligation and reopen it under a fresh turn scope. Every terminal
         // provider outcome counts as the response, including an error.
