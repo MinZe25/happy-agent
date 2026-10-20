@@ -20,8 +20,6 @@ import { resolveModuleHooks } from "../../support/moduleHooks.js";
 /** One agent's compute tools, with the module they came from and a way to reach one by name. */
 export interface ComputeToolset {
     readonly module: ComputeModule;
-    /** The module's started hooks, so another agent can be served by the same module. */
-    readonly hooks: Awaited<ReturnType<typeof resolveModuleHooks>>;
     readonly tools: readonly AnyAgentTool[];
     readonly tool: (name: string) => Omit<AnyAgentTool, "execute"> & {
         readonly execute: (ctx: Context, input: any, call?: AgentToolCall) => Promise<any>;
@@ -92,8 +90,6 @@ export async function computeToolset(
         readonly agentId?: string;
         readonly model?: string;
         readonly providerKind?: "bedrock" | "claude" | "codex" | "grok" | "gym";
-        /** Serve this agent from another agent's module, as one daemon serves parent and child. */
-        readonly sharedWith?: ComputeToolset;
     } = {},
 ): Promise<ComputeToolset> {
     const agentId = options.agentId ?? "compute-agent";
@@ -101,9 +97,7 @@ export async function computeToolset(
         id: "host",
         create: async () => compute,
     };
-    const module =
-        options.sharedWith?.module ??
-        ComputeModule.withProvider(testConfig, new SecretsModule(), provider);
+    const module = ComputeModule.withProvider(testConfig, new SecretsModule(), provider);
     const agentCtx = withAgentConfig(ctx, {
         modules: { compute: { cwd: compute.cwd, providerId: "host" } },
     });
@@ -119,7 +113,7 @@ export async function computeToolset(
         },
         kv,
     } as AgentModuleScope;
-    const hooks = options.sharedWith?.hooks ?? (await resolveModuleHooks(agentCtx, module));
+    const hooks = await resolveModuleHooks(agentCtx, module);
     const tools = await hooks.tools!(agentCtx, scope);
     const call = {
         id: "computetestcall",
@@ -128,7 +122,6 @@ export async function computeToolset(
     } as AgentToolCall;
     return {
         module,
-        hooks,
         tools,
         call,
         tool: (name) => {
