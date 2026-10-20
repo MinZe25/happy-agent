@@ -57,22 +57,6 @@ export const collaborationCreateInputSchema = Type.Object(
 );
 
 /**
- * What a model passes to `create_agent`. Like Codex's `spawn_agent`, the model and effort may be
- * omitted, and the collaborator then runs on its creator's own model and effort.
- */
-export const collaborationToolCreateInputSchema = Type.Object(
-    {
-        title: Type.String({ minLength: 1, maxLength: 256 }),
-        model: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        effort: Type.Optional(collaborationEffortSchema),
-        provider: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        serviceTier: Type.Optional(collaborationServiceTierSchema),
-        text: collaborationMessageTextSchema,
-    },
-    { additionalProperties: false },
-);
-
-/**
  * What a collaborator runs on. It is chosen once, when the collaborator is created, and never
  * again: a later message may ask a collaborator to do something, but not to become a different
  * model, think harder, or run with wider permissions.
@@ -126,7 +110,6 @@ export type CollaborationEffort = Static<typeof collaborationEffortSchema>;
 export type CollaborationServiceTier = Static<typeof collaborationServiceTierSchema>;
 export type CollaborationAgentSelection = Static<typeof collaborationAgentSelectionSchema>;
 export type CollaborationCreateInput = Static<typeof collaborationCreateInputSchema>;
-export type CollaborationToolCreateInput = Static<typeof collaborationToolCreateInputSchema>;
 export type CollaborationCreateOptions = Static<typeof collaborationCreateOptionsSchema>;
 export type CollaborationSendInput = Static<typeof collaborationSendInputSchema>;
 export type CollaborationCreateResult = Static<typeof collaborationCreateResultSchema>;
