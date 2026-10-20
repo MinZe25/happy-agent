@@ -93,15 +93,32 @@ Accounts follow the desktop model picker: configuration order, which is the orde
 `providers`, with each vendor placed where its first account appears. Hidden accounts are left
 out there, so they are left out here.
 
-## The glyph is a star, drawn at full strength
+## The glyph is Happy's H, drawn at full strength
 
-The icon is a five-pointed star: still when nothing is running, turning slowly while agents work.
-It replaced an equalizer of three bars, which was both the wrong mark and, at rest, indistinguishable
-from an ellipsis.
+The icon is the same H as the app icon and `logo.png`: a three-by-three grid with seven square
+cells filled and only the four outer corners rounded. The person disliked the earlier star — the
+wrong mark — and asked for the H everywhere. Before the star there was an equalizer of three bars,
+which at rest was indistinguishable from an ellipsis.
 
-Draw the template image with solid black and no alpha. An earlier version dimmed the resting glyph
-to 55% alpha, which made it visibly washed out beside every other menu bar icon — macOS already
-tints and inverts a template image, so anything less than full strength is wrong.
+While something is working, cells flash at random: one or two at a time dim softly to a quarter
+strength and come back over most of a second. The person found a flip animation flat and asked
+for random flashes that clearly show activity without being overwhelming. The timer runs only while
+work is in flight, at ten frames a second, and skips frames where nothing changed. With Reduce Motion
+on nothing moves; the middle cell stays dimmed instead, so working still differs from idle. While the
+daemon is not answering, the button uses the system's disabled appearance.
+
+It must look like the other status items, and nothing is ever drawn behind it. A first version
+filled 16 of the 18 points with heavy cells and read as a solid block; the person asked for no
+background and for the style of the icons around it. The H is now 14 points tall in the
+standard 18-point image — 4-point cells and 1-point gaps — matching the height and weight of filled
+SF Symbols such as `lock.fill` and `switch.2`, the way brand glyphs like Dropbox's are filled
+silhouettes. It stays filled rather than outlined because the logo is filled and an outline
+turns into muddy rings at 1x. Wider gaps break the H into a grid of dots; narrower ones vanish at 1x.
+Cells, gaps, and placement are snapped to whole device pixels so the gaps stay crisp lines.
+
+Draw the resting template image with solid black and no alpha. An earlier version dimmed the resting
+glyph to 55% alpha, which made it visibly washed out beside every other menu bar icon — macOS already
+tints and inverts a template image, so anything less than full strength at rest is wrong.
 
 ## Provider names are the person's, not the config's
 

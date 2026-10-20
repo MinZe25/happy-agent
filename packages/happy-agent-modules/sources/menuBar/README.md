@@ -1,7 +1,10 @@
 # Menu bar
 
-A small native macOS app that puts the agents in the system menu bar. Clicking it shows a compact,
-read-only menu:
+A small native macOS app that puts the agents in the system menu bar. Its icon is Happy's H, the
+same mark as the app icon, drawn as a 14-point transparent template glyph sized like the SF Symbols
+beside it: still while nothing is working, with a cell or two at a time softly
+flashing while something is, static with the middle cell dimmed when Reduce Motion is on, and
+greyed out while the daemon is not answering. Clicking it shows a compact, read-only menu:
 
 ```text
 3 working                    1.3M tokens in 24h

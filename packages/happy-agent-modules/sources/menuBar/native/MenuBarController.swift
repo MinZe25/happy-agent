@@ -20,14 +20,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var workingSince: [String: Date] = [:]
     private var pendingRefresh: DispatchWorkItem?
     private var animation: Timer?
+    private var iconAnimation = StatusIconAnimation()
+    private var randomness = SystemRandomNumberGenerator()
     private var openMenuTick: Timer?
     private var isMenuOpen = false
-    private var phase = 0.0
 
     private static let planRefreshInterval: TimeInterval = 24 * 60 * 60
-    /// A calm three seconds per turn, fast enough to read as activity and slow enough to ignore.
-    private static let spinFrameInterval: TimeInterval = 1.0 / 30
-    private static let spinPerFrame = 2 * Double.pi / (3 * 30)
     private static let refreshCoalescingDelay: TimeInterval = 0.2
     private static let reconnectDelay: TimeInterval = 2
 
@@ -46,8 +44,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             menu.addItem(item)
         }
         statusItem.menu = menu
-        statusItem.button?.image = StatusIcon.image(phase: 0, working: false)
+        statusItem.button?.image = StatusIcon.resting
         statusItem.button?.toolTip = "Happy Agent"
+        // Reduce Motion can be switched while the app runs; the icon follows it at once.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.stopAnimating()
+            self?.updateIcon()
+        }
         Timer.scheduledTimer(withTimeInterval: MenuBarController.planRefreshInterval, repeats: true) {
             [weak self] _ in
             self?.refreshPlans()
@@ -146,27 +153,49 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     // MARK: - Drawing
 
+    /// The H at rest when nothing is working, flashing while something is, and greyed out the way
+    /// macOS greys any disabled status item while the daemon is not answering.
+    ///
+    /// The animation timer exists only while work is in flight, and a frame where no cell changed
+    /// redraws nothing. With Reduce Motion on there is no timer at all: the middle cell stays
+    /// dimmed instead, so working still reads differently from idle without anything moving.
     private func updateIcon() {
+        statusItem.button?.appearsDisabled = !snapshot.connected
         let working = !snapshot.working.isEmpty
-        if working, animation == nil {
-            let timer = Timer.scheduledTimer(
-                withTimeInterval: MenuBarController.spinFrameInterval,
-                repeats: true
-            ) { [weak self] _ in
-                guard let self else { return }
-                self.phase += MenuBarController.spinPerFrame
-                self.statusItem.button?.image = StatusIcon.image(phase: self.phase, working: true)
+        guard working else {
+            stopAnimating()
+            statusItem.button?.image = StatusIcon.resting
+            return
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            var strengths = Array(repeating: 1.0, count: StatusIcon.cells.count)
+            strengths[StatusIcon.bridge] = StatusIconAnimation.dimmest
+            statusItem.button?.image = StatusIcon.image(strengths: strengths)
+            return
+        }
+        guard animation == nil else { return }
+        iconAnimation = StatusIconAnimation()
+        let timer = Timer.scheduledTimer(
+            withTimeInterval: StatusIconAnimation.frameInterval,
+            repeats: true
+        ) { [weak self] _ in
+            guard let self else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            guard let strengths = self.iconAnimation.step(at: now, using: &self.randomness) else {
+                return
             }
-            // The menu bar keeps drawing while a menu is tracking, so the star keeps turning.
-            RunLoop.main.add(timer, forMode: .eventTracking)
-            animation = timer
+            self.statusItem.button?.image = StatusIcon.image(strengths: strengths)
         }
-        if !working {
-            animation?.invalidate()
-            animation = nil
-            phase = 0
-        }
-        statusItem.button?.image = StatusIcon.image(phase: phase, working: working)
+        // A little slack lets the system batch the wakeups with others.
+        timer.tolerance = StatusIconAnimation.frameInterval / 2
+        // The menu bar keeps drawing while a menu is tracking, so the H keeps flashing.
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        animation = timer
+    }
+
+    private func stopAnimating() {
+        animation?.invalidate()
+        animation = nil
     }
 
     /// Replaces the rows in place: the items stay, so an open menu keeps its scroll position.
