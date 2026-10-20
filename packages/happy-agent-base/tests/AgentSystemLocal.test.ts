@@ -315,12 +315,13 @@ describe("AgentSystemLocal", () => {
                 },
             });
         };
+        // Both owe work, so both are restored at start; their configurations are read there.
         const failedPersistence = new (class extends InMemoryPersistence {
             override readValues(
                 readCtx: Context,
                 prefix: string,
             ): ReturnType<InMemoryPersistence["readValues"]> {
-                if (prefix === "owed") {
+                if (prefix === "agentConfig") {
                     return Promise.reject(new Error("Failed to restore one agent."));
                 }
                 return super.readValues(readCtx, prefix);
@@ -331,7 +332,7 @@ describe("AgentSystemLocal", () => {
                 readCtx: Context,
                 prefix: string,
             ): ReturnType<InMemoryPersistence["readValues"]> {
-                if (prefix === "owed") {
+                if (prefix === "agentConfig" && !slowStarted) {
                     slowStarted = true;
                     await new Promise<void>((resolve) => {
                         releaseSlow = resolve;
@@ -341,6 +342,7 @@ describe("AgentSystemLocal", () => {
                 return await super.readValues(readCtx, prefix);
             }
         })();
+        failedPersistence.values.set("owed", { stage: "inference", loopId: LOOP_ID });
         slowPersistence.values.set("owed", { stage: "inference", loopId: LOOP_ID });
         const storage = (): InMemoryAgentStorage =>
             new InMemoryAgentStorage({
@@ -965,32 +967,39 @@ describe("AgentSystemLocal", () => {
             environment: environmentOf("/work/active"),
         });
         managerPersistence.values.set("agentSystem.config.idle", {});
-        const loaded: string[] = [];
+        const restored: string[] = [];
 
         const agentSystem = await AgentSystemLocal.create(
             ctx,
             new InMemoryAgentStorage({
                 acquireLock: inMemoryStorageLock(),
                 kv: managerKV(managerPersistence),
-                persistence: (id) => {
-                    loaded.push(id);
-                    return id === "active" ? activePersistence : idlePersistence;
-                },
+                persistence: (id) => (id === "active" ? activePersistence : idlePersistence),
             }),
             {
-                modules: [],
+                modules: [
+                    {
+                        name: "restorations",
+                        beforeStart: () => ({
+                            agentRestoredTransact: (_hookCtx, _scope, agent) => {
+                                restored.push(agent.id);
+                            },
+                        }),
+                    },
+                ],
                 providers: providersOf(activeProvider),
                 provider: "scripted",
                 models: [],
             },
         );
+        expect(restored).toEqual(["active"]);
 
         await agentSystem.resolve(ctx, "idle");
         const active = await agentSystem.resolve(ctx, "active");
         await active.waitForIdle();
 
         // The active one was resumed by the start itself; the idle one waited to be asked for.
-        expect(loaded).toEqual(["active", "idle"]);
+        expect(restored).toEqual(["active", "idle"]);
         expect(activeProvider.sessions[0]?.requests[0]?.context.messages).toEqual([
             user("continue"),
         ]);
@@ -1444,6 +1453,10 @@ describe("AgentSystemLocal shared modules", () => {
         await first.close(ctx);
 
         const second = await AgentSystemLocal.create(ctx, storage(), options);
+        // Nothing owes work, so nothing is restored until the agent is first used.
+        expect(events).toEqual(["created:transact", "created:created"]);
+        await second.resolve(ctx, agent.id);
+        await until(() => restoredRefId !== undefined);
         await second.delete(ctx, agent.id);
         await second.close(ctx);
 

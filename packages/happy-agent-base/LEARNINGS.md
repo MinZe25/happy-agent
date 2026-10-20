@@ -131,6 +131,33 @@ it only when its store says it is `active`, the same rule startup and creation a
 Accepted messages, notices, and compactions start an idle agent through their own activation
 path, so nothing that owes work is stranded.
 
+## Only agents with work are restored at start
+
+Start used to read every configuration and run every module's restoration hooks for every agent,
+one transaction each. On a real home with about a thousand agents and none of them active, that
+was most of the time to ready, and every restart also recorded `agent.restored` for each agent,
+which the API turned into an `agent.updated` that bumped every agent's version. Start now decides
+in one transaction: the agents whose `owed` record is valid, plus those a module names through
+`agentsToRestoreTransact` (a wait left `waiting`, a run left open). Those are restored, and the
+owing ones resumed, before ready. Every other agent is restored once per process by its first
+use: a resolve, a delivery, a metadata change, an abort, a compaction, or an archival. Reading a
+configuration or a relation is not a use. A created agent counts as restored.
+
+Restoration runs under the identity lock, or inside the caller's transaction when the use is
+transactional. An agent counts as restored only after that transaction commits, so a rollback
+restores it again on its next use, while a second use inside the same transaction does not. The
+database's FIFO holds through `afterCommit`, so the next transaction already sees the commit.
+
+Start loads an owing agent outside any transaction and without the identity lock a transaction
+would take, so a restoration observer, or any message, can deliver to that agent in a
+transaction while start is loading it; the transaction then publishes and starts its own
+instance. Start therefore loads its instance unpublished and discards it when one is already
+live, instead of failing with "already has a live instance".
+
+The lazy-versus-eager comparison in `AgentSystemLocalRestore.test.ts` replays each left-behind
+state through each first use and a fixed-seed random history, and requires the same answers,
+durable state, and hook log as restoring every agent at start.
+
 ## Open: persistence failures are still survivable
 
 Master plan 08 says a database failure terminates the system, but `#enterStage` without a hook,

@@ -13,6 +13,7 @@ import {
 
 import { Agent } from "./Agent.js";
 import { type AgentBaseMessageOptions, type AgentBaseQueueMode } from "./AgentBase.js";
+import { agentBaseAgentsOwingWork } from "./AgentBasePending.js";
 import {
     agentDatabase,
     agentId as agentIdOf,
@@ -155,6 +156,15 @@ export class AgentSystemLocal<
         AgentStorageTransactionContext,
         Map<string, TransactionAgentEntry<Database> | null>
     >();
+    /**
+     * Identities this process has restored or created, so their restoration runs at most once in
+     * it. An identity joins once the transaction that restored or created it commits. A deleted
+     * one may stay: nothing restores an identity without a configuration, and only creating it
+     * again gives it one.
+     */
+    readonly #restored = new Set<string>();
+    /** Identities restored inside a transaction that has not committed yet. */
+    readonly #transactionRestored = new WeakMap<AgentStorageTransactionContext, Set<string>>();
     // One agent has one store for the life of the collection, so inspecting an agent's durable
     // work and running that agent never end up looking at two different stores.
     readonly #persistences = new Map<string, AgentPersistence>();
@@ -184,9 +194,9 @@ export class AgentSystemLocal<
      *
      * A collection is not a passive registry that happens to be asked for agents later: whatever
      * was running when the previous process ended is still owed an answer, and this is what
-     * makes it happen. Every identity the storage holds is examined, and each one that owes work
-     * is resolved and resumed, so by the time this returns the collection is not merely built
-     * but running.
+     * makes it happen. Each identity that owes work is restored, resolved, and resumed, so by the
+     * time this returns the collection is not merely built but running. Every other identity is
+     * restored the first time something uses it.
      */
     static async create<Database extends AgentDatabase>(
         ctx: Context,
@@ -476,6 +486,9 @@ export class AgentSystemLocal<
                         (hooks) => hooks.agentCreatedTransact,
                         (hooks) => hooks.agentCreated,
                     );
+                    // A created agent starts this process's lifetime of it, so it has nothing
+                    // to be restored from.
+                    this.#markRestored(txCtx, agentId);
                 });
                 // Creation publishes an idle lifetime. Accepted work starts it through the same
                 // durable activation path as every later message; starting here would enter an
@@ -535,6 +548,9 @@ export class AgentSystemLocal<
                     await agent?.close();
                 }
                 await this.#configs.transaction(lockCtx, async (_configs, txCtx) => {
+                    // Archival is a use like any other, so modules see an agent restored before
+                    // it is archived whether or not anything used it earlier in this process.
+                    if (config !== undefined) await this.#restore(txCtx, agentId, config);
                     await this.#configs.delete(txCtx, agentId);
                     await this.#parents.delete(txCtx, agentId);
                     const children = await this.#parents.list(txCtx);
@@ -715,6 +731,7 @@ export class AgentSystemLocal<
             if (config === undefined) {
                 throw new Error(`Agent "${agentId}" has not been created.`);
             }
+            await this.#restore(lockCtx, agentId, config);
             const published = this.#agents.get(agentId);
             if (published !== undefined) return published;
             const agent = await this.#instantiate(agentId, config, false, false, undefined, false);
@@ -798,34 +815,55 @@ export class AgentSystemLocal<
     }
 
     /**
-     * Resolve and resume every agent that has work left from before this process started.
+     * Restore the agents that cannot wait to be asked for, and resolve and resume the ones with
+     * work left from before this process started.
      *
-     * The active index is a fast answer, not the authority. It is written by a live run and can
-     * Every identity the storage holds is asked whether it has work left, and the ones that do
-     * are built and set going. The question is one key in the agent's own store, and only the
-     * agent answers it: the collection keeps no index of its own to go stale, and an identity is
-     * never dismissed on the strength of something written about it elsewhere.
+     * One transaction decides which agents those are: every agent whose own store holds a
+     * pending record, read for the whole collection in a single query, and every agent a module
+     * names because durable state of its own has to be reconciled first. The pending record is
+     * the agent's own answer, so the collection keeps no index of its own to go stale. Every other
+     * agent is restored the first time something uses it, which lets a store holding a thousand
+     * idle identities start nearly as quickly as an empty one.
      *
      * Building the agent is all this does. An agent picks its own work back up when it is
      * loaded, so the collection has only to bring the right ones into existence.
      */
     async #start(ctx: Context): Promise<readonly Agent<AnyAgentTool, Database>[]> {
-        const created = await this.#configs.list(ctx);
+        const { owing, restoring } = await this.#storage.transaction(ctx, async (txCtx) => {
+            const owing = await agentBaseAgentsOwingWork(txCtx, this.#storage);
+            const restoring = new Set(owing);
+            const hookCtx = withAgentSystem(txCtx, this.#ref);
+            for (const runtime of this.#runtimes) {
+                const named = (await runtime.hooks.agentsToRestoreTransact?.(hookCtx)) ?? [];
+                for (const agentId of named) restoring.add(agentId);
+            }
+            return { owing, restoring };
+        });
         const results = await Promise.allSettled(
-            created.map(async ({ key: agentId }) => {
+            [...restoring].map(async (agentId) => {
                 return await this.#lockFor(agentId).runInLock(ctx, async (lockCtx) => {
                     if (this.#agents.has(agentId)) return undefined;
                     const config = await this.#config(lockCtx, agentId);
                     if (config === undefined) return undefined;
-                    await this.#storage.transaction(lockCtx, async (txCtx) => {
-                        await this.#recordLifecycle(
-                            txCtx,
-                            lifecycleAgent(agentId, config),
-                            (hooks) => hooks.agentRestoredTransact,
-                            (hooks) => hooks.agentRestored,
-                        );
-                    });
-                    return await this.#instantiate(agentId, config, true, false);
+                    await this.#restore(lockCtx, agentId, config);
+                    if (!owing.has(agentId)) return undefined;
+                    const agent = await this.#instantiate(
+                        agentId,
+                        config,
+                        true,
+                        false,
+                        undefined,
+                        false,
+                    );
+                    if (agent === undefined) return undefined;
+                    // A transaction delivering to this agent while it loaded holds no identity
+                    // lock, and has published and set going an instance of its own.
+                    if (this.#agents.has(agentId)) {
+                        await agent.close();
+                        return undefined;
+                    }
+                    this.#publish(agent, false);
+                    return agent;
                 });
             }),
         );
@@ -834,6 +872,50 @@ export class AgentSystemLocal<
         return results.flatMap((result) =>
             result.status === "fulfilled" && result.value !== undefined ? [result.value] : [],
         );
+    }
+
+    /**
+     * Run one identity's restoration hooks, once in this process and before anything uses the
+     * agent. Called with the agent's lock held, or inside the transaction about to use it, whose
+     * commit the restoration then shares. A transaction keeps the database until its commit is
+     * published, so a caller whose transaction waited behind one that restored this agent sees
+     * that it already has.
+     */
+    async #restore(ctx: Context, agentId: string, config: AgentConfig): Promise<void> {
+        if (this.#restored.has(agentId)) return;
+        await this.#storage.transaction(ctx, async (txCtx) => {
+            const transaction = agentStorageTransaction(txCtx);
+            if (
+                this.#restored.has(agentId) ||
+                (transaction !== undefined &&
+                    this.#transactionRestored.get(transaction)?.has(agentId) === true)
+            ) {
+                return;
+            }
+            await this.#recordLifecycle(
+                txCtx,
+                lifecycleAgent(agentId, config),
+                (hooks) => hooks.agentRestoredTransact,
+                (hooks) => hooks.agentRestored,
+            );
+            this.#markRestored(txCtx, agentId);
+        });
+    }
+
+    /** Count an identity as restored in its transaction, and in this process once that commits. */
+    #markRestored(txCtx: Context, agentId: string): void {
+        const transaction = agentStorageTransaction(txCtx);
+        if (transaction !== undefined) {
+            let restored = this.#transactionRestored.get(transaction);
+            if (restored === undefined) {
+                restored = new Set();
+                this.#transactionRestored.set(transaction, restored);
+            }
+            restored.add(agentId);
+        }
+        afterCommit(txCtx, () => {
+            this.#restored.add(agentId);
+        });
     }
 
     /** Run one lifecycle projection in its durable transaction and observe it after commit. */
@@ -1024,7 +1106,8 @@ export class AgentSystemLocal<
     }
 
     /**
-     * Transactional delivery may load an idle target through the transaction it already owns.
+     * Transactional delivery may restore and load an idle target through the transaction it
+     * already owns.
      * The provisional object is published only after commit, before the database owner admits
      * another root operation. A rollback therefore leaves neither a live object nor leaked
      * uncommitted state, and this path never waits for an identity lock while owning the database.
@@ -1073,6 +1156,7 @@ export class AgentSystemLocal<
         }
         const concurrent = this.#agents.get(agentId);
         if (concurrent !== undefined) return concurrent;
+        if (!fresh) await this.#restore(ctx, agentId, config);
         const agent = await this.#instantiate(agentId, config, false, false, ctx, false, fresh);
         if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
         const entry: TransactionAgentEntry<Database> = { agent, start };

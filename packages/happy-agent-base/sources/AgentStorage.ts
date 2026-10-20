@@ -97,6 +97,30 @@ export class AgentStorage<Database extends AgentDatabase = AgentDatabase> {
         return this.#persistence(agentId);
     }
 
+    /**
+     * Every agent's value under one key of its own store, read in a single query. An owner
+     * coming up asks this for the pending record, so finding the few agents with work left costs
+     * one read rather than one for every identity the store holds.
+     */
+    async agentValues(
+        ctx: Context,
+        key: string,
+    ): Promise<readonly { readonly agentId: string; readonly value: unknown }[]> {
+        return await this.#drizzle.transaction(ctx, async (txCtx) => {
+            const rows = await agentDatabaseRows<{ owner_id: string; value_json: string }>(
+                txCtx.db,
+                sql`SELECT owner_id, value_json
+                    FROM happy_agent_values
+                    WHERE key = ${key} AND owner_id <> ''
+                    ORDER BY owner_id`,
+            );
+            return rows.map(({ owner_id, value_json }) => ({
+                agentId: owner_id,
+                value: JSON.parse(value_json) as unknown,
+            }));
+        });
+    }
+
     /** Run work in this storage's internally managed transaction. */
     async transaction<Result>(
         ctx: Context,

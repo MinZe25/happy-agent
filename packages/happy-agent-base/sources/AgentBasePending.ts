@@ -4,6 +4,7 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentPersistence } from "./AgentPersistence.js";
 import { cuid2Schema } from "./AgentMetadata.js";
+import type { AgentStorage } from "./AgentStorage.js";
 
 /**
  * The one key an agent's outstanding work lives under, in the agent's own store. It is a single
@@ -62,9 +63,24 @@ export async function agentBasePendingStateOf(
 }
 
 /**
+ * The agents in one storage that have work left, read for the whole collection in one query. An
+ * owner starting up asks this instead of asking every identity it holds, and a record that is not
+ * a pending state counts as none here exactly as it does for a single store.
+ */
+export async function agentBaseAgentsOwingWork(
+    ctx: Context,
+    storage: AgentStorage,
+): Promise<ReadonlySet<string>> {
+    const owing = new Set<string>();
+    for (const { agentId, value } of await storage.agentValues(ctx, AGENT_BASE_PENDING_KEY)) {
+        if (Value.Check(AgentBasePendingState, value)) owing.add(agentId);
+    }
+    return owing;
+}
+
+/**
  * Whether one agent's store has work left, asked from outside the agent. This is the question an
- * owner starting up needs answered — which identities are worth resuming — and the one it needs
- * again before declaring an identity finished.
+ * owner needs answered before declaring an identity finished.
  *
  * Only the pending record counts. Conversation shape is deliberately not a liveness signal: a
  * completed response may legitimately leave any role at the tail, while scheduling work records

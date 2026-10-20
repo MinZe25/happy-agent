@@ -195,6 +195,14 @@ export interface AgentModuleHooks<
      * runs concurrently, and system creation resolves only after all of them settle successfully.
      */
     readonly afterStart?: (ctx: Context, agents: AgentSystemRef<Database>) => MaybePromise<void>;
+    /**
+     * The agents this module needs restored as the collection starts, beside every agent that
+     * owes work. Asked once, after every module's beforeStart, inside the one transaction that
+     * decides which agents start. Every other agent is restored the first time something uses
+     * it, so a module names only agents whose durable state of its own must be reconciled before
+     * anything reads it, such as a projection the last process left showing work in progress.
+     */
+    readonly agentsToRestoreTransact?: (ctx: Context) => MaybePromise<readonly string[]>;
     readonly agentCreatedTransact?: (
         ctx: Context,
         scope: AgentModuleSystemScope<Database>,

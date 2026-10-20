@@ -156,9 +156,9 @@ A module is a name, its migrations, and one entry point: `beforeStart(ctx, agent
 the module does at runtime is in the `AgentModuleHooks` object that entry point returns —
 including `afterStart` and every agent and lifecycle hook — so implementations close over the
 state `beforeStart` built instead of living on the module object. Returning nothing means the
-module only migrates and initializes. Every `beforeStart` settles successfully before active
-agents are restored; every returned `afterStart` runs after those agents are restored and
-started. Both receive the system's `AgentSystemRef`; their context carries the root database.
+module only migrates and initializes. Every `beforeStart` settles successfully before any agent
+is restored; every returned `afterStart` runs after the agents restored at startup are restored
+and the active ones started. Both receive the system's `AgentSystemRef`; their context carries the root database.
 All hooks may return synchronously or with a promise, including `onEvent`; the runtime awaits each
 answer and contains failures from observing hooks.
 
@@ -190,6 +190,15 @@ repeats the same prefix. A trailing native compaction is continued as it stands.
 Modules may also observe agent creation, restoration, metadata changes, and archival. Creation,
 restoration, and archival provide transactional and post-commit hook pairs with an immutable agent
 ID/metadata snapshot and module-scoped shared KV.
+
+Each process restores an identity once, before its first use. One transaction at startup decides
+which identities are restored then: every agent whose store holds a valid pending record, read for
+the whole collection in one query, and every agent a module's `agentsToRestoreTransact` names
+because state of its own must be reconciled before anything reads it. Every other identity is
+restored the first time something resolves it, delivers it a message, changes its metadata,
+aborts or compacts it, or deletes it, in that operation's transaction when it has one. Reading an
+agent's configuration, parent, or children does not restore it, and an identity created in this
+process is never restored in it.
 
 `AgentSystemLocal` starts only agents that owe work. Startup resumes each restored agent whose
 store is active, and resolving an agent — for `resolve`, `updateMetadata`, `abort`, `compact`, or

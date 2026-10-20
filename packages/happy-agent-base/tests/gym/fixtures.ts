@@ -48,6 +48,20 @@ export class InMemoryAgentStorage extends AgentStorage {
         return this.#testPersistence(agentId);
     }
 
+    /** Ask the store of every created identity, since these stores share no table to query. */
+    override async agentValues(
+        ctx: Context,
+        key: string,
+    ): Promise<readonly { readonly agentId: string; readonly value: unknown }[]> {
+        const values: { readonly agentId: string; readonly value: unknown }[] = [];
+        for (const { key: agentId } of await this.#testKV.scoped("config").list(ctx)) {
+            const stored = await this.persistence(agentId).readValues(ctx, key);
+            const value = stored.find((entry) => entry.key === key)?.value;
+            if (value !== undefined) values.push({ agentId, value });
+        }
+        return values;
+    }
+
     override async transaction<Result>(
         ctx: Context,
         work: (ctx: Context, database: typeof this.database) => Promise<Result>,
