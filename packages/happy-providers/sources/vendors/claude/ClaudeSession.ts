@@ -99,6 +99,8 @@ export class ClaudeSession extends BaseSession {
     private activePromptQueue: ClaudePromptQueue | undefined;
     private activeReplay: ClaudeSessionReplay | undefined;
     private activeToolBridge: ClaudeToolBridge | undefined;
+    /** Whether the live query was handed a turn it has not finished with a result. */
+    private activeQueryTurnOpen = false;
     private lastQueryToolCalls: Omit<SessionToolCallBlock, "type">[] = [];
     private readonly onAccountUsage: ((usage: ProviderUsage) => void) | undefined;
     private readonly resolveInferenceMaxRetries: () => number;
@@ -442,9 +444,6 @@ export class ClaudeSession extends BaseSession {
         };
         const abort = () => {
             resolveAbort();
-            if (typeof stream?.interrupt === "function") {
-                void Promise.resolve(stream.interrupt()).catch(() => undefined);
-            }
             invalidateAfterAbort();
         };
         options.abort?.addEventListener("abort", abort, { once: true });
@@ -548,6 +547,7 @@ export class ClaudeSession extends BaseSession {
             }
             // Only once the turn has actually been handed over does the query hold it.
             this.sentConversation = incomingConversation;
+            this.activeQueryTurnOpen = true;
             if (stream === undefined) throw new Error("Claude SDK query was not created.");
             for (;;) {
                 const next = await nextClaudeMessage(stream, aborted, options.abort);
@@ -557,6 +557,7 @@ export class ClaudeSession extends BaseSession {
                     return;
                 }
                 if (next.done) {
+                    this.activeQueryTurnOpen = false;
                     if (options.compaction && nativeCompactionCompleted) break;
                     this.closeActiveQuery();
                     throw new Error("Claude SDK connection closed before returning a result.");
@@ -841,6 +842,7 @@ export class ClaudeSession extends BaseSession {
                 }
                 if (message.type === "result") {
                     result = message;
+                    this.activeQueryTurnOpen = false;
                     break;
                 }
             }
@@ -976,6 +978,13 @@ export class ClaudeSession extends BaseSession {
     }
 
     private closeActiveQuery(): void {
+        // Closing ends Claude Code's input, but a CLI still inside a turn first answers its open
+        // tool calls as interrupted and asks the model again. Interrupting the turn, which the SDK
+        // writes ahead of the end of input, ends it without that last request.
+        if (this.activeQueryTurnOpen && typeof this.activeQuery?.interrupt === "function") {
+            void Promise.resolve(this.activeQuery.interrupt()).catch(() => undefined);
+        }
+        this.activeQueryTurnOpen = false;
         this.activeToolBridge?.close();
         this.activeToolBridge = undefined;
         this.activePromptQueue?.close();
