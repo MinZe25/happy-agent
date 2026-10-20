@@ -6,6 +6,7 @@ import {
     extractProviderRetryResetAt,
 } from "@/core/extractProviderErrorDiagnostics.js";
 import { isEmptyResponseError } from "@/core/EmptyResponseError.js";
+import { isNetworkFailure } from "@/core/isNetworkFailure.js";
 import type { SessionErrorKind, SessionProviderError } from "@/core/SessionEvent.js";
 
 /**
@@ -17,7 +18,12 @@ import type { SessionErrorKind, SessionProviderError } from "@/core/SessionEvent
  */
 
 export function classifyCodexError(message: string): SessionErrorKind {
-    if (/context|prompt.+too long|maximum context|token limit/iu.test(message))
+    // Only an overflow names the window; "context" alone also appears in unrelated rejections.
+    if (
+        /context_length_exceeded|context (?:window|length)|prompt.+too long|maximum context|token limit/iu.test(
+            message,
+        )
+    )
         return "context_overflow";
     if (/billing|credit|quota|usage limit|insufficient_quota/iu.test(message))
         return "billing_error";
@@ -61,9 +67,11 @@ export function classifyCodexProviderError(
                 ? "rate_limit"
                 : status === 503 || normalized.includes("overloaded")
                   ? "server_overloaded"
-                  : (status !== undefined && status >= 500) || kind === "internal_error"
-                    ? "internal_server_error"
-                    : "unclassified";
+                  : status === undefined && isNetworkFailure(error, message)
+                    ? "network"
+                    : (status !== undefined && status >= 500) || kind === "internal_error"
+                      ? "internal_server_error"
+                      : "unclassified";
     if (type === "rate_limit" || type === "out_of_tokens") {
         const resetAt = extractProviderRetryResetAt(error);
         return {

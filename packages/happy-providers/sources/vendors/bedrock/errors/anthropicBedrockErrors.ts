@@ -4,6 +4,7 @@ import {
     extractProviderErrorDiagnostics,
     extractProviderRetryResetAt,
 } from "@/core/extractProviderErrorDiagnostics.js";
+import { isNetworkFailure } from "@/core/isNetworkFailure.js";
 import type { SessionErrorKind, SessionProviderError } from "@/core/SessionEvent.js";
 import {
     anthropicBedrockRuntimeExceptionDetails,
@@ -79,9 +80,11 @@ export function classifyAnthropicBedrockProviderError(
                 ? "rate_limit"
                 : status === 503 || status === 529 || normalized.includes("overloaded")
                   ? "server_overloaded"
-                  : (status !== undefined && status >= 500) || kind === "internal_error"
-                    ? "internal_server_error"
-                    : "unclassified";
+                  : status === undefined && isNetworkFailure(error, message)
+                    ? "network"
+                    : (status !== undefined && status >= 500) || kind === "internal_error"
+                      ? "internal_server_error"
+                      : "unclassified";
     if (type === "rate_limit" || type === "out_of_tokens") {
         const resetAt = extractProviderRetryResetAt(error);
         return {

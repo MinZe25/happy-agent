@@ -2144,7 +2144,7 @@ describe("AnthropicBedrockProvider", () => {
                     code: "ETIMEDOUT",
                     upstreamMessage: "terminated",
                 },
-                type: "unclassified",
+                type: "network",
             },
         });
     });

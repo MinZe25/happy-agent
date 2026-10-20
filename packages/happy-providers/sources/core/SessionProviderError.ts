@@ -57,6 +57,11 @@ export const sessionProviderErrorSchema = Type.Union([
         { type: Type.Literal("empty_response"), ...diagnosticFields },
         { additionalProperties: false },
     ),
+    /** The request never reached the vendor: refused, reset, timed out, or unresolvable. */
+    Type.Object(
+        { type: Type.Literal("network"), ...diagnosticFields },
+        { additionalProperties: false },
+    ),
     Type.Object(
         { type: Type.Literal("unclassified"), ...diagnosticFields },
         { additionalProperties: false },
