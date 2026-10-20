@@ -213,6 +213,9 @@ durable across turns and restarts but belongs only to the current conversation h
 compaction and model/profile resets clear it atomically with the replaced history and expire
 retained old handles. The existing `modelChanged` hook handles both model and profile reset
 handoffs; across modules, the first returned message wins and a failure preserves the old history.
+A response that overflows the context window before saying anything visible resets the private
+context through the same hook, told `reason: "context_overflow"` with the selection unchanged, keeps
+the turn's input after the handoff, and retries once; a second overflow fails the turn.
 Lifecycle action hooks may return `{ type: "inject", message }` to queue a system notice. Notices
 are durable and append only after pending tool results and compaction have settled, immediately
 before the inference that should see them.

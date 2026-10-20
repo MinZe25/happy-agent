@@ -2,6 +2,7 @@ import type {
     BaseSession,
     SessionAssistantBlock,
     SessionDoneState,
+    SessionErrorKind,
     SessionEvent,
     SessionMessage,
     SessionReasoningEffort,
@@ -498,6 +499,8 @@ export class AgentBase {
     readonly #retryForever: boolean;
     /** Consecutive failures used to pace retries across stage boundaries. */
     #failureRetryAttempt = 0;
+    /** What the last collected response failed with; a context overflow may reset and retry. */
+    #responseErrorKind: SessionErrorKind | undefined;
     /** Stops a retry backoff promptly when this instance drains or closes. */
     readonly #stopFailureRetries = new AbortController();
 
@@ -2682,6 +2685,8 @@ export class AgentBase {
             // successful response clears it; a turn that ends while it is set has failed and
             // surfaces it to the context as a system message.
             let pendingError: string | undefined;
+            // A context overflow resets the private context and retries at most once a pass.
+            let contextReset = false;
             let preparedContextTokens: number | undefined | typeof UNPREPARED_CONTEXT =
                 UNPREPARED_CONTEXT;
             while (true) {
@@ -2778,6 +2783,20 @@ export class AgentBase {
                 // describes a new context and must be eligible for the next preparation check.
                 preparedContextTokens = UNPREPARED_CONTEXT;
                 const { content, state } = response;
+                if (
+                    state === "error" &&
+                    content.length === 0 &&
+                    !contextReset &&
+                    this.#responseErrorKind === "context_overflow"
+                ) {
+                    // Nothing visible was said, so the turn can start over in a fresh context
+                    // without contradicting its own output. A second overflow is a real failure.
+                    contextReset = true;
+                    if (await this.#resetOverflowedContext(ctx)) {
+                        needsInference = true;
+                        continue;
+                    }
+                }
                 needsInference = false;
                 pendingError = state === "error" ? response.errorMessage : undefined;
                 if (state !== "error" && state !== undefined && state !== "cancelled") {
@@ -2920,6 +2939,94 @@ export class AgentBase {
             return false;
         }
         return !this.#stopAtSafeEdgeRequested() && !waitSignal.aborted;
+    }
+
+    /**
+     * Start the turn over in a fresh private context after the provider said the conversation no
+     * longer fits its window. This is the incompatible-model reset applied to the selection in
+     * force: the history is erased, the old provider session is destroyed, and the `modelChanged`
+     * handoff, told `reason: "context_overflow"`, opens the fresh context. What the turn is
+     * answering — everything from its last user message on — follows the handoff, and the
+     * replacement reserves the inference it still owes, so a restart retries it as well. Returns
+     * false with the history untouched when the handoff hook or the write refuses the reset.
+     */
+    async #resetOverflowedContext(ctx: Context): Promise<boolean> {
+        const lastUser = this.#messages.findLastIndex((message) => message.role === "user");
+        const kept = lastUser === -1 ? [] : this.#messages.slice(lastUser);
+        const model = this.#model;
+        const reset = await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
+            let messages: SessionMessage[] = [];
+            try {
+                await this.#recordTransaction(lockCtx, async (txCtx) => {
+                    let handoff: SessionSystemMessage | undefined;
+                    if (this.#hooks.modelChanged !== undefined && model !== undefined) {
+                        // As on a model switch, the hook runs in the transaction that commits the
+                        // reset and is lent the stores only for the length of its call.
+                        const committed = new AbortController();
+                        const changeLifetime = withLifetime(
+                            withAgentContext(txCtx, {
+                                id: this.id,
+                                provider: this.#providerId,
+                                model,
+                                effort: this.#effort,
+                                serviceTier: this.#serviceTier,
+                                permissionMode: this.#permissionMode,
+                            }),
+                            committed.signal,
+                        );
+                        const changeCtx = withAgentRunKV(
+                            withAgentHistoryKV(
+                                withAgentKV(changeLifetime, this.#kv),
+                                this.#historyKV,
+                            ),
+                            this.#runKV,
+                        );
+                        try {
+                            handoff = await this.#hooks.modelChanged(changeCtx, {
+                                previousModel: model,
+                                model,
+                                previousProvider: this.#providerId,
+                                provider: this.#providerId,
+                                providers: this.#providers,
+                                wasReset: true,
+                                reason: "context_overflow",
+                            });
+                        } finally {
+                            committed.abort();
+                        }
+                    }
+                    await this.#deleteRecordIdentities(txCtx, await this.#persistence.load(txCtx));
+                    await this.#historyKV.clear(txCtx);
+                    await this.#persistence.clearRecords(txCtx);
+                    // The erased conversation is what the measurement described.
+                    await this.#persistence.deleteValue(txCtx, "context");
+                    messages = handoff === undefined ? [...kept] : [handoff, ...kept];
+                    await this.#persistence.append(txCtx, {
+                        type: "compaction",
+                        contextToolIds: storedContextToolIds(this.#providerToolIds),
+                        messages,
+                    });
+                    this.#inferenceId ??= createId();
+                    await this.#recordPending(txCtx, "inference", true);
+                });
+            } catch (error: unknown) {
+                ctx.log.warn("The context could not be reset after it overflowed.", error);
+                return false;
+            }
+            this.#rotateHistoryKV();
+            this.#sessionConfig = undefined;
+            this.#messages = messages;
+            this.#lastRecordType = "compaction";
+            this.#contextTokens = undefined;
+            return true;
+        });
+        if (!reset) return false;
+        await this.#emit(ctx, {
+            type: "retrying",
+            attempt: 1,
+            reason: "The conversation no longer fit the model's context window, so it was reset and the turn is being retried.",
+        });
+        return true;
     }
 
     /**
@@ -4938,6 +5045,7 @@ export class AgentBase {
         readonly tokens?: SessionTokens;
         readonly errorMessage?: string;
     }> {
+        this.#responseErrorKind = undefined;
         const content: SessionAssistantBlock[] = [];
         // Blocks that finished and were durably appended. An abort keeps exactly these, so the
         // in-memory assistant message never diverges from what a reload would rebuild.
@@ -5241,6 +5349,7 @@ export class AgentBase {
                             // retains neither half of a call/result pair.
                             await flushCompletedCallOnlyTools();
                         }
+                        this.#responseErrorKind = event.state === "error" ? event.kind : undefined;
                         return {
                             // Only blocks that finished, which are exactly the blocks that were
                             // durably appended. A response ending mid-block leaves half of

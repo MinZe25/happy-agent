@@ -65,6 +65,12 @@ export interface AgentBaseModelChange {
     readonly providers: AgentProviders;
     /** True when an incompatible model or different profile erased private conversation history. */
     readonly wasReset: boolean;
+    /**
+     * Set when the selection did not change but the conversation outgrew the model's context
+     * window: the provider rejected a response before it said anything visible, so the history
+     * was reset once and the turn is retried in the fresh context.
+     */
+    readonly reason?: "context_overflow";
 }
 
 /**
@@ -403,6 +409,9 @@ export interface AgentBaseHooks {
      * the old provider session; the returned handoff system message opens the fresh context. On a
      * compatible model-only change the history stays and the return value is ignored. A hook
      * failure during a reset preserves the history and each setting that caused the reset.
+     * It is also called, with `reason: "context_overflow"` and the selection unchanged, when a
+     * response overflows the context window before saying anything visible; the reset keeps the
+     * turn's input after the handoff and retries it once.
      */
     readonly modelChanged?: (
         ctx: Context,
