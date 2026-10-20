@@ -33,6 +33,7 @@ export function showPageTool(artifacts: ArtifactsModule, compute: ComputeModule,
         name: "show_page",
         defer: true,
         capabilities: ["Show a running web page as a live-URL artifact."],
+        searchKeywords: ["show page", "preview url", "show dev server", "inline page"],
         description:
             'Deprecated: use create_artifact with url and type "html". This tool creates the same versioned live artifact, opened through your original network in an artifact-isolated browser profile. The daemon never fetches the page.',
         parameters: showPageInputSchema,
