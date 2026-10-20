@@ -97,6 +97,7 @@ import type {
     EnsureSurfaceChatRequest,
     ReorderSurfaceRequest,
     ReorderTodoRequest,
+    UpdateSurfaceRequest,
     SurfaceId,
     SurfaceListResponse,
     SurfaceMemberRequest,
@@ -1630,6 +1631,23 @@ export class HappyAgentClient {
             method: "GET",
             path: `v0/surfaces/${encodeURIComponent(surfaceId)}/image`,
             ifNoneMatch: options.ifNoneMatch,
+            signal: options.signal,
+        });
+    }
+
+    /**
+     * Renames a Surface or replaces its image; `image: null` removes it. Requires
+     * `capabilities.surfaceEditing`. No `If-Match`: the latest edit wins.
+     */
+    async updateSurface(
+        surfaceId: SurfaceId,
+        request: UpdateSurfaceRequest,
+        options: RequestOptions = {},
+    ): Promise<SurfaceResponse> {
+        return await this.#json({
+            method: "PATCH",
+            path: `v0/surfaces/${encodeURIComponent(surfaceId)}`,
+            json: request,
             signal: options.signal,
         });
     }

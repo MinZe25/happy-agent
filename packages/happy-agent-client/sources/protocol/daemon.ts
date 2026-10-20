@@ -84,6 +84,8 @@ export const healthResponseSchema = Type.Object({
             systemMonitorSurfaces: Type.Optional(Type.Boolean()),
             /** True when the daemon serves chat Surfaces and their people's messages. */
             chatSurfaces: Type.Optional(Type.Boolean()),
+            /** True when the daemon can rename Surfaces and change their images. */
+            surfaceEditing: Type.Optional(Type.Boolean()),
         }),
     ),
     /** Always `true`; a daemon that cannot answer does not answer. */

@@ -232,6 +232,27 @@ export const reorderSurfaceRequestSchema = Type.Object(
 );
 export type ReorderSurfaceRequest = Static<typeof reorderSurfaceRequestSchema>;
 
+/** At least one of name and image; `image: null` removes the picture. The latest edit wins. */
+export const updateSurfaceRequestSchema = Type.Union([
+    Type.Object(
+        {
+            image: Type.Optional(Nullable(surfaceImageInputSchema)),
+            mutationId: Type.Optional(mutationIdSchema),
+            name: surfaceNameSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            image: Nullable(surfaceImageInputSchema),
+            mutationId: Type.Optional(mutationIdSchema),
+            name: Type.Optional(surfaceNameSchema),
+        },
+        { additionalProperties: false },
+    ),
+]);
+export type UpdateSurfaceRequest = Static<typeof updateSurfaceRequestSchema>;
+
 /** Active text starting with exact `# ` is a section heading; stored text is never trimmed. */
 export const todoTextSchema = Type.String({
     minLength: 1,

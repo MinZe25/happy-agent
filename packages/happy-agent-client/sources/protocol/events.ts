@@ -208,9 +208,18 @@ export const taskMembershipPayloadSchema = Type.Object({
 });
 export type TaskMembershipPayload = Static<typeof taskMembershipPayloadSchema>;
 
-/** Members stay present on a chat-only change; chat association is additive. */
+/**
+ * Members stay present on chat-only and edit-only changes. Chat association, `name`, and `image`
+ * are additive and present only when they changed; `image: null` means the picture was removed.
+ */
 export const surfaceUpdatedPayloadSchema = Type.Object({
-    changes: Type.Pick(surfaceSchema, ["members", "updatedAt", "chatAgentId"]),
+    changes: Type.Object({
+        chatAgentId: surfaceSchema.properties.chatAgentId,
+        image: Type.Optional(surfaceSchema.properties.image),
+        members: surfaceSchema.properties.members,
+        name: Type.Optional(surfaceSchema.properties.name),
+        updatedAt: surfaceSchema.properties.updatedAt,
+    }),
     mutationId: Type.Optional(mutationIdSchema),
     previousVersion: resourceVersionSchema,
     surfaceId: surfaceIdSchema,

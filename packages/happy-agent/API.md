@@ -338,6 +338,13 @@ creation with `400`, and answer message routes with `404`; clients then offer no
 A chat Surface listed by a daemon a client does not support is left unavailable like any unknown
 type. The `surface_message.*` events are absent on older compatible daemons.
 
+Editing a Surface's name and image is additive and does not increment the protocol version.
+Supporting daemons report `capabilities.surfaceEditing: true` from health. Older daemons omit it
+and answer `PATCH /v0/surfaces/:surfaceId` with `404`; clients then offer no renaming or image
+changes. The optional `name` and `image` fields of `surface.updated` `changes` are absent on
+older compatible daemons. A client that does not know them keeps showing the earlier name or
+image until it next reads the catalog.
+
 Collaborative documents and the removal of the `separator` Surface type are a one-off exception
 to additive compatibility, approved for client and daemon together; the protocol number does not
 change. A daemon that serves collaborative documents reports `capabilities.collaborativeDocuments:
@@ -1036,6 +1043,8 @@ Fields:
   Document Surfaces. `calendarSurfaces: true` advertises calendar Surfaces, described under
   Calendar Surfaces. `systemMonitorSurfaces: true` advertises System Monitor Surfaces.
   `chatSurfaces: true` advertises chat Surfaces, described under Chat Surfaces.
+  `surfaceEditing: true` advertises renaming Surfaces and changing their images, described under
+  Surface catalog and members.
 - `ready` — `false` while starting, `true` once the agent system is loaded.
 - `status` — `"starting"` or `"ready"`; the human-readable form of `ready`.
 - `version` — one identity object. `protocol` is the wire protocol number, the client's
@@ -7505,7 +7514,8 @@ read as `creatorUserId: null`; no member or audit identity is used to infer a cr
 `members` is an array inside the Surface, sorted by `userId` using plain string comparison.
 `members: []` is the sole representation of no joined people. There is no separate member list
 or nullable member field in responses, and no duplicate `userIds` list. The Surface's version
-covers all its member records. Its identity, type, and name cannot be edited through the API.
+covers its name, image, and all its member records. Its identity and type never change; its name
+and image change only through `PATCH /v0/surfaces/:surfaceId`.
 `name` is 1–256 nonblank characters without ASCII control characters.
 
 Each member has `userId`, `orderKey`, and `joinedAt`. In standalone mode `userId` is `null`,
@@ -7543,7 +7553,8 @@ stores its own bytes atomically with creation, and computes the ThumbHash. Inval
 images return `400 invalid_request` without creating anything. `GET /v0/surfaces/:surfaceId/image`
 serves those bytes with `Content-Type: image/webp`, a content-derived `ETag`, and the shared
 private image cache policy; matching `If-None-Match` returns `304`. Missing images or Surfaces
-return `404 not_found`. There is no caller-provided path or URL in a Surface response.
+return `404 not_found`. There is no caller-provided path or URL in a Surface response. Replacing
+or removing the image changes what this route serves, including its `ETag`.
 
 There is no `separator` type. Sections belong inside a todo list as `# ` heading rows, not in the
 sidebar. Creating `{ "type": "separator", ... }` returns `400 invalid_request` and creates
@@ -7568,6 +7579,22 @@ gets the fractional key between the destination neighbours; neighbours keep thei
 the caller's member record changes, advancing the Surface version and emitting `surface.updated`.
 Moving to the current position is a no-op. An unjoined target, self-anchor, or anchor outside
 the caller's list returns `409 conflict`. An unknown target Surface returns `404 not_found`.
+
+`PATCH /v0/surfaces/:surfaceId` accepts `{ "name": "Groceries", "image": { "data": "..." },
+"mutationId": "..." }` and returns `200 { "surface": {...} }`. At least one of `name` and
+`image` is required. `name` follows the creation rules and replaces the stored name. `image`
+follows the creation image rules and replaces the stored image; `image: null` removes it.
+Every Surface type may be edited, including reference Surfaces, whose `name` is their stored
+label. Any onboarded authenticated person may edit any Surface, whether or not they joined.
+The route requires no `If-Match`: as with membership, the latest edit wins. A body with only
+`mutationId`, unknown fields, an invalid name, or an invalid or oversized image returns
+`400 invalid_request` without changing anything. An unknown Surface returns `404 not_found`.
+A supplied value equal to the stored one changes nothing; an image is equal when its normalized
+bytes match the stored image, and removing an absent image changes nothing. A request that
+changes nothing is an exact no-op, including versions and events. Otherwise the new name, image
+bytes, ThumbHash, `updatedAt`, and version commit atomically, and shared `surface.updated`
+follows commit, echoing `mutationId` when supplied. Members, their order, the creator, the chat,
+the Surface's content, and its history are unchanged.
 
 ### Todo data and permanent versions
 
@@ -7704,10 +7731,19 @@ returns headings in their ordinary list positions; summaries of outstanding work
 heading rows from the task count.
 Todo mutation tools supply the current version they read, and receive an explicit conflict on a
 stale version rather than silently overwriting. `list_surfaces` lists instance IDs, types, names,
-and nested members. Active admin bots additionally receive the type-specific `create_todo_surface`
-tool, accepting `name`, required explicit `creatorUserId` (an installation-local Happy user ID
-or `null`), and optional absolute `imagePath`, plus `add_surface_user` and
-`remove_surface_user`, accepting `surfaceId` and `userId` (null only for standalone).
+and nested members.
+Every ordinary agent model also receives `update_surface`, accepting `surfaceId`, optional
+`name`, and optional `imagePath`: an absolute PNG, JPEG, or WebP path (8 MiB maximum) that
+replaces the image, or `null` to remove it. At least one of `name` and `imagePath` is required.
+It performs the same edit as `PATCH /v0/surfaces/:surfaceId` on any Surface type, changes no
+membership, and never joins anyone. Images are read through the ordinary Compute filesystem
+permission boundary, with reviewed elevation for outside-workspace or symlink targets. It
+requires shared Auto review. Durable replay reuses the first execution's image bytes and returns
+the previously committed result without changing the Surface again.
+Active admin bots additionally receive the type-specific `create_todo_surface` tool, accepting
+`name`, required explicit `creatorUserId` (an installation-local Happy user ID or `null`), and
+optional absolute `imagePath`, plus `add_surface_user` and `remove_surface_user`, accepting
+`surfaceId` and `userId` (null only for standalone).
 These tools require an actual active admin bot, checked both at tool selection and execution;
 ordinary agents and non-admin or archived bots cannot invoke them. Images are read through the
 ordinary Compute filesystem permission boundary, with reviewed elevation for outside-workspace
@@ -7729,10 +7765,14 @@ review and run within the current permission boundary. Durable tool
 replay returns the previously committed result without appending another revision or event.
 
 `surface.updated` carries `surfaceId`, `previousVersion`, `version`, `changes` (the complete new
-`members` plus `updatedAt`, and optional `chatAgentId` when the chat is first associated), and
-optional `mutationId`. It is shared so everyone sees the joined people and learns when the chat
-exists. It covers joining, leaving, reordering, and first chat creation; there are no separate
-member events. Existing fields remain present on chat-only changes, with members unchanged.
+`members` plus `updatedAt`, optional `chatAgentId` when the chat is first associated, optional
+`name` when the name changed, and optional `image` when the image changed), and optional
+`mutationId`. `image` is the new `{ "thumbhash": "..." }`, or `null` when the image was removed;
+clients refetch the image bytes when it is present. It is shared so everyone sees the joined
+people, the current name and image, and learns when the chat exists. It covers joining, leaving,
+reordering, editing the name or image, and first chat creation; there are no separate member
+events. Existing fields remain present on chat-only and edit-only changes, with members
+unchanged.
 `todo.created` carries the full `todo` and optional `mutationId`.
 `todo.updated` carries `surfaceId`, `todoId`, `previousVersion`, `version`, `changes` (the
 changed mutable fields, always including `updatedAt`), and optional `mutationId`. All todo events
@@ -8622,10 +8662,12 @@ following the catalog rules:
 - `{ "type": "task", "name": "Launch work", "taskId": "..." }`
 
 The target ID is required for its type and is immutable; other target-ID fields are invalid.
-`name` is an explicit immutable Surface label, not a copied or synchronized target title. The
-optional managed Surface image is independent of the target's image. Current target display
-fields are resolved when the Surface is read, rather than stored twice. Clients show that live
-target name while available and use the stored Surface name as the unavailable fallback.
+`name` is an explicit Surface label, not a copied or synchronized target title. It changes only
+through `PATCH /v0/surfaces/:surfaceId` or `update_surface`, never because the target changed.
+The optional managed Surface image is independent of the target's image and is edited the same
+way. Current target display fields are resolved when the Surface is read, rather than stored
+twice. Clients show that live target name while available and use the stored Surface name as
+the unavailable fallback.
 
 Creation validates that the target exists, is active, and is readable by the authenticated
 caller. Missing, inactive, or inaccessible targets all return `404 not_found`, without creating

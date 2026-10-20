@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { HappyAgentClient } from "../sources/HappyAgentClient.js";
 import { HappyAgentApiError } from "../sources/HappyAgentApiError.js";
 import { desktopBootstrapResponseSchema } from "../sources/protocol/bootstrap.js";
+import { healthResponseSchema } from "../sources/protocol/daemon.js";
 import {
     surfaceCreatedPayloadSchema,
     surfaceUpdatedPayloadSchema,
@@ -23,6 +24,7 @@ import {
     surfaceSchema,
     todoRevisionSchema,
     todoSchema,
+    updateSurfaceRequestSchema,
     updateTodoRequestSchema,
     type Surface,
     type SurfaceMember,
@@ -270,6 +272,97 @@ describe("Surface and Todo protocol", () => {
                 changes: { text: "Changed" },
             }),
         ).toBe(false);
+    });
+
+    it("edits a Surface's name and image, and announces only what changed", async () => {
+        const image = { data: "iVBORw0KGgo=" };
+        for (const request of [
+            { name: "Groceries" },
+            { image },
+            { image: null },
+            { name: "Groceries", image, mutationId: "edit" },
+        ]) {
+            expect(Value.Check(updateSurfaceRequestSchema, request)).toBe(true);
+        }
+        for (const request of [
+            {},
+            { mutationId: "edit" },
+            { name: "" },
+            { name: " \t" },
+            { name: "a\nb" },
+            { image: { data: "" } },
+            { image: "iVBORw0KGgo=" },
+            { name: "Groceries", type: "document" },
+            { name: "Groceries", creatorUserId: "user1" },
+        ]) {
+            expect(Value.Check(updateSurfaceRequestSchema, request)).toBe(false);
+        }
+
+        const edit = {
+            surfaceId,
+            previousVersion: version,
+            version: nextVersion,
+            changes: { members: [member], updatedAt: now },
+        };
+        expect(Value.Check(surfaceUpdatedPayloadSchema, edit)).toBe(true);
+        for (const changes of [
+            { name: "Groceries" },
+            { image: { thumbhash: "abc" } },
+            { image: null },
+        ]) {
+            expect(
+                Value.Check(surfaceUpdatedPayloadSchema, {
+                    ...edit,
+                    changes: { ...edit.changes, ...changes },
+                }),
+            ).toBe(true);
+        }
+        expect(
+            Value.Check(surfaceUpdatedPayloadSchema, {
+                ...edit,
+                changes: { ...edit.changes, name: "" },
+            }),
+        ).toBe(false);
+        expect(
+            Value.Check(healthResponseSchema, {
+                healthy: true,
+                ready: true,
+                status: "ready",
+                version: { protocol: 29, daemon: "1.0.0" },
+                capabilities: { surfaceEditing: true },
+            }),
+        ).toBe(true);
+
+        const requests: { method: string; url: string; body: unknown; ifMatch: string | null }[] =
+            [];
+        const fetch: typeof globalThis.fetch = async (input, init) => {
+            requests.push({
+                method: init?.method ?? "GET",
+                url: input.toString(),
+                body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
+                ifMatch: new Headers(init?.headers).get("if-match"),
+            });
+            return new Response(JSON.stringify({ surface }), { status: 200 });
+        };
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+        await expect(client.updateSurface("surface/1", { name: "Groceries" })).resolves.toEqual({
+            surface,
+        });
+        await client.updateSurface("surface1", { image: null, mutationId: "clear" });
+        expect(requests).toEqual([
+            {
+                method: "PATCH",
+                url: "http://agent.local/v0/surfaces/surface%2F1",
+                body: { name: "Groceries" },
+                ifMatch: null,
+            },
+            {
+                method: "PATCH",
+                url: "http://agent.local/v0/surfaces/surface1",
+                body: { image: null, mutationId: "clear" },
+                ifMatch: null,
+            },
+        ]);
     });
 
     it("uses the agreed Surface prefix, encodes identities, and sends current version guards", async () => {

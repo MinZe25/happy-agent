@@ -11,6 +11,9 @@ change only the caller's member record. Standalone members have `userId: null`, 
 profile; team members use their installation-local Happy user ID. Desktop bootstrap's optional `surfaces`
 field composes these same objects. Older daemons return `404` or `501` for the catalog. Follow
 shared `surface.updated` and use its normal version chain to reconcile the complete member array.
+When health reports `capabilities.surfaceEditing`, `updateSurface(surfaceId, { name, image })`
+renames a Surface or replaces its image, and `image: null` removes it. `surface.updated` then
+carries the new `name` or `image`; refetch the image bytes when `image` is present.
 
 The first Surface type is Todo, served at `/v0/surfaces/todo/:surfaceId`. Every todo method takes
 the Surface ID first. `listTodos(surfaceId)` loads every active todo
