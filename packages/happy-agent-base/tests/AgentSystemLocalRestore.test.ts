@@ -577,6 +577,40 @@ const TOUCHES: Readonly<Record<string, Touch>> = {
                 ])
             ).join(", "),
     },
+    "uses at once inside one transaction": {
+        uses: true,
+        touch: async (world, system) =>
+            await outcome(() =>
+                world.dbCtx.inTx(async (txCtx) => {
+                    const [first, second] = await Promise.all([
+                        system.resolve(txCtx, SUBJECT),
+                        system.resolve(txCtx, SUBJECT),
+                        system.send(txCtx, SUBJECT, user("beside resolves in its transaction")),
+                    ]);
+                    expect(first).toBe(second);
+                }),
+            ),
+    },
+    "two transactions at once": {
+        uses: true,
+        touch: async (world, system) =>
+            (
+                await Promise.all([
+                    outcome(() =>
+                        world.dbCtx.inTx(
+                            async (txCtx) =>
+                                await system.send(txCtx, SUBJECT, user("beside a transaction")),
+                        ),
+                    ),
+                    outcome(() =>
+                        world.dbCtx.inTx(
+                            async (txCtx) =>
+                                await system.updateMetadata(txCtx, SUBJECT, { title: "at once" }),
+                        ),
+                    ),
+                ])
+            ).join(", "),
+    },
     "send while the collection drains": {
         uses: true,
         touch: async (_world, system) => {
@@ -794,6 +828,148 @@ describe.each(databaseBackends)("AgentSystemLocal restoration edges ($label)", (
         });
     });
 
+    it("restores and builds an agent once when one transaction uses it twice at once", async () => {
+        await withWorld(async (world) => {
+            await settledAgents(world, [SUBJECT]);
+            const probe = new Probe();
+            const system = await world.process(probe);
+            const [first, second, sent] = await world.dbCtx.inTx(
+                async (txCtx) =>
+                    await Promise.all([
+                        system.resolve(txCtx, SUBJECT),
+                        system.resolve(txCtx, SUBJECT),
+                        system.send(txCtx, SUBJECT, user("beside two resolves")),
+                    ]),
+            );
+            await first.waitForIdle();
+
+            expect(sent.accepted).toBe("created");
+            expect(second).toBe(first);
+            expect(await system.resolve(ctx, SUBJECT)).toBe(first);
+            expect(probe.restored(SUBJECT)).toBe(1);
+            expect(probe.unrestoredUses).toEqual([]);
+            expect(world.provider.answers).toContain(`${SUBJECT}:beside two resolves`);
+            await system.close(ctx);
+        });
+    });
+
+    it("restores an agent once when one transaction uses it while archiving it", async () => {
+        await withWorld(async (world) => {
+            await settledAgents(world, [SUBJECT]);
+            const probe = new Probe();
+            const system = await world.process(probe);
+            await world.dbCtx.inTx(async (txCtx) => {
+                await Promise.all([
+                    system.updateMetadata(txCtx, SUBJECT, { title: "archived" }),
+                    system.delete(txCtx, SUBJECT),
+                ]);
+            });
+
+            expect(probe.restored(SUBJECT)).toBe(1);
+            expect(probe.log.filter((entry) => !entry.startsWith("loop:"))).toEqual([
+                `restored:${SUBJECT}`,
+                `archived:${SUBJECT}`,
+            ]);
+            // Nothing the use built outlives the archival, so the identity can be created again.
+            await system.create(ctx, {}, { id: SUBJECT });
+            await system.close(ctx);
+        });
+    });
+
+    it("closes what a use was building when its transaction archives the agent meanwhile", async () => {
+        await withWorld(async (world) => {
+            await settledAgents(world, [SUBJECT]);
+            let restored = false;
+            let archived!: () => void;
+            const archival = new Promise<void>((resolve) => {
+                archived = resolve;
+            });
+            // Sees the restoration and the archival inside the transaction that records them.
+            const lifecycle: AgentModule = {
+                name: "lifecycle",
+                beforeStart: () => ({
+                    agentRestoredTransact: () => {
+                        restored = true;
+                    },
+                    agentArchivedTransact: () => {
+                        archived();
+                    },
+                }),
+            };
+            // Holds the use's load of the agent, which reads the configuration in the transaction
+            // once the agent is restored, until the archival is recorded, or briefly when the
+            // archival is itself waiting for that load to finish.
+            class HeldLoad extends AgentStorage {
+                override persistence(agentId: string): AgentPersistence {
+                    const persistence = super.persistence(agentId);
+                    if (agentId !== SUBJECT) return persistence;
+                    let held = false;
+                    return new Proxy(persistence, {
+                        get(target, property) {
+                            if (property === "readValues") {
+                                return async (readCtx: Context, prefix: string) => {
+                                    if (
+                                        !held &&
+                                        restored &&
+                                        prefix === "agentConfig" &&
+                                        agentStorageTransaction(readCtx) !== undefined
+                                    ) {
+                                        held = true;
+                                        await Promise.race([
+                                            archival,
+                                            new Promise((resolve) => setTimeout(resolve, 200)),
+                                        ]);
+                                    }
+                                    return await target.readValues(readCtx, prefix);
+                                };
+                            }
+                            const value: unknown = Reflect.get(target, property, target);
+                            return typeof value === "function" ? value.bind(target) : value;
+                        },
+                    });
+                }
+            }
+            const probe = new Probe();
+            const system = await world.process(probe, {
+                modules: [lifecycle],
+                storage: (options) => new HeldLoad(options),
+            });
+            await world.dbCtx.inTx(async (txCtx) => {
+                await Promise.all([system.resolve(txCtx, SUBJECT), system.delete(txCtx, SUBJECT)]);
+            });
+
+            expect(probe.restored(SUBJECT)).toBe(1);
+            // No live object of the archived identity is left behind to refuse its next one.
+            await system.create(ctx, {}, { id: SUBJECT });
+            await system.close(ctx);
+        });
+    });
+
+    it("restores an agent once when two transactions send to it at once", async () => {
+        await withWorld(async (world) => {
+            await settledAgents(world, [SUBJECT]);
+            const probe = new Probe();
+            const system = await world.process(probe);
+            const sent = await Promise.all(
+                ["first transaction", "second transaction"].map(
+                    async (text) =>
+                        await world.dbCtx.inTx(
+                            async (txCtx) => await system.send(txCtx, SUBJECT, user(text)),
+                        ),
+                ),
+            );
+            const agent = await system.resolve(ctx, SUBJECT);
+            await agent.waitForIdle();
+
+            expect(probe.restored(SUBJECT)).toBe(1);
+            expect(probe.unrestoredUses).toEqual([]);
+            expect(sent.map(({ accepted }) => accepted)).toEqual(["created", "created"]);
+            // The transactions commit in order, so the second message is the last one answered.
+            expect(world.provider.answers).toContain(`${SUBJECT}:second transaction`);
+            await system.close(ctx);
+        });
+    });
+
     it("never restores an agent this process created, deleted, or created again", async () => {
         await withWorld(async (world) => {
             const probe = new Probe();
@@ -970,6 +1146,35 @@ describe.each(databaseBackends)("AgentSystemLocal restoration edges ($label)", (
             expect(probe.restored(SUBJECT)).toBe(1);
             expect(world.provider.answers).toContain(`${SUBJECT}:delivered`);
             expect(world.provider.answers).not.toContain(`${SUBJECT}:lost`);
+            await system.close(ctx);
+        });
+    });
+
+    it("retries a restoration that failed earlier in the same transaction", async () => {
+        await withWorld(async (world) => {
+            await settledAgents(world, [SUBJECT]);
+            let attempts = 0;
+            const failing: AgentModule = {
+                name: "failing-restoration",
+                beforeStart: () => ({
+                    agentRestoredTransact: (_hookCtx, _scope, agent) => {
+                        if (agent.id !== SUBJECT) return;
+                        attempts += 1;
+                        if (attempts === 1) throw new Error("The restoration failed.");
+                    },
+                }),
+            };
+            const system = await world.process(new Probe(), { modules: [failing] });
+            await world.dbCtx.inTx(async (txCtx) => {
+                await expect(system.send(txCtx, SUBJECT, user("lost"))).rejects.toThrow(
+                    "The restoration failed.",
+                );
+                await system.send(txCtx, SUBJECT, user("delivered"));
+            });
+            await (await system.resolve(ctx, SUBJECT)).waitForIdle();
+
+            expect(attempts).toBe(2);
+            expect(world.provider.answers).toContain(`${SUBJECT}:delivered`);
             await system.close(ctx);
         });
     });

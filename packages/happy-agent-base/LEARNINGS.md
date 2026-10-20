@@ -147,6 +147,12 @@ Restoration runs under the identity lock, or inside the caller's transaction whe
 transactional. An agent counts as restored only after that transaction commits, so a rollback
 restores it again on its next use, while a second use inside the same transaction does not. The
 database's FIFO holds through `afterCommit`, so the next transaction already sees the commit.
+Uses inside one transaction take no identity lock, so two of them can run side by side; a
+done-marker set after the hooks let both pass its check and restore and build the agent twice.
+The transaction now keeps the restoration, and the load, as a promise from the moment the first
+use begins it, and every other use waits for that one. An archival in the same transaction waits
+for a load already running, so it closes that object instead of the load staging it afterwards
+and publishing an agent whose identity was deleted.
 
 Start loads an owing agent outside any transaction and without the identity lock a transaction
 would take, so a restoration observer, or any message, can deliver to that agent in a

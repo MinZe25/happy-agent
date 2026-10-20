@@ -156,6 +156,11 @@ export class AgentSystemLocal<
         AgentStorageTransactionContext,
         Map<string, TransactionAgentEntry<Database> | null>
     >();
+    /** Transaction-local loads still running, which every other use in that transaction joins. */
+    readonly #transactionLoads = new WeakMap<
+        AgentStorageTransactionContext,
+        Map<string, Promise<Agent<AnyAgentTool, Database>>>
+    >();
     /**
      * Identities this process has restored or created, so their restoration runs at most once in
      * it. An identity joins once the transaction that restored or created it commits. A deleted
@@ -163,8 +168,14 @@ export class AgentSystemLocal<
      * again gives it one.
      */
     readonly #restored = new Set<string>();
-    /** Identities restored inside a transaction that has not committed yet. */
-    readonly #transactionRestored = new WeakMap<AgentStorageTransactionContext, Set<string>>();
+    /**
+     * Restorations begun inside a transaction that has not committed yet, kept from the moment
+     * they begin so a use running beside the one that began it waits for it instead of repeating it.
+     */
+    readonly #transactionRestorations = new WeakMap<
+        AgentStorageTransactionContext,
+        Map<string, Promise<void>>
+    >();
     // One agent has one store for the life of the collection, so inspecting an agent's durable
     // work and running that agent never end up looking at two different stores.
     readonly #persistences = new Map<string, AgentPersistence>();
@@ -488,7 +499,7 @@ export class AgentSystemLocal<
                     );
                     // A created agent starts this process's lifetime of it, so it has nothing
                     // to be restored from.
-                    this.#markRestored(txCtx, agentId);
+                    await this.#restoreOnce(txCtx, agentId, async () => undefined);
                 });
                 // Creation publishes an idle lifetime. Accepted work starts it through the same
                 // durable activation path as every later message; starting here would enter an
@@ -533,6 +544,12 @@ export class AgentSystemLocal<
                 const transaction = agentStorageTransaction(lockCtx);
                 let provisional: Map<string, TransactionAgentEntry<Database> | null> | undefined;
                 if (transaction !== undefined) {
+                    // A use in this transaction still loading the agent finishes first, so the
+                    // deletion closes what it built rather than that load staging it afterwards.
+                    await this.#transactionLoads
+                        .get(transaction)
+                        ?.get(agentId)
+                        ?.catch(() => undefined);
                     provisional = this.#transactionAgents.get(transaction);
                     if (provisional === undefined) {
                         provisional = new Map();
@@ -884,34 +901,48 @@ export class AgentSystemLocal<
     async #restore(ctx: Context, agentId: string, config: AgentConfig): Promise<void> {
         if (this.#restored.has(agentId)) return;
         await this.#storage.transaction(ctx, async (txCtx) => {
-            const transaction = agentStorageTransaction(txCtx);
-            if (
-                this.#restored.has(agentId) ||
-                (transaction !== undefined &&
-                    this.#transactionRestored.get(transaction)?.has(agentId) === true)
-            ) {
-                return;
-            }
-            await this.#recordLifecycle(
-                txCtx,
-                lifecycleAgent(agentId, config),
-                (hooks) => hooks.agentRestoredTransact,
-                (hooks) => hooks.agentRestored,
-            );
-            this.#markRestored(txCtx, agentId);
+            if (this.#restored.has(agentId)) return;
+            await this.#restoreOnce(txCtx, agentId, async () => {
+                await this.#recordLifecycle(
+                    txCtx,
+                    lifecycleAgent(agentId, config),
+                    (hooks) => hooks.agentRestoredTransact,
+                    (hooks) => hooks.agentRestored,
+                );
+            });
         });
     }
 
-    /** Count an identity as restored in its transaction, and in this process once that commits. */
-    #markRestored(txCtx: Context, agentId: string): void {
+    /**
+     * Run an identity's restoration unless a use in the same transaction has already begun it,
+     * in which case wait for that one, and count the identity restored in this process once the
+     * transaction commits. The restoration is registered before its first await, so uses running
+     * side by side in one transaction share it. A failed one is forgotten, so a later use retries.
+     */
+    async #restoreOnce(
+        txCtx: Context,
+        agentId: string,
+        restoration: () => Promise<void>,
+    ): Promise<void> {
+        // A storage whose transactions carry no transaction context has nothing to share it by.
         const transaction = agentStorageTransaction(txCtx);
+        let restorations: Map<string, Promise<void>> | undefined;
         if (transaction !== undefined) {
-            let restored = this.#transactionRestored.get(transaction);
-            if (restored === undefined) {
-                restored = new Set();
-                this.#transactionRestored.set(transaction, restored);
+            restorations = this.#transactionRestorations.get(transaction);
+            if (restorations === undefined) {
+                restorations = new Map();
+                this.#transactionRestorations.set(transaction, restorations);
             }
-            restored.add(agentId);
+        }
+        const begun = restorations?.get(agentId);
+        if (begun !== undefined) return await begun;
+        const restoring = restoration();
+        restorations?.set(agentId, restoring);
+        try {
+            await restoring;
+        } catch (error: unknown) {
+            if (restorations?.get(agentId) === restoring) restorations.delete(agentId);
+            throw error;
         }
         afterCommit(txCtx, () => {
             this.#restored.add(agentId);
@@ -1156,17 +1187,37 @@ export class AgentSystemLocal<
         }
         const concurrent = this.#agents.get(agentId);
         if (concurrent !== undefined) return concurrent;
-        if (!fresh) await this.#restore(ctx, agentId, config);
-        const agent = await this.#instantiate(agentId, config, false, false, ctx, false, fresh);
-        if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
-        const entry: TransactionAgentEntry<Database> = { agent, start };
-        provisional.set(agentId, entry);
-        afterCommit(ctx, () => {
-            outsideAgentDatabaseOperation(() => {
-                if (provisional.get(agentId) === entry) this.#publish(agent, entry.start);
+        let loads = this.#transactionLoads.get(transaction);
+        if (loads === undefined) {
+            loads = new Map();
+            this.#transactionLoads.set(transaction, loads);
+        }
+        const loading = loads.get(agentId);
+        if (loading !== undefined) {
+            // Another use in this transaction is loading it. Its entry is staged by the time the
+            // load settles, so asking again shares that object and adds this use's start.
+            await loading;
+            return await this.#transactionAgent(ctx, agentId, config, start, fresh);
+        }
+        const load = (async (): Promise<Agent<AnyAgentTool, Database>> => {
+            if (!fresh) await this.#restore(ctx, agentId, config);
+            const agent = await this.#instantiate(agentId, config, false, false, ctx, false, fresh);
+            if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
+            const entry: TransactionAgentEntry<Database> = { agent, start };
+            provisional.set(agentId, entry);
+            afterCommit(ctx, () => {
+                outsideAgentDatabaseOperation(() => {
+                    if (provisional.get(agentId) === entry) this.#publish(agent, entry.start);
+                });
             });
-        });
-        return agent;
+            return agent;
+        })();
+        loads.set(agentId, load);
+        try {
+            return await load;
+        } finally {
+            if (loads.get(agentId) === load) loads.delete(agentId);
+        }
     }
 
     /** Cancel an agent's active turn, leaving its queued messages durable for the next one. */
