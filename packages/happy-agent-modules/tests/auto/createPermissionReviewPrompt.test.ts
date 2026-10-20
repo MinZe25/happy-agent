@@ -7,16 +7,24 @@ import {
 } from "../../sources/auto/impl/createPermissionReviewPrompt.js";
 
 const action = '{"description":"write a file","tool":"write_file","arguments":{"path":"a.txt"}}';
+const agentId = "reviewedagent";
 
 describe("createPermissionReviewPrompt", () => {
     it("wraps the first review without the reminder or continued marker", () => {
         expect(
-            createPermissionReviewPrompt({ first: true, conversation: "[1] User:\nhi", action }),
+            createPermissionReviewPrompt({
+                first: true,
+                conversation: "[1] User:\nhi",
+                agentId,
+                action,
+            }),
         ).toBe(
             [
                 "<conversation>",
                 "[1] User:\nhi",
                 "</conversation>",
+                "",
+                "<reviewed_agent_id>reviewedagent</reviewed_agent_id>",
                 "",
                 "<proposed_action>",
                 action,
@@ -29,6 +37,7 @@ describe("createPermissionReviewPrompt", () => {
         const prompt = createPermissionReviewPrompt({
             first: false,
             conversation: "[7] User:\nmore",
+            agentId,
             action,
         });
 
@@ -40,6 +49,8 @@ describe("createPermissionReviewPrompt", () => {
                 "[7] User:\nmore",
                 "</conversation>",
                 "",
+                "<reviewed_agent_id>reviewedagent</reviewed_agent_id>",
+                "",
                 "<proposed_action>",
                 action,
                 "</proposed_action>",
@@ -48,14 +59,24 @@ describe("createPermissionReviewPrompt", () => {
     });
 
     it("substitutes the fixed sentence when the delta is empty", () => {
-        const prompt = createPermissionReviewPrompt({ first: false, conversation: "", action });
+        const prompt = createPermissionReviewPrompt({
+            first: false,
+            conversation: "",
+            agentId,
+            action,
+        });
 
         expect(prompt).toContain(PERMISSION_REVIEW_NO_NEW_CONVERSATION);
         expect(prompt).toContain('<conversation continued="true">');
     });
 
     it("uses the same explicit empty-conversation sentence for the first review", () => {
-        const prompt = createPermissionReviewPrompt({ first: true, conversation: "", action });
+        const prompt = createPermissionReviewPrompt({
+            first: true,
+            conversation: "",
+            agentId,
+            action,
+        });
 
         expect(prompt).toContain(`<conversation>\n${PERMISSION_REVIEW_NO_NEW_CONVERSATION}`);
         expect(prompt).not.toContain(PERMISSION_REVIEW_FOLLOWUP_REMINDER);
@@ -69,6 +90,7 @@ describe("createPermissionReviewPrompt", () => {
             createPermissionReviewPrompt({
                 first: true,
                 conversation: "conversation",
+                agentId,
                 action: unusualAction,
             }),
         ).toContain(unusualAction);

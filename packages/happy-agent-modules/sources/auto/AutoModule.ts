@@ -31,6 +31,7 @@ import { detach, type Context } from "@steve.kite/stdlib";
 
 import type { ComputeModule } from "../compute/index.js";
 import type { ConfigModule } from "../config/index.js";
+import type { HistoryModule } from "../history/index.js";
 import type { SystemPromptModule } from "../systemPrompt/index.js";
 import type {
     PermissionReviewDecision,
@@ -55,6 +56,7 @@ import { boundReviewTranscript } from "./impl/boundReviewTranscript.js";
 import { AutoReviewEvidenceStore } from "./impl/AutoReviewEvidenceStore.js";
 import { AutoReviewRuntimeModule } from "./impl/AutoReviewRuntimeModule.js";
 import { AutoReviewComputeModule } from "./impl/AutoReviewComputeModule.js";
+import { AutoReviewHistoryModule } from "./impl/AutoReviewHistoryModule.js";
 import {
     assistantTextEvidence,
     assistantToolCallEvidence,
@@ -79,12 +81,14 @@ import { type AutoReviewerCursor, autoReviewerCursorSchema } from "./AutoReviewT
  *
  * What it takes is the modules it works through: the configuration that owns the accounts, the
  * catalog and the folder the product runs in; the compute module that owns the machine a reviewer
- * investigates local state on; and the system-prompt module that owns the project instructions in
- * force where an action was proposed. The one thing that is not a module is the private review
- * system's `AgentStorage`, and that is deliberate: `SPEC.md` §13.3 records it as a human-decided
- * deviation, because this package opens no database anywhere and duplicating the host's SQLite and
- * lock mechanics here would buy nothing. The isolation the specification requires — separate file,
- * separate lock, separate schema, no shared state — is preserved either way.
+ * investigates local state on; the system-prompt module that owns the project instructions in
+ * force where an action was proposed; and the history module whose durable agent history the
+ * reviewer may read when authorization lies outside its own transcript. The one thing that is not
+ * a module is the private review system's `AgentStorage`, and that is deliberate: `SPEC.md` §13.3
+ * records it as a human-decided deviation, because this package opens no database anywhere and
+ * duplicating the host's SQLite and lock mechanics here would buy nothing. The isolation the
+ * specification requires — separate file, separate lock, separate schema, no shared state — is
+ * preserved either way.
  *
  * The 90-second review budget is owned by `PermissionsModule`, which creates the abort controller
  * and the timer and derives timed-out/unavailable from a review that does not return. `AutoModule`
@@ -117,6 +121,7 @@ export class AutoModule implements AgentModule {
     readonly #storage: AgentStorage;
     readonly #evidence = new AutoReviewEvidenceStore();
     readonly #runtime = new AutoReviewRuntimeModule();
+    readonly #reviewHistory: AutoReviewHistoryModule;
 
     /**
      * The lifetime the private review system, its lock, and the reviewer's machine belong to.
@@ -163,11 +168,13 @@ export class AutoModule implements AgentModule {
         config: ConfigModule,
         compute: ComputeModule,
         systemPrompt: SystemPromptModule,
+        history: HistoryModule,
         storage: AgentStorage,
     ) {
         this.#config = config;
         this.#compute = compute;
         this.#systemPrompt = systemPrompt;
+        this.#reviewHistory = new AutoReviewHistoryModule(history);
         this.#storage = storage;
     }
 
@@ -217,7 +224,11 @@ export class AutoModule implements AgentModule {
         });
         this.#system = await AgentSystemLocal.create(lifetime, this.#storage, {
             models: this.#catalog,
-            modules: [this.#runtime, new AutoReviewComputeModule(this.#compute, lifetime)],
+            modules: [
+                this.#runtime,
+                new AutoReviewComputeModule(this.#compute, lifetime),
+                this.#reviewHistory,
+            ],
             provider,
             providers: privateProviders,
             shutdownName: "auto-agent-system",
@@ -491,6 +502,7 @@ export class AutoModule implements AgentModule {
         const prompt = createPermissionReviewPrompt({
             first,
             conversation: delta.text,
+            agentId: mainAgentId,
             action: proposedAction(request),
         });
         const message: SessionUserMessage = {
@@ -513,6 +525,9 @@ export class AutoModule implements AgentModule {
             void abortReviewer();
         };
         request.signal.addEventListener("abort", onAbort, { once: true });
+        // History is read through this review's context, which carries the main database, and
+        // only while the review runs.
+        this.#reviewHistory.beginReview(reviewerId, ctx, mainAgentId);
         try {
             // Adding an event listener to an already-aborted signal does not call it. The review
             // may have been stopped while evidence or instructions were being prepared, so check
@@ -539,6 +554,7 @@ export class AutoModule implements AgentModule {
             throw error;
         } finally {
             request.signal.removeEventListener("abort", onAbort);
+            this.#reviewHistory.endReview(reviewerId);
         }
 
         const capture = this.#runtime.takeCapture(reviewerId);
@@ -648,7 +664,7 @@ export class AutoModule implements AgentModule {
                 // installation runs in rather than one named at the seam.
                 workingDirectory: this.#config.configuration.paths.publicHome,
             },
-            modules: { autoReviewCompute: {}, autoReviewRuntime: {} },
+            modules: { autoReviewCompute: {}, autoReviewHistory: {}, autoReviewRuntime: {} },
             metadata: { title: "Automatic permission reviewer" },
         };
     }

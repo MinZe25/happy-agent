@@ -1155,6 +1155,18 @@ export class HistoryModule implements AgentModule {
     }
 
     /**
+     * The read-only history tool for the automatic permission reviewer of `agentId`.
+     *
+     * The reviewer lives in its own private agent system that this module never serves, so it asks
+     * for its tools here instead of being served them. `ctx` is the review's own context, carrying
+     * this module's database; the tool reads as `agentId` would, with the same reach and the same
+     * output as the agent's own `read_agent_history`.
+     */
+    reviewerTools(ctx: Context, agentId: string): readonly AnyAgentTool[] {
+        return [readAgentHistoryTool(this, agentId, ctx)];
+    }
+
+    /**
      * The two ends of an agent's history, rendered within a character budget, with what the whole
      * archive amounts to.
      *

@@ -9,7 +9,8 @@ import { readFileSync } from "node:fs";
  * rules. The output contract deliberately deviates: v1 asked for hand-assembled JSON, and a
  * rationale that quoted the user ("sync to main") produced invalid JSON, so an allow was read as
  * an unreadable answer and refused. Tagged fields carry free text without escaping, so the
- * rationale can never break the verdict.
+ * rationale can never break the verdict. The investigation guidelines also deviate: a reviewer may
+ * read agent history for authorization its transcript lacks, trusting only the person's messages.
  */
 
 const TENANT_POLICY_CONFIG_PLACEHOLDER = "{{ tenant_policy_config }}";

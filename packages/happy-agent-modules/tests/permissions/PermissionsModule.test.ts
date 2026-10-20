@@ -927,6 +927,7 @@ describe("PermissionsModule", () => {
             installation.config,
             installation.compute,
             installation.systemPrompt,
+            installation.history,
             installation.storage,
         );
         const permissions = new PermissionsModule(installation.compute, auto);

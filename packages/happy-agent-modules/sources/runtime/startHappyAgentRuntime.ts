@@ -447,6 +447,7 @@ export async function startHappyAgentRuntime(
             config,
             compute.computeModule,
             systemPrompt,
+            history,
             new AgentStorage({
                 acquireLock: async () => {
                     try {

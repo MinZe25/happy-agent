@@ -101,9 +101,23 @@
   `auto/index.ts`. The trust rule is unchanged and still belongs to this module; only the
   definition moved. `SPEC.md` §"Trust" still points at `messageOrigin.ts` as if it were auto's own
   and needs a dictated path update.
+- About a third of denied sub-agents were false positives: a person told the parent "sync to
+  main" or "release", and the child's push or release workflow was refused with unknown
+  authorization because the child's evidence holds only its own messages, and compaction drops
+  earlier ones the same way. By the user's decision the reviewer now pulls history itself rather
+  than having messages inherited or injected: each review names `<reviewed_agent_id>`, and the
+  private reviewer gets History's own `read_agent_history` (`HistoryModule.reviewerTools`) through
+  `AutoReviewHistoryModule`. It may read the reviewed agent and any agent whose ID it finds there,
+  following delegators upward; parents are never resolved for it, because an unguessable Agent ID
+  is the capability. The tool reads through the review's own context, which carries the main
+  database, is offered only while that review runs, and is non-transactional so it never opens
+  main storage inside a private transaction. Only History's `role: "user"` messages count, and
+  the policy requires the person's request to cover the exact action; a delegator's paraphrase
+  that widens it does not. The gym proves the delegation evidence is not in the child's
+  transcript, so the reviewer must start from the reviewed agent's own history.
 - The module now takes only modules, plus the one structural argument `SPEC.md` §13.3 kept:
   `constructor(config: ConfigModule, compute: ComputeModule, systemPrompt: SystemPromptModule,
-storage: AgentStorage)`. The accounts, the catalog and the working folder come from
+history: HistoryModule, storage: AgentStorage)`. The accounts, the catalog and the working folder come from
   configuration; the private lifetime is derived in `beforeStart` from the context the base hands
   the module, so nothing it starts is carried by a lifetime that ends before it does; the security
   documents are `ConfigModule.readGlobalSecurity` / `readProjectSecurity`, because configuration is

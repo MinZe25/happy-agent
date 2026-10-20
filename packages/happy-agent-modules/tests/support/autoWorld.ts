@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type { AgentModel, AgentStorage, AgentProviders } from "@slopus/happy-agent-base";
 import { ComputeModule, type HostComputeProvider } from "../../sources/compute/index.js";
 import { ConfigModule } from "../../sources/config/index.js";
+import { HistoryModule } from "../../sources/history/index.js";
 import { SecretsModule } from "../../sources/secrets/index.js";
 import { SystemPromptModule } from "../../sources/systemPrompt/index.js";
 import { FakeCompute } from "../compute/support/FakeCompute.js";
@@ -33,6 +34,8 @@ export interface AutoWorld {
     readonly config: ConfigModule;
     readonly compute: ComputeModule;
     readonly systemPrompt: SystemPromptModule;
+    /** The history a reviewer may read; its tables live in whichever main database a test opens. */
+    readonly history: HistoryModule;
     /** The private review system's storage — the one structural argument `SPEC.md` §13.3 keeps. */
     readonly storage: AgentStorage;
     readonly provider: ScriptedProvider;
@@ -83,6 +86,7 @@ export async function autoWorld(
         config,
         compute,
         systemPrompt: new SystemPromptModule(config, compute),
+        history: new HistoryModule(),
         storage: store.storage,
         provider,
         machine,

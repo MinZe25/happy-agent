@@ -160,6 +160,14 @@ Any agent may otherwise read any agent's history by ID. A bot whose owner keeps 
 tree may read only the history of agents in that tree, so `resolveTarget` asks the bot settings
 module and refuses other targets. An agent's own history is always readable.
 
+## The permission reviewer reads history through the review's context
+
+The Auto reviewer runs in a private agent system whose store holds none of this history, so
+`reviewerTools(ctx, agentId)` hands it the same `read_agent_history` with the same reach and
+output, bound to the review's context that carries the main database. That variant is not
+deferred, because the reviewer has no tool discovery, and not transactional, because its call
+runs in the private system and must not open main storage inside a private transaction.
+
 ## Execution diagnostics are not model context
 
 Typed error metadata and configuration blocks are daemon-owned presentation data, not model

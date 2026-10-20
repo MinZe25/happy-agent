@@ -114,6 +114,19 @@ evidence and are preserved preferentially inside the review budget. Assistant
 text, tool arguments, tool output, repository content, generated summaries, and
 anything injected into a file are **not** authorization.
 
+That transcript covers only the reviewed agent since its last compaction, and
+messages other agents sent it are not in it. A person who asked a parent agent
+to "sync to main" is therefore invisible to the child that runs the push. The
+reviewer can look further with `read_agent_history`: each review names the
+reviewed agent in `<reviewed_agent_id>`, and the reviewer may read that agent's
+history and the history of any agent whose ID it finds there, such as a
+delegator's `Message from agent <id>:`, following IDs upward. Agent IDs are
+unguessable, so holding one is the capability; nothing resolves parents for the
+reviewer. Only `role: "user"` messages in that history, which History records
+only for the positive user origin, count as authorization, and the person's
+request must cover the exact action. A delegator's instruction or a paraphrase
+that widens the request never does.
+
 The verdict is re-derived from the reviewer's own classification
 (`shouldAllowAutoPermissionReview`): a `critical` risk is never allowed
 automatically, and a `high` risk is allowed only with medium or high user

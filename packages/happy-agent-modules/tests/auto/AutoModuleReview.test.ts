@@ -16,11 +16,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AutoModule } from "../../sources/auto/index.js";
 import type { ComputeModule } from "../../sources/compute/index.js";
 import { ConfigModule } from "../../sources/config/index.js";
+import type { HistoryModule } from "../../sources/history/index.js";
 import { SystemPromptModule } from "../../sources/systemPrompt/index.js";
 import type { PermissionReviewRequest } from "../../sources/permissions/PermissionReviewer.js";
 import { autoWorld } from "../support/autoWorld.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
+import { toolCallTurn } from "../support/fixtures.js";
 import type { ScriptedProvider, ScriptedTurn } from "../support/ScriptedProvider.js";
 
 /**
@@ -121,6 +123,8 @@ async function reviewWorld(
         readonly models?: readonly AgentModel[];
         readonly failResolution?: (model: string | undefined) => boolean;
         readonly failSession?: boolean;
+        /** Recorded into the main database's agent history before any review runs. */
+        readonly history?: (history: HistoryModule, ctx: Context) => Promise<void>;
     } = {},
 ): Promise<{
     world: ReviewWorld;
@@ -169,6 +173,7 @@ async function reviewWorld(
         installation.config,
         installation.compute,
         new GatedSystemPromptModule(installation.config, installation.compute, options.gate),
+        installation.history,
         installation.storage,
     );
 
@@ -176,8 +181,12 @@ async function reviewWorld(
     // context, so that context must carry the main database exactly as a permission hook's does —
     // and the agent's compute configuration, so a review can read the project's own instructions
     // off the machine the reviewed agent works on.
-    const mainDatabase = moduleDatabase(auto.migrations, "auto-main-evidence");
+    const mainDatabase = moduleDatabase(
+        [...auto.migrations, ...installation.history.migrations],
+        "auto-main-evidence",
+    );
     await mainDatabase.ready;
+    await options.history?.(installation.history, mainDatabase.context);
     const reviewContext = withAgentConfig(mainDatabase.context, {
         modules: { compute: { cwd: installation.publicHome } },
     });
@@ -239,6 +248,12 @@ async function reviewWorld(
             return auto.reviewer.review(reviewContext, { ...request, signal });
         },
     };
+}
+
+/** The text a tool result carried back to the reviewer. */
+function toolText(message: unknown): string {
+    const content = (message as { content?: readonly { type: string; text?: string }[] }).content;
+    return (content ?? []).map((block) => block.text ?? "").join("");
 }
 
 const worlds: ReviewWorld[] = [];
@@ -397,6 +412,51 @@ describe("AutoModule reviewer", () => {
         expect(world.provider.sessions.flatMap((session) => session.requests)).toHaveLength(1);
     });
 
+    it("names the reviewed agent and lets the reviewer read main-system history by Agent ID", async () => {
+        const { world, review } = await reviewWorld(
+            [
+                toolCallTurn(
+                    "history-1",
+                    "read_agent_history",
+                    JSON.stringify({ target: "parentagent", roles: ["user"] }),
+                ),
+                verdictTurn(taggedVerdict({ outcome: "allow", risk_level: "low" })),
+            ],
+            {
+                history: async (history, ctx) => {
+                    await history.record(ctx, "parentagent", {
+                        blocks: [{ type: "text", text: "Please push the release branch to main." }],
+                        role: "user",
+                    });
+                    await history.record(ctx, "parentagent", {
+                        blocks: [{ type: "text", text: "Delegator paraphrase: also force-push." }],
+                        role: "agent",
+                        senderAgentId: "grandparentagent",
+                    });
+                },
+            },
+        );
+        worlds.push(world);
+
+        await expect(review()).resolves.toMatchObject({ outcome: "allowed" });
+
+        const requests = world.provider.sessions.flatMap((session) => session.requests);
+        expect(requests).toHaveLength(2);
+        expect(JSON.stringify(requests[0]?.context)).toContain(
+            `<reviewed_agent_id>${MAIN_AGENT_ID}</reviewed_agent_id>`,
+        );
+        // The tool read the parent's main-system history, and the role filter kept only the
+        // person's own message.
+        const result = requests[1]?.context.messages.at(-1);
+        expect(result).toMatchObject({ role: "tool", callId: "history-1" });
+        const read = JSON.parse(toolText(result));
+        expect(read).toMatchObject({
+            target: "parentagent",
+            history: "1. USER\nText: Please push the release branch to main.",
+            returned_messages: 1,
+        });
+    });
+
     it("rejects a review requested before the private system starts", async () => {
         const context = createRootContext().named("auto-review-not-started");
         const installation = await autoWorld();
@@ -404,6 +464,7 @@ describe("AutoModule reviewer", () => {
             installation.config,
             installation.compute,
             installation.systemPrompt,
+            installation.history,
             installation.storage,
         );
 
@@ -433,6 +494,7 @@ describe("AutoModule reviewer", () => {
             config,
             emptyCatalog.compute,
             emptyCatalog.systemPrompt,
+            emptyCatalog.history,
             emptyCatalog.storage,
         );
 

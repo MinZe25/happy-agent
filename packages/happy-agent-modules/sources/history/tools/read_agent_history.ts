@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { HistoryModule } from "../HistoryModule.js";
 import {
@@ -63,9 +64,16 @@ const historyAgentSummaryResponseSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/** The tool that reads and searches one agent's durable history. */
-export function readAgentHistoryTool(history: HistoryModule, agentId: string) {
-    return defineAgentTool({
+/**
+ * The tool that reads and searches one agent's durable history.
+ *
+ * `storage` is set only for the automatic permission reviewer, which runs in a private agent system
+ * whose own store holds none of this history. Its calls read through that context — the review's
+ * own, carrying the main database — rather than the private call's, outside any private
+ * transaction, and the tool is offered directly because the reviewer has no tool discovery.
+ */
+export function readAgentHistoryTool(history: HistoryModule, agentId: string, storage?: Context) {
+    const tool = defineAgentTool({
         name: "read_agent_history",
         defer: true,
         capabilities: ["Read the agent's durable conversation and tool history."],
@@ -188,9 +196,10 @@ export function readAgentHistoryTool(history: HistoryModule, agentId: string) {
         // Reading history changes nothing and reaches nothing outside the agent's own store.
         durable: true,
         reloadable: true,
-        transactional: true,
+        transactional: storage === undefined,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, args) => {
+        execute: async (callCtx, args) => {
+            const ctx = storage ?? callCtx;
             if (args.cursor !== undefined && args.from !== undefined) {
                 throw new Error("Use either cursor or from, not both.");
             }
@@ -242,6 +251,7 @@ export function readAgentHistoryTool(history: HistoryModule, agentId: string) {
         },
         toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     });
+    return storage === undefined ? tool : { ...tool, defer: false };
 }
 
 /** The counts as the model reads them, named the way the rest of the answer is. */

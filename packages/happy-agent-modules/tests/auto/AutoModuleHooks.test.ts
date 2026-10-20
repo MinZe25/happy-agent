@@ -36,6 +36,7 @@ async function hookWorld(): Promise<HookWorld> {
         installation.config,
         installation.compute,
         installation.systemPrompt,
+        installation.history,
         installation.storage,
     );
     const database = moduleDatabase(auto.migrations, "auto-hooks-main");
