@@ -1283,6 +1283,7 @@ Response — `200`:
         },
         "providers": {
             "claude": {
+                "name": "Current CLI",
                 "type": "claude",
                 "enabled": true,
                 "hidden": false,
@@ -1343,6 +1344,14 @@ Response — `200`:
 ```
 
 Field groups:
+
+- `providers.<id>.name` — optional friendly account name. Built-in `claude`, `codex`, and `grok`
+  default to `Current CLI`; other accounts without a configured name use a readable version of
+  their ID. Explicit names are trimmed, nonblank, and at most 256 characters, then displayed
+  verbatim without inferred identity, email shortening, or plan suffixes. Names affect no account
+  ID, provider type, credentials, defaults, or routing. Clients tolerate absent names on older
+  daemons and may use a readable ID fallback. Account-usage entries continue to reference IDs;
+  clients join them to this configuration for display names.
 
 - `defaults` — what a new agent gets when it names nothing: provider, model, effort, and
   permission mode.
@@ -7196,7 +7205,13 @@ Request body, every field optional:
 
 An account is also skipped while its `retryAt` has not passed, while a read of it is already in
 flight, and when it has no account-usage source, such as Bedrock or an API key. Reads of the same
-account never overlap: a refresh joins the same one-at-a-time queue as the hourly poll.
+account never overlap: a refresh joins the same one-at-a-time queue as the daily background poll.
+Background reads run at startup and once a day, skipping accounts measured during ordinary
+inference within the last day. The existing reset rechecks remain independent of that cadence.
+Fallback inference probes have a separate exponential budget: each admitted probe, successful or
+not, waits 5 minutes, 40 minutes, 5 hours 20 minutes, then a day before the next. Menu refreshes
+cannot reset this budget. Ordinary inference measurements reset escalation and postpone probes
+for a day. Inexpensive account endpoints remain eligible under the ordinary refresh age policy.
 
 Response — `202`:
 

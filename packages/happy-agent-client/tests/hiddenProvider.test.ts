@@ -14,6 +14,16 @@ const provider = {
 };
 
 describe("provider hidden flag", () => {
+    it.each(["Current CLI", "alex@gmail.com", "Alex Acme"])(
+        "accepts a friendly account name %s",
+        (name) => {
+            expect(Value.Check(providerConfigSchema, { ...provider, name })).toBe(true);
+        },
+    );
+
+    it.each(["", "   ", "x".repeat(257)])("rejects an invalid account name %#", (name) => {
+        expect(Value.Check(providerConfigSchema, { ...provider, name })).toBe(false);
+    });
     it.each([true, false])("accepts an explicit hidden value %#", (hidden) => {
         expect(Value.Check(providerConfigSchema, { ...provider, hidden })).toBe(true);
     });

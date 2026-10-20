@@ -302,6 +302,7 @@ export type ProviderModelReference = Static<typeof providerModelReferenceSchema>
 
 /** One configured inference provider and the models it serves. */
 export const providerConfigSchema = Type.Object({
+    name: Type.Optional(Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" })),
     /** Whether the account is on and may be routed to. It never includes `hidden`. */
     enabled: Type.Boolean(),
     /**
