@@ -103,13 +103,17 @@ export async function readClaudeCodeOAuthCredential(
 export async function readTokenFromMacOsKeychain(
     configDirectory: string,
     env: NodeJS.ProcessEnv,
+    /** How long one `security` child may run, launch included; tests not about the deadline lift it. */
+    attemptTimeoutMs = MACOS_KEYCHAIN_TIMEOUT_MS,
 ): Promise<string | undefined> {
-    return (await readCredentialFromMacOsKeychain(configDirectory, env))?.accessToken;
+    return (await readCredentialFromMacOsKeychain(configDirectory, env, attemptTimeoutMs))
+        ?.accessToken;
 }
 
 async function readCredentialFromMacOsKeychain(
     configDirectory: string,
     env: NodeJS.ProcessEnv,
+    attemptTimeoutMs = MACOS_KEYCHAIN_TIMEOUT_MS,
 ): Promise<ClaudeCodeOAuthCredential | undefined> {
     const defaultDirectory = env.CLAUDE_CONFIG_DIR === undefined;
     const directorySuffix = defaultDirectory
@@ -126,7 +130,11 @@ async function readCredentialFromMacOsKeychain(
     // function has no cache, so a single swallowed failure is reported to the caller as a missing
     // credential. Retry instead, since the window closes within milliseconds.
     for (let attempt = 1; attempt <= MACOS_KEYCHAIN_ATTEMPTS; attempt++) {
-        const credential = await readCredentialFromMacOsKeychainOnce(account, service);
+        const credential = await readCredentialFromMacOsKeychainOnce(
+            account,
+            service,
+            attemptTimeoutMs,
+        );
         if (credential !== undefined) {
             return credential;
         }
@@ -142,6 +150,7 @@ async function readCredentialFromMacOsKeychain(
 async function readCredentialFromMacOsKeychainOnce(
     account: string,
     service: string,
+    timeoutMs: number,
 ): Promise<ClaudeCodeOAuthCredential | undefined> {
     try {
         const { stdout } = await execFileAsync(
@@ -150,7 +159,7 @@ async function readCredentialFromMacOsKeychainOnce(
             {
                 encoding: "utf8",
                 killSignal: "SIGKILL",
-                timeout: MACOS_KEYCHAIN_TIMEOUT_MS,
+                timeout: timeoutMs,
             },
         );
         return parseClaudeOAuthCredential(stdout);

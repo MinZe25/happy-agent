@@ -8,6 +8,10 @@ import { fetchClaudeProviderUsage } from "@/vendors/claude/fetchClaudeProviderUs
 import { readTokenFromMacOsKeychain } from "@/vendors/claude/impl/auth.js";
 
 const ACCESS_TOKEN = "keychain-access-token";
+// The fake `security` is a freshly written shell script, and launching one can take longer than the
+// production 500ms child deadline on a busy machine. Tests about missing reads and signals lift the
+// deadline so only what they assert decides them; the timeout tests keep the production deadline.
+const UNHURRIED_MS = 60_000;
 const cleanups: (() => Promise<void>)[] = [];
 
 afterEach(async () => {
@@ -21,16 +25,16 @@ describe("Claude Code keychain credential", () => {
     it("reads the token when the item is momentarily missing during a rewrite", async () => {
         await installFakeSecurity({ failures: 1 });
 
-        await expect(readTokenFromMacOsKeychain(claudeConfigDir(), process.env)).resolves.toBe(
-            ACCESS_TOKEN,
-        );
+        await expect(
+            readTokenFromMacOsKeychain(claudeConfigDir(), process.env, UNHURRIED_MS),
+        ).resolves.toBe(ACCESS_TOKEN);
     });
 
     it("reports no token once the keychain keeps failing", async () => {
         await installFakeSecurity({ failures: Number.MAX_SAFE_INTEGER });
 
         await expect(
-            readTokenFromMacOsKeychain(claudeConfigDir(), process.env),
+            readTokenFromMacOsKeychain(claudeConfigDir(), process.env, UNHURRIED_MS),
         ).resolves.toBeUndefined();
     });
 
@@ -39,9 +43,11 @@ describe("Claude Code keychain credential", () => {
         async (failures) => {
             const fixture = await installFakeSecurity({ failures });
 
-            const token = await readTokenFromMacOsKeychain(fixture.directory, {
-                USER: "test-user",
-            });
+            const token = await readTokenFromMacOsKeychain(
+                fixture.directory,
+                { USER: "test-user" },
+                UNHURRIED_MS,
+            );
 
             expect(token).toBe(failures < 3 ? ACCESS_TOKEN : undefined);
             expect(await fixture.attempts()).toBe(Math.min(failures + 1, 3));
@@ -52,7 +58,11 @@ describe("Claude Code keychain credential", () => {
         const fixture = await installFakeSecurity({ failures: 1, failure });
 
         await expect(
-            readTokenFromMacOsKeychain(fixture.directory, { USER: "test-user" }),
+            readTokenFromMacOsKeychain(
+                fixture.directory,
+                { USER: "test-user" },
+                failure === "timeout" ? undefined : UNHURRIED_MS,
+            ),
         ).resolves.toBe(ACCESS_TOKEN);
         expect(await fixture.attempts()).toBe(2);
     });
@@ -64,7 +74,11 @@ describe("Claude Code keychain credential", () => {
             const started = performance.now();
 
             await expect(
-                readTokenFromMacOsKeychain(fixture.directory, { USER: "test-user" }),
+                readTokenFromMacOsKeychain(
+                    fixture.directory,
+                    { USER: "test-user" },
+                    failure === "timeout" ? undefined : UNHURRIED_MS,
+                ),
             ).resolves.toBeUndefined();
             expect(await fixture.attempts()).toBe(3);
             // Three 500ms child deadlines plus 20/40ms backoff, with CI scheduling headroom.

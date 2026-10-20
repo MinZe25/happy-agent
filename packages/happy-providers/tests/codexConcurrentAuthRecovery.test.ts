@@ -72,6 +72,9 @@ describe("Codex concurrent authentication recovery", () => {
                 await session.destroy();
             }
         },
+        // The first test in this file pays the session stack's one-time startup. Nothing here waits
+        // on a clock, so a generous budget only absorbs a starved machine; a real hang still fails.
+        30_000,
     );
 
     it("an account switch keeps the old session failing while a newly loaded session works", async () => {
