@@ -90,14 +90,17 @@ import { type AutoReviewerCursor, autoReviewerCursorSchema } from "./AutoReviewT
  * specification requires — separate file, separate lock, separate schema, no shared state — is
  * preserved either way.
  *
- * The 90-second review budget is owned by `PermissionsModule`, which creates the abort controller
+ * The 120-second review budget is owned by `PermissionsModule`, which creates the abort controller
  * and the timer and derives timed-out/unavailable from a review that does not return. `AutoModule`
- * honors the request's abort signal, exports the exact v1 budget as `AUTO_PERMISSION_REVIEW_BUDGET_MS`
- * for that module to bound reviews with, and never converts a cancellation into a verdict.
+ * honors the request's abort signal, exports the budget as `AUTO_PERMISSION_REVIEW_BUDGET_MS` for
+ * that module to bound reviews with, and never converts a cancellation into a verdict.
  */
 
-/** The wall-clock budget for one review, exactly as Happy Agent v1. `PermissionsModule` bounds reviews by it. */
-export const AUTO_PERMISSION_REVIEW_BUDGET_MS = 90_000;
+/**
+ * The wall-clock budget for one review. Happy Agent v1 allowed 90 seconds; history reads add
+ * reviewer turns, so it is 120. `PermissionsModule` bounds reviews by it.
+ */
+export const AUTO_PERMISSION_REVIEW_BUDGET_MS = 120_000;
 
 /** A minimal validated shape for the only user-input event this module trusts as evidence. */
 export const userInputAnsweredSchema = Type.Object(

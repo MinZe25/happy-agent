@@ -190,9 +190,9 @@ function allowedDecision(
 describe("permissions boundary contracts", () => {
     it("holds its bounds as module constants rather than as tunable construction arguments", () => {
         // The three bounds a host used to be able to set are the product's own decisions now, so
-        // what a test can assert about them is what they are, and that they are the values Happy Agent v1
-        // enforced.
-        expect(PERMISSION_REVIEW_TIMEOUT_MS).toBe(90_000);
+        // what a test can assert about them is what they are: Happy Agent v1's values, except the
+        // review budget, raised from 90 seconds because history reads add reviewer turns.
+        expect(PERMISSION_REVIEW_TIMEOUT_MS).toBe(120_000);
         expect(PERMISSION_REFUSALS_BEFORE_STOPPING).toBe(3);
         expect(PERMISSION_ANNOUNCE_TIMEOUT_MS).toBe(5_000);
     });
@@ -1083,7 +1083,7 @@ describe("permissions boundary contracts", () => {
         expect(events[0]).toMatchObject({
             type: "permission_action_unproven",
             kind: "timed_out",
-            reason: "The reviewer did not answer within 90 seconds.",
+            reason: "The reviewer did not answer within 120 seconds.",
         });
     });
 

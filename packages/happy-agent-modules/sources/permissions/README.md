@@ -109,10 +109,11 @@ long-window rate.
   currently active tools comes from. Every registered source is merged, in registration order,
   under one shared bound; a fixed list is registered as a function returning it. A provider that is
   not a function is rejected.
-- `PERMISSION_REVIEW_TIMEOUT_MS` (90,000), `PERMISSION_REFUSALS_BEFORE_STOPPING` (3), and
+- `PERMISSION_REVIEW_TIMEOUT_MS` (120,000), `PERMISSION_REFUSALS_BEFORE_STOPPING` (3), and
   `PERMISSION_ANNOUNCE_TIMEOUT_MS` (5,000) are the module's own bounds, exported so a reader can
-  see them rather than so a host can change them. They are Happy Agent v1's values: the review budget, the
-  consecutive-refusal limit, and the ceiling on how long one decision waits for its observers.
+  see them rather than so a host can change them. They are Happy Agent v1's values for the
+  consecutive-refusal limit and the ceiling on how long one decision waits for its observers; the
+  review budget was raised from v1's 90 seconds because reading agent history adds reviewer turns.
 - `PermissionReviewer.review(ctx, request: PermissionReviewRequest): Promise<PermissionReviewDecision>`
   is the contract a host implements. `PermissionReviewRequest` carries `agentId`, `callId`, the
   resolved `tool`, its detached and bounded `arguments`, the `action` description, the `mode`

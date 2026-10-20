@@ -474,7 +474,7 @@ describe("PermissionsModule", () => {
     });
 
     it("tells the model a failed reviewer proved nothing, without ending the turn", async () => {
-        // The timeout half of this distinction is proven against the module's own 90-second budget
+        // The timeout half of this distinction is proven against the module's own 120-second budget
         // in `PermissionsBoundary.test.ts`, where a fake clock can reach it.
         const unavailable = reviewerAnswering(() => {
             throw new Error("reviewer offline");

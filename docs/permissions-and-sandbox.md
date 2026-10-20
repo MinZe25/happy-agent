@@ -144,7 +144,7 @@ distinct outcomes and they do not mean the same thing:
   and tell the user what you wanted to do and why it was refused, so they can
   decide. If the user then approves it in their own words, that reply is real
   authorization and the next review can allow it.
-- **Timed out.** The review did not finish within its 90-second budget. The
+- **Timed out.** The review did not finish within its 120-second budget. The
   action is unproven, not unsafe. You may try once more, or ask the user.
 - **Unavailable.** No reviewer could run, or no reviewer exists for the session.
   No judgement was made about the action. Continue with work that does not need

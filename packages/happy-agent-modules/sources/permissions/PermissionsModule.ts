@@ -76,11 +76,12 @@ type ReviewOutcome =
           readonly reason: string;
       };
 /**
- * The wall-clock budget for one review, matching Happy Agent v1 exactly (90 seconds). The reviewer may make
- * as many read-only tool calls as it wants inside this window; when the window closes the action is
- * treated as unproven rather than judged unsafe.
+ * The wall-clock budget for one review: 120 seconds, up from Happy Agent v1's 90 because reading
+ * agent history adds reviewer turns. The reviewer may make as many read-only tool calls as it
+ * wants inside this window; when the window closes the action is treated as unproven rather than
+ * judged unsafe.
  */
-export const PERMISSION_REVIEW_TIMEOUT_MS = 90_000;
+export const PERMISSION_REVIEW_TIMEOUT_MS = 120_000;
 
 /**
  * A review the caller's own lifetime cancelled. Happy Agent v1 propagates this as "Permission review was

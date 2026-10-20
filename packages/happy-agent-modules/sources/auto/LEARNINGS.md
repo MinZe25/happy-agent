@@ -114,7 +114,8 @@
   main storage inside a private transaction. Only History's `role: "user"` messages count, and
   the policy requires the person's request to cover the exact action; a delegator's paraphrase
   that widens it does not. The gym proves the delegation evidence is not in the child's
-  transcript, so the reviewer must start from the reviewed agent's own history.
+  transcript, so the reviewer must start from the reviewed agent's own history. Those reads add
+  reviewer turns, so the user raised the review budget from v1's 90 seconds to 120.
 - The module now takes only modules, plus the one structural argument `SPEC.md` §13.3 kept:
   `constructor(config: ConfigModule, compute: ComputeModule, systemPrompt: SystemPromptModule,
 history: HistoryModule, storage: AgentStorage)`. The accounts, the catalog and the working folder come from
