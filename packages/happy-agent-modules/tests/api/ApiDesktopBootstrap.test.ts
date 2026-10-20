@@ -15,9 +15,12 @@ import { recordingTracer } from "../support/recordingTracer.js";
 const cleanups: (() => Promise<void>)[] = [];
 const token = "t".repeat(43);
 
-// The published client does not carry the archived collection yet; widen the response until
-// the client release that does is consumed here.
-type Bootstrap = DesktopBootstrapResponse & { readonly archivedAgents?: readonly Agent[] };
+// The published client does not carry the archived collection or the health yet; widen the
+// response until the client release that does is consumed here.
+type Bootstrap = DesktopBootstrapResponse & {
+    readonly archivedAgents?: readonly Agent[];
+    readonly health?: Record<string, unknown>;
+};
 
 afterEach(async () => {
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -25,6 +28,14 @@ afterEach(async () => {
 });
 
 describe("desktop bootstrap resource reads", () => {
+    it("carries exactly what health answers, so a client needs no health check before it", async () => {
+        const fixture = await createFixture();
+        const bootstrap = await fixture.get<Bootstrap>("/v0/bootstrap/desktop");
+        const health = await fixture.get<Record<string, unknown>>("/v0/health");
+        expect(bootstrap.health).toEqual(health);
+        expect(bootstrap.health).toMatchObject({ healthy: true, ready: true, status: "ready" });
+    });
+
     it("invalidates connected clients when account tier capabilities change and unsubscribes on close", async () => {
         const fixture = await createFixture();
         const bootstrap = await fixture.get<DesktopBootstrapResponse>("/v0/bootstrap/desktop");

@@ -8265,6 +8265,9 @@ export class ApiModule implements AgentModule {
             })),
         );
         return {
+            // Exactly `GET /v0/health`, so a client that reads this first needs no separate
+            // health check before it: a daemon that answers here is ready.
+            health: this.#health(ctx),
             config: await this.#sanitizedConfig(ctx),
             profile,
             onboarding: await this.#onboarding(ctx, projects.length > 0),
