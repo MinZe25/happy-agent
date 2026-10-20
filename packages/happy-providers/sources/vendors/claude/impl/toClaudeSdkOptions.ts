@@ -69,6 +69,7 @@ export function toClaudeSdkOptions(options: {
             CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
             CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
             CLAUDE_CODE_MAX_RETRIES: String(options.maxRetries ?? DEFAULT_INFERENCE_MAX_RETRIES),
+            CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(claudeMcpDescriptionLimit(clientTools)),
             // Match Claude Code's normal one-hour prompt-cache lifetime deterministically.
             ENABLE_PROMPT_CACHING_1H: "1",
             ...(toolSearchEnabled ? { ENABLE_TOOL_SEARCH: "true" } : {}),
@@ -210,6 +211,20 @@ export function toClaudeMcpToolDefinition(tool: SessionTool, toolSearchEnabled =
             ? {}
             : { _meta: { "anthropic/alwaysLoad": true } }),
     };
+}
+
+const CLAUDE_MCP_DESCRIPTION_DEFAULT_LIMIT = 2048;
+
+/**
+ * Claude Code cuts every MCP tool description at 2,048 characters unless told otherwise, which
+ * silently drops the end of a long one, such as the syntax a tool's guidance closes with. These
+ * tools are the session's own, so the cap is raised to fit the longest of them whole.
+ */
+function claudeMcpDescriptionLimit(tools: readonly SessionTool[]): number {
+    return tools.reduce(
+        (limit, tool) => Math.max(limit, claudeMcpToolDescription(tool).length),
+        CLAUDE_MCP_DESCRIPTION_DEFAULT_LIMIT,
+    );
 }
 
 function claudeMcpToolDescription(tool: SessionTool): string {

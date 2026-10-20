@@ -247,6 +247,25 @@ describe("Claude provider golden", () => {
         expect(exchangeIndex).toBe(golden.exchanges.length);
         const expectedRequests = golden.exchanges.map((exchange: GoldenExchange, index: number) => {
             const expectedBody = structuredClone(exchange.request.body);
+            // The capture also predates Rig raising Claude Code's 2,048-character cap on MCP
+            // tool descriptions to the session's longest, so Claude Code cut the long ones
+            // there. Keep the capture unchanged and require each to arrive whole instead:
+            // exactly what was captured, continued past the cap, and no longer marked cut.
+            const truncated = "… [truncated]";
+            const sentTools = (
+                requests[index] as { tools?: { name: string; description: string }[] }
+            ).tools;
+            for (const tool of expectedBody.tools ?? []) {
+                if (typeof tool.description !== "string" || !tool.description.endsWith(truncated))
+                    continue;
+                const sent = sentTools?.find((candidate) => candidate.name === tool.name);
+                expect(sent?.description.length).toBeGreaterThan(2048);
+                expect(
+                    sent?.description.startsWith(tool.description.slice(0, -truncated.length)),
+                ).toBe(true);
+                expect(sent?.description).not.toContain(truncated);
+                tool.description = sent?.description;
+            }
             // The original capture predates SDK 0.3.251, which now retains the
             // first assistant's signed thinking when replaying the model switch
             // and compaction turns. Keep the capture unchanged and require this
