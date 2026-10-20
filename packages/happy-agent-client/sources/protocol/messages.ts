@@ -256,6 +256,8 @@ export type ArtifactPresentation = Static<typeof artifactPresentationSchema>;
 /**
  * A web page a completed call asked the chat to show inline, at a URL as the agent's own machine
  * reaches it. `display` is an artifact display preference, or `null` for the client's choice.
+ * Legacy history and older daemons only: new `show_page` calls create live-URL artifacts and
+ * return an `artifact` presentation with `shows: "latest"`.
  */
 export const pagePresentationSchema = Type.Object({
     type: Type.Literal("page"),
@@ -264,7 +266,7 @@ export const pagePresentationSchema = Type.Object({
     display: Nullable(artifactDisplaySchema),
 });
 
-/** A web page a completed call asked the chat to show inline. */
+/** A legacy inline web page. New live pages use `ArtifactPresentation` and the artifact's `live`. */
 export type PagePresentation = Static<typeof pagePresentationSchema>;
 
 /** Every display-ready tool-call presentation the client understands. */

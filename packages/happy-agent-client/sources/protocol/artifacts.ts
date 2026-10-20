@@ -1,6 +1,6 @@
 /**
  * Artifacts: finished work published to one global catalog, with every version kept. Each version
- * is a small tree of files under one URL prefix, so an entry's relative references resolve.
+ * holds files under one URL prefix, or a live URL with an inert HTML entry for older clients.
  */
 
 import { type Static, Type } from "@sinclair/typebox";
@@ -14,6 +14,7 @@ import {
     timestampSchema,
 } from "./common.js";
 import { userIdSchema } from "./userId.js";
+import { networkIdSchema } from "./workspaces.js";
 
 /** What an artifact is. The set grows; a client offers an unknown type's entry for download. */
 export const artifactTypeSchema = Type.Union([
@@ -66,6 +67,25 @@ export const artifactDisplaySchema = Type.Union([
     Type.Literal("side"),
 ]);
 export type ArtifactDisplay = Static<typeof artifactDisplaySchema>;
+
+/** A normalized, absolute HTTP(S) URL without embedded credentials; never fetched by the daemon. */
+export const artifactUrlSchema = Type.String({
+    minLength: 1,
+    maxLength: 4096,
+    pattern: "^https?://[^\\s/@?#\\\\]+(?:[/?#][^\\s\\\\]*)?$",
+});
+export type ArtifactUrl = Static<typeof artifactUrlSchema>;
+
+/**
+ * Live content, preferred over the inert file entry. The network is frozen at creation; clients
+ * fail closed if it is unavailable and use a browser profile isolated to this artifact's ID.
+ * Never forward daemon or artifact-data credentials to the live page.
+ */
+export const artifactLiveSchema = Type.Object({
+    url: artifactUrlSchema,
+    networkId: networkIdSchema,
+});
+export type ArtifactLive = Static<typeof artifactLiveSchema>;
 
 /** A background as a request names it: the same colours in either case, or `null` for none. */
 export const artifactBackgroundInputSchema = Nullable(
@@ -178,6 +198,8 @@ export const artifactSchema = Type.Object({
     latestMinor: Type.Optional(Type.Integer({ minimum: 0 })),
     /** The number of the latest version, from 1. */
     latestVersion: Type.Integer({ minimum: 1 }),
+    /** Live URL content, or `null` for files; absent on older daemons. */
+    live: Type.Optional(Nullable(artifactLiveSchema)),
     /** The latest version's files' bytes together. */
     size: Type.Integer({ minimum: 1 }),
     /** Where the artifact was created. */
@@ -206,6 +228,8 @@ export const artifactVersionSchema = Type.Object({
     entry: artifactFileSchema,
     /** Every file, in `path` order by Unicode code point. */
     files: Type.Array(artifactFileSchema),
+    /** This version's URL and the artifact's original network; `null` for files, absent on older daemons. */
+    live: Type.Optional(Nullable(artifactLiveSchema)),
     /** The major part of the version's `major.minor` label, from 1; absent on older daemons. */
     major: Type.Optional(Type.Integer({ minimum: 1 })),
     /** The minor part of the version's label, from 0; absent on older daemons. */

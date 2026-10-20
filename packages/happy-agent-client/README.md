@@ -403,6 +403,21 @@ colour (`#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`) to paint behind the content;
 omit the field. `createArtifact()` takes an optional `background`, and in `updateArtifact()` a
 colour sets it, `null` clears it, and omitting it keeps the latest version's.
 
+HTML artifacts can carry `live: { url, networkId }` on the artifact, its versions, and
+`artifact.updated` changes. `null` or absence means file content. When present, open `live.url`
+through `networkProxyUrl(live.networkId)` on the same daemon or connection, not through the file
+entry. The network is frozen at creation: if unavailable, show an unavailable page rather than
+using another network. The required `entry` remains an inert HTML notice for older clients.
+Versions pin the URL and metadata, not the external server's changing contents.
+
+Use a browser profile scoped to the artifact ID on its daemon or connection, shared by that
+artifact's versions and views but never by other artifacts or the workspace browser. Never send
+daemon credentials to the live page, expose the artifact data bridge, or forward its `/api/*`
+requests to the daemon. Only agent tools create or change live URLs; the REST request shapes are
+unchanged. Metadata-only updates preserve `live`, while file mutations on live artifacts fail.
+`show_page` is deprecated in favor of `create_artifact` with `type: "html"` and `url`; its new
+calls return ordinary artifact presentations. Keep reading legacy `page` presentations in history.
+
 `MessageMode.account` is optional server-resolved provenance only in configuration/error execution
 snapshots, not an account selector. It is absent from user-message/composer modes and drafts.
 `null` means unestablished; a known account has an opaque local ID and optional human-readable label.

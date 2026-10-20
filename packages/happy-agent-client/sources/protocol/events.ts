@@ -24,6 +24,7 @@ import {
     artifactBackgroundSchema,
     artifactDisplaySchema,
     artifactFileSchema,
+    artifactLiveSchema,
     artifactSchema,
     artifactSourceSchema,
     artifactTitleSchema,
@@ -352,6 +353,8 @@ export const artifactUpdatedChangesSchema = Type.Object({
     /** Absent on older daemons. */
     latestMinor: Type.Optional(Type.Integer({ minimum: 0 })),
     latestVersion: Type.Integer({ minimum: 1 }),
+    /** The new version's live content, or `null` for files; absent on older daemons. */
+    live: Type.Optional(Nullable(artifactLiveSchema)),
     size: Type.Integer({ minimum: 1 }),
     title: artifactTitleSchema,
     updatedAt: timestampSchema,

@@ -382,6 +382,12 @@ has them always includes `display` on artifact and version objects, `null` when 
 how to show every artifact. Agent-written artifact directories change only the agent tools'
 arguments and how an agent's versions are made; no request or response schema changes for them.
 
+Live-URL artifacts are additive and do not increment the protocol version. A daemon that supports
+them includes `live` on artifact and version objects and in `artifact.updated` changes: either
+`{ "url", "networkId" }` or `null` for file content. Older daemons omit it. Existing file fields
+remain unchanged: live artifacts have an inert HTML entry for older clients. Clients that
+understand `live` use the recorded URL and network instead of that entry.
+
 User settings are additive and do not increment the protocol version. A daemon that serves them
 always includes `userSettings` in desktop bootstrap and never answers `GET /v0/user-settings` with
 `404`. Older compatible daemons omit the bootstrap field, answer the user-settings routes with
@@ -6050,7 +6056,7 @@ expected arguments are present:
 | `search`       | `bedrock_web_search`, `claude_web_search`, `codex_web_search`, `gemini_web_search`, `grok_web_search`, `grok_x_search` |
 | `agent_spawn`  | `create_agent`                                                                                                         |
 | `media`        | `codex_imagegen`, `gemini_imagegen`, `present_files`                                                                   |
-| `artifact`     | `create_artifact`, `update_artifact`                                                                                   |
+| `artifact`     | `create_artifact`, `update_artifact`, `show_page`                                                                      |
 
 **`exploration`** — one normalized directory listing, file read, or code search. The daemon
 currently emits one operation per mapped tool call.
@@ -6232,10 +6238,11 @@ successfully.
 latest version when the call completed, and `title` is the artifact's title at that version.
 `shows` says which version the chat shows:
 
-- `"latest"` — the artifact as it is now, following every later version. `create_artifact`
-  presents this way: the agent writes the artifact's files after the call, with
-  `write_artifact_file` and `edit_artifact_file`, so the versions that matter come after it. This is where a client shows an HTML artifact inline,
-  by its `display` preference.
+- `"latest"` — the artifact as it is now, following every later version. `create_artifact` and the
+  deprecated `show_page` present this way. An agent can later write a file artifact with
+  `write_artifact_file` and `edit_artifact_file`, or change a live artifact's URL with
+  `update_artifact`; this presentation follows those versions. This is where a client shows an
+  HTML artifact inline, by its `display` preference.
 - `"version"` — exactly `version`. `update_artifact` presents this way, as a record of the change it
   made.
 
@@ -6245,8 +6252,9 @@ version, and display preference through the artifact routes and keeps them curre
 `artifact.updated` events. A later deletion leaves the presentation unchanged; the artifact routes
 then answer `404`.
 
-**`page`** — a web page the call asked the chat to show inline. This presentation is
-outcome-derived as well.
+**`page`** — a legacy web page presentation, retained for history and older daemons. New
+`show_page` calls create live-URL artifacts and return an `artifact` presentation with
+`shows: "latest"`; they no longer produce `page` presentations.
 
 ```json
 {
@@ -6262,9 +6270,9 @@ it: `localhost` names the agent's machine, not the client's. A client shows it t
 web page for that agent, through the agent's network, and never sends it the client's own cookies
 or credentials. `title` is 1–256 characters naming the page for the reader. `display` is a display
 preference exactly as for artifacts (see "Display" under "Artifacts"), or `null` for the client's
-choice. An agent presents a page with `show_page`, which takes `{ "url", "title", "display"? }`
-and only records the presentation: the daemon never fetches the page. In Auto, every `show_page`
-call is reviewed, and the reviewer is shown its URL and title. A page shown inline reaches
+choice. Older daemons' `show_page` takes `{ "url", "title", "display"? }` and only records the
+presentation: the daemon never fetches the page. In Auto, every `show_page` call is reviewed,
+and the reviewer is shown its URL and title. A page shown inline reaches
 the network like any other page the client shows. That is a potential vulnerability, so a client
 gives it the same sandbox it gives every web page.
 
@@ -9262,9 +9270,10 @@ Response — `200`: `{ "task": { ... }, "membership": { ... } }` with `archivedA
 ## Artifacts
 
 An artifact is finished work published for people to see: a Markdown document or an HTML page with
-the pictures and other files it uses, an image, an ordered series of images, a video, or a document
-such as a PDF. Artifacts are global. One catalog holds every artifact on the installation, and in
-team mode every member sees all of it, wherever each artifact was made. Each artifact remembers
+the pictures and other files it uses, a live web page reached by URL, an image, an ordered series
+of images, a video, or a document such as a PDF. Artifacts are global. One catalog holds every
+artifact on the installation, and in team mode every member sees all of it, wherever each artifact
+was made. Each artifact remembers
 where it was created — its `source` — and who created it and who last changed it.
 
 Almost any agent publishes artifacts through its artifact tools: `create_artifact`,
@@ -9280,13 +9289,13 @@ machine to keep in step, so the tools are the same for every agent, whichever mo
 whoever executes its other tools. They take the artifact's `artifactId` and a `path` inside it,
 under the file object's path rules below, and otherwise follow the file tools agents already know:
 
-| Tool                  | Arguments                                                                  | Does                                                                                   |
-| --------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `create_artifact`     | `type`, `title`, `display`, `background`, `files`                          | Issues the artifact's ID and makes version 1.0                                         |
-| `write_artifact_file` | `artifactId`, `path`, `content`                                            | Writes one whole text file, adding it or replacing the one there                       |
-| `edit_artifact_file`  | `artifactId`, `path`, `old_string`, `new_string`, `replace_all`            | Replaces exact text in one text file of the latest version                             |
-| `read_artifact_file`  | `artifactId`, `path`, `version`, `offset`, `limit`                         | Reads a text file as numbered lines, or shows an image                                 |
-| `update_artifact`     | `artifactId`, `title`, `display`, `background`, `files`, `remove`, `major` | Changes what files cannot say, copies files in, removes files, bumps the major version |
+| Tool                  | Arguments                                                                         | Does                                                                                    |
+| --------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `create_artifact`     | `type`, `title`, `display`, `background`, `files`, `url`                          | Issues the artifact's ID and makes version 1.0                                          |
+| `write_artifact_file` | `artifactId`, `path`, `content`                                                   | Writes one whole text file, adding it or replacing the one there                        |
+| `edit_artifact_file`  | `artifactId`, `path`, `old_string`, `new_string`, `replace_all`                   | Replaces exact text in one text file of the latest version                              |
+| `read_artifact_file`  | `artifactId`, `path`, `version`, `offset`, `limit`                                | Reads a text file as numbered lines, or shows an image                                  |
+| `update_artifact`     | `artifactId`, `title`, `display`, `background`, `files`, `remove`, `major`, `url` | Changes metadata or a live URL, copies files in, removes files, bumps the major version |
 
 The daemon issues every artifact's ID in `create_artifact`; the model never chooses one. A Markdown
 or HTML artifact starts from a short entry holding its title, and an image, image series, video, or
@@ -9306,7 +9315,7 @@ by default, and it reads the latest version unless `version` names another.
 Each tool call that writes an artifact makes exactly one new version of it, recorded as made by the
 calling agent where it works: a minor version, unless `update_artifact` names `major`. The new
 version must satisfy its type's rules and limits below; otherwise the call fails and makes nothing.
-A write that leaves every file as it was makes no version. A version is keyed by its tool call, so
+A write that leaves both content and metadata unchanged makes no version. A version is keyed by its tool call, so
 a call repeated after the daemon restarts makes nothing a second time, and an edit applied to text
 someone else changed while the call ran fails instead of undoing that change. One agent makes at
 most 100 versions of one artifact in any hour through its tools; a write beyond that fails and asks
@@ -9320,6 +9329,11 @@ as a new version of that artifact visible to everyone using the installation, an
 access. An artifact write never needs or grants Full access to the agent's machine; only reading a
 `files` copy from outside the agent's workspace does.
 
+Creating or updating a live-URL artifact is always reviewed in Auto, even when the acting agent
+created it. The review discloses the effective URL, title, and recorded network, and that the
+client will load the page and run its scripts through that network. This review does not itself
+grant Full access. Other permission-mode and ownership rules above still apply.
+
 An agent mentions an artifact in its replies with the reference tag
 `<happy-artifact id="…"/>`, which clients show as a link labeled with the artifact's live title;
 see "Reference tags". The writing and reading tools give the agent the exact tag.
@@ -9329,12 +9343,64 @@ Published artifact content lives on the daemon's machine, in its private data di
 several versions or artifacts share is kept once. An artifact made by an agent on a runner or in a
 container is served by the daemon like any other.
 
-**Bundles.** Every version is a small tree of files, each named by its `path` inside the artifact,
-such as `index.md`, `images/chart.png`, or `assets/css/site.css`. One file is the version's
+**Bundles.** A file-content version is a small tree of files, each named by its `path` inside the
+artifact, such as `index.md`, `images/chart.png`, or `assets/css/site.css`. One file is the version's
 `entry`, the file a client opens to show the artifact; the others are what the entry refers to.
 Relative references inside a Markdown or HTML entry resolve against the entry's own URL, exactly as
 a browser resolves them, so `![](images/chart.png)` in `index.md` and `<img src="img/hero.jpg">` in
 `index.html` reach their files without any rewriting through the file route below.
+
+**Live URLs.** `create_artifact` with `type: "html"` and `url` creates a live-URL artifact. The URL
+is its content, not a request to download or snapshot a page. `files` cannot accompany `url`, and
+other artifact types cannot take it. The daemon parses and normalizes the URL; only absolute
+`http` and `https` URLs without a user name or password are accepted, at most 4,096 characters
+after normalization. Invalid input fails without creating an artifact or version. The daemon
+never fetches the URL body.
+
+Each version records `live: { "url": "http://localhost:5173/", "networkId": "..." }`. `networkId`
+is the creating agent's network, resolved as for
+`GET /v0/workspaces/:workspaceId/agents/:agentId/proxy` and captured at creation. It is opaque and
+never changes for that artifact, even if another agent updates it or the creator later changes
+machines. A URL update keeps that network. `localhost` therefore means the original agent's
+network, not the viewer's machine. Failure to resolve the network fails creation without a
+partial artifact. A client opens the URL through `CONNECT /v0/networks/:networkId/proxy` on the
+artifact's daemon or connection. If that network is unavailable, it shows an unavailable page;
+it must not fall back to the viewer's network or the creator's current network. It may resolve
+the creator's network again to restore the recorded route after a daemon restart, but may use
+the result only if its ID still equals the recorded `networkId`.
+
+The desktop renders a live-URL artifact in a browser profile scoped to that artifact's ID on
+its daemon or connection. Cookies and storage belong only to that artifact, shared by its
+versions and views on that client, never with the workspace browser, another artifact, or another
+daemon. This profile is not the network-scoped profile used for ordinary workspace browsing,
+even when both use the same `networkId`. The page runs in the client's web-page sandbox. The
+client never forwards daemon authorization, artifact-data API credentials, or workspace browser
+credentials to the page. It does not expose the artifact data bridge or rewrite the page's
+`/api/*` requests to the daemon; those requests belong to the live site's own origin. Network
+access and the page's scripts remain a potential vulnerability, as with any live web page.
+
+New clients prefer `live` to the file entry. For compatibility, every live version also holds
+one daemon-generated inert `index.html`, containing the escaped title and a notice to open the
+artifact in a newer Happy client. It contains no redirect, iframe, script, or active link to the
+live URL. `entry`, `files`, `fileCount`, and `size` describe this real fallback file under their
+existing rules. The fallback is not the live page's contents, and a pinned version fixes the
+URL and metadata, not what the external server returns over time.
+
+`update_artifact` with `url` makes a new minor version under the ordinary version rules, or a
+major version when `major` asks for one. Omitting `url` preserves it. A live artifact cannot be
+converted to file content, nor can an existing file artifact be converted to live content;
+create another artifact instead. Live artifacts reject `files` and `remove` in update tools,
+and `write_artifact_file` and `edit_artifact_file` fail with an explanation that the content is a
+live URL. Reading their fallback files remains available. Metadata-only REST updates preserve
+`live`; REST updates containing `files`, `remove`, or `replaceAll` on a live artifact fail with
+`400 invalid_request`. REST creation and update request shapes are unchanged and do not accept
+live URL content. Only the agent tools create or change it.
+
+`show_page` remains registered for this release but is deprecated: use `create_artifact` with
+`type: "html"` and `url`. It accepts the existing `{ "url", "title", "display"? }` arguments and
+creates the same live-URL artifact, with its ID, version, recorded network, reference tag, and
+`artifact` presentation. Omitted `display` stays `null`. Its Auto review happens on every call,
+as for `create_artifact` with a URL. Existing `page` presentations remain readable as history.
 
 **Types.** The type decides the entry and which files a version may hold:
 
@@ -9394,9 +9460,9 @@ also discriminated by `kind`:
 Authors are extensible in the same way; a client shows an unrecognized `kind` as "someone else".
 
 **Versions.** Versions are numbered from 1 and never change once made. Each records its title, its
-files, its author, its source, and when it was made. The integer `number` identifies a version
-everywhere, in routes and reference tags, and every version takes the next one, whatever it
-changed.
+files or live URL and network, its author, its source, and when it was made. The integer `number`
+identifies a version everywhere, in routes and reference tags, and every version takes the next
+one, whatever it changed.
 
 Each version also carries a `major.minor` label. The first version is 1.0. Every change makes a
 minor version, the next minor of the same major, unless it asks for a major version: an update
@@ -9406,13 +9472,13 @@ version always follows at least one change since the previous major; anything el
 `400 invalid_request` and makes nothing. A major version holds whatever else the same update
 changes, or the latest files unchanged.
 
-A new version starts from the files of the latest one and adds, replaces, or removes individual
+A new file-content version starts from the files of the latest one and adds, replaces, or removes individual
 files, so files that did not change carry over without being sent again; it may also replace every
 file at once. An update that changes only the title or the background makes a new version holding
 the same files. The artifact object mirrors its latest version in `latestVersion`, `latestMajor`,
-`latestMinor`, `title`, `entry`, `fileCount`, `size`, and `background`, records its creation in
-`source`, `createdBy`, and `createdAt`, and its latest change in `updatedBy`, `updatedSource`, and
-`updatedAt`.
+`latestMinor`, `title`, `entry`, `fileCount`, `size`, `background`, `display`, and `live`, records
+its creation in `source`, `createdBy`, and `createdAt`, and its latest change in `updatedBy`,
+`updatedSource`, and `updatedAt`.
 
 **Backgrounds.** A client shows an artifact on a transparent slot, so the surface around it — a
 desktop pane, a chat card — shows through, in light and dark. A version may instead name a
@@ -9481,6 +9547,7 @@ updating or deleting an artifact requires `If-Match` with it.
     "size": 412870,
     "background": null,
     "display": "inline_expanded",
+    "live": null,
     "source": {
         "kind": "workspace",
         "workspaceId": "w5v4u3t2s1r0q9p8o7n6m5l4",
@@ -9514,6 +9581,8 @@ Fields:
   files themselves are listed by the version.
 - `background` — the latest version's background, or `null` for a transparent slot.
 - `display` — the latest version's display preference, or `null` to leave it to the client.
+- `live` — the latest version's `{ "url", "networkId" }`, or `null` for file content. Absent on
+  older daemons. When present and non-null, it takes precedence over `entry`; see "Live URLs".
 - `source` — where the artifact was created, or `null`.
 - `createdBy`, `createdAt` — who created the artifact, and when.
 - `updatedBy`, `updatedSource`, `updatedAt` — who made the latest change, where, and when. After
@@ -9540,6 +9609,7 @@ Fields:
     ],
     "background": null,
     "display": "inline_expanded",
+    "live": null,
     "createdBy": { "kind": "user", "userId": "u1x2y3z4a5b6c7d8e9f0g1h2" },
     "source": null,
     "createdAt": 1755400000000
@@ -9552,6 +9622,8 @@ Fields:
   manifest, ordered by `path` in Unicode code point order; `entry` is one of them.
 - `background` — the colour behind this version's content, or `null` for a transparent slot.
 - `display` — how this version's author wants it shown, or `null` to leave it to the client.
+- `live` — this version's `{ "url", "networkId" }`, or `null` for file content. Absent on older
+  daemons. The URL may change between versions; the artifact's network never does.
 - `createdBy`, `source`, `createdAt` — who made this version, where, and when.
 
 ### The file object
@@ -9835,6 +9907,10 @@ change is being made; it becomes the new version's `source` and the artifact's `
 `major` makes the new version that major version, as "Versions" describes; without it the new
 version is the next minor one.
 
+For live-URL artifacts, metadata-only changes preserve `live` and regenerate the inert entry
+when the title changes. `files`, `remove`, and `replaceAll` are refused even when empty or false;
+the live URL can only be changed through the agent tools.
+
 Response — `200`: `{ "artifact": { ... } }` with the new `latestVersion`, and an `artifact.updated`
 event after commit, echoing `mutationId`. File errors are `400` and upload errors `404`, as in
 creation. `404` when no such artifact exists; `409 conflict` with `currentVersion` and `artifact`
@@ -9853,11 +9929,13 @@ an older version of an active artifact.
 
 ### Artifact data
 
-Every artifact has one small key-value store that its HTML pages read and write, so an `html`
-artifact can be a realtime, multi-user app: a shared to-do list, a poll, a game board. A store
+Every artifact has one small key-value store that its file-backed HTML pages read and write, so
+an `html` artifact can be a realtime, multi-user app: a shared to-do list, a poll, a game board. A store
 belongs to the artifact ID. Every version of the artifact uses the same store, and so does everyone
 using the daemon: each device, each client, and in team mode each member. The daemon keeps each
 store in its own file outside the main database, at `.happy/agent/artifacts/_data_/<artifactId>/`.
+Live-URL pages do not receive this bridge or its credentials; their `/api/*` paths belong to the
+external site, not this store.
 
 The data API is served under `/v0/artifacts/:artifactId/api/*` and takes the bearer token like
 every route. A page reaches it at `/api/*` of its own origin. The client showing the page forwards
@@ -10877,9 +10955,11 @@ agent's change carries none.
 - `artifact.updated` — a new version was made.
     - `artifactId` (ID string), `previousVersion`, `version`, `changes`.
     - `changes` always holds `latestVersion`, `latestMajor`, `latestMinor`, `title`, `entry`,
-      `fileCount`, `size`, `background`, `display`, `updatedBy`, `updatedSource`, and `updatedAt`;
+      `fileCount`, `size`, `background`, `display`, `live`, `updatedBy`, `updatedSource`, and `updatedAt`;
       older daemons leave out `latestMajor` and `latestMinor`. Read the new version's files through the
       version routes.
+      Daemons predating live-URL artifacts omit `live`; current daemons include the new version's
+      `{ "url", "networkId" }`, or `null` for file content.
 - `artifact.deleted` — the artifact was deleted and is now a tombstone.
     - `artifactId` (ID string), `previousVersion`, `version`, `changes`.
     - `changes` holds `status`, `deletedBy`, `deletedSource`, `deletedAt`, `updatedBy`,

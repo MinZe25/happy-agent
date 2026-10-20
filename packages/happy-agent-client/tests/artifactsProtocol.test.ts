@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { HappyAgentClient } from "../sources/HappyAgentClient.js";
 import {
     artifactListResponseSchema,
+    artifactLiveSchema,
     artifactPathSchema,
     artifactResponseSchema,
     artifactSchema,
@@ -20,6 +21,7 @@ import {
     artifactCreatedPayloadSchema,
     artifactDeletedPayloadSchema,
     artifactUpdatedPayloadSchema,
+    artifactUpdatedChangesSchema,
     type HappyAgentEvent,
 } from "../sources/protocol/events.js";
 
@@ -79,6 +81,147 @@ const firstVersion: ArtifactVersion = {
 };
 
 describe("artifacts protocol", () => {
+    it("carries live URL content through artifacts, versions, and events without changing file fields", () => {
+        const live = { url: "http://localhost:5173/preview", networkId: "c-agent1-original" };
+        const fallback = { ...entry, mimeType: "text/html", path: "index.html" };
+        const liveArtifact: Artifact = {
+            ...artifact,
+            type: "html",
+            entry: fallback,
+            fileCount: 1,
+            size: fallback.size,
+            live,
+        };
+        const liveVersion: ArtifactVersion = {
+            ...firstVersion,
+            entry: fallback,
+            files: [fallback],
+            live,
+        };
+        const changes = {
+            entry: fallback,
+            fileCount: 1,
+            latestVersion: 2,
+            size: fallback.size,
+            title: artifact.title,
+            updatedAt: createdAt + 1,
+            updatedBy: artifact.updatedBy,
+            updatedSource: artifact.updatedSource,
+        };
+
+        expect(Value.Check(artifactSchema, liveArtifact)).toBe(true);
+        expect(Value.Check(artifactVersionSchema, liveVersion)).toBe(true);
+        expect(Value.Check(artifactCreatedPayloadSchema, { artifact: liveArtifact })).toBe(true);
+        expect(
+            Value.Check(artifactUpdatedPayloadSchema, {
+                artifactId: artifact.id,
+                changes: { ...changes, live },
+                previousVersion: version,
+                version: nextVersion,
+            }),
+        ).toBe(true);
+
+        // New file artifacts explicitly carry null; old responses can still omit the field.
+        for (const liveContent of [null, undefined]) {
+            expect(Value.Check(artifactSchema, { ...artifact, live: liveContent })).toBe(true);
+            expect(Value.Check(artifactVersionSchema, { ...firstVersion, live: liveContent })).toBe(
+                true,
+            );
+            expect(
+                Value.Check(artifactUpdatedChangesSchema, { ...changes, live: liveContent }),
+            ).toBe(true);
+        }
+        for (const invalidLive of [
+            {},
+            { url: live.url },
+            { networkId: live.networkId },
+            { ...live, networkId: "other/network" },
+            { ...live, url: "file:///etc/passwd" },
+        ]) {
+            expect(Value.Check(artifactSchema, { ...liveArtifact, live: invalidLive })).toBe(false);
+            expect(Value.Check(artifactVersionSchema, { ...liveVersion, live: invalidLive })).toBe(
+                false,
+            );
+            expect(
+                Value.Check(artifactUpdatedChangesSchema, { ...changes, live: invalidLive }),
+            ).toBe(false);
+        }
+        // Live metadata is additive, not permission to omit the old clients' fallback entry.
+        expect(Value.Check(artifactSchema, { ...liveArtifact, entry: null })).toBe(false);
+        expect(Value.Check(artifactVersionSchema, { ...liveVersion, entry: null })).toBe(false);
+        expect(Value.Check(artifactSchema, { ...liveArtifact, fileCount: 0 })).toBe(false);
+    });
+
+    it("bounds live URLs to HTTP(S) and uses the existing opaque network ID contract", () => {
+        for (const url of [
+            "http://localhost:5173/",
+            "https://example.com/page?q=1#section",
+            "http://[::1]:8080/",
+            "https://example.com/path@segment",
+            `https://example.com/${"a".repeat(4076)}`,
+        ]) {
+            expect(Value.Check(artifactLiveSchema, { url, networkId: "r-build_box" })).toBe(true);
+        }
+        for (const url of [
+            "",
+            "https://",
+            "/relative",
+            "//example.com/",
+            "javascript:alert(1)",
+            "data:text/html,hello",
+            "file:///tmp/index.html",
+            "ftp://example.com/file",
+            "https://user:password@example.com/",
+            "https://example.com/white space",
+            "https://example.com\\path",
+            `https://example.com/${"a".repeat(4077)}`,
+        ]) {
+            expect(Value.Check(artifactLiveSchema, { url, networkId: "host" }), url).toBe(false);
+        }
+        for (const networkId of ["", "-host", "Host", "../host", "a".repeat(129)]) {
+            expect(Value.Check(artifactLiveSchema, { url: "http://localhost/", networkId })).toBe(
+                false,
+            );
+        }
+    });
+
+    it("preserves live content when reading through the client and keeps REST creation file-based", async () => {
+        const live = { url: "https://example.com/preview", networkId: "r-build-box" };
+        const fallback = { ...entry, mimeType: "text/html", path: "index.html" };
+        const liveArtifact: Artifact = { ...artifact, type: "html", entry: fallback, live };
+        const liveVersion: ArtifactVersion = {
+            ...firstVersion,
+            entry: fallback,
+            files: [fallback],
+            live,
+        };
+        const client = new HappyAgentClient({
+            endpoint: "http://daemon/",
+            token: "daemon-credential",
+            fetch: async (input) =>
+                Response.json(
+                    input.toString().includes("/versions/")
+                        ? { version: liveVersion }
+                        : { artifact: liveArtifact },
+                ),
+        });
+
+        await expect(client.getArtifact(artifact.id)).resolves.toEqual({ artifact: liveArtifact });
+        await expect(client.getArtifactVersion(artifact.id, 1)).resolves.toEqual({
+            version: liveVersion,
+        });
+        expect(client.networkProxyUrl(live.networkId)).toBe(
+            "http://daemon/v0/networks/r-build-box/proxy",
+        );
+        expect(
+            Value.Check(createArtifactRequestSchema, {
+                type: "html",
+                title: "Preview",
+                url: live.url,
+            }),
+        ).toBe(false);
+    });
+
     it("validates artifacts with extensible sources and authors, versions, and uploads", () => {
         expect(Value.Check(artifactSchema, artifact)).toBe(true);
         expect(
