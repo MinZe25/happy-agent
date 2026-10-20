@@ -27,6 +27,17 @@ conversion has the same per-tool failure boundary, matching Codex's behavior of 
 skipping a tool whose spec cannot be built. MCP JSON values permit twelve nested collections;
 deeper values remain excluded so validation work stays finite.
 
+## Bounded JSON schemas serialize compactly
+
+The depth-bounded JSON value schema shares one child between its array and record branches at
+each of its twelve levels. In memory that is small, but JSON serialization expands the sharing:
+one direct tool's result schema was 12 million characters. Claude keyed its live query on
+`JSON.stringify` of the tools, so with about sixty MCP tools every turn spent some 25 seconds of
+main-thread CPU and each live session kept a 700 MB key, freezing the daemon and growing it to
+gigabytes. Each level now serializes as a flat description of its collections, so the
+serialized form no longer grows with depth, while TypeBox validation still walks the real levels
+and enforces the bound.
+
 ## Configuration edits reload through the same bounded path
 
 Model-driven global changes update one named server so unrelated records are preserved, then use
