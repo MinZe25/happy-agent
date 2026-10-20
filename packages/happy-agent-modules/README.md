@@ -161,7 +161,7 @@ its public methods, and its storage and event contracts.
 | [Scheduling](sources/scheduling/README.md)        | Durable waits an agent can take, and messages it asks to be delivered to itself later.                           |
 | [Workflows](sources/workflows/README.md)          | Run a sandboxed Python script that orchestrates agents, and inspect, wait for, resume or cancel it.              |
 | [Usage](sources/usage/README.md)                  | Advisory token and timing accounting for one agent and its tree, which never fails a turn.                       |
-| [Provider usage](sources/providerUsage/README.md) | Memory-only vendor quota readings for every configured provider, refreshed independently every 15 minutes.       |
+| [Provider usage](sources/providerUsage/README.md) | Memory-only vendor quota readings for every configured provider, measured in band, polled hourly, and pushed.    |
 | [Compactions](sources/compactions/README.md)      | Durable manual and automatic context-compaction lifecycle, run association, recovery, and measurements.          |
 
 ### People and other agents

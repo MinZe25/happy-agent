@@ -634,8 +634,13 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
                 this.#agents.get(event.request.askingAgentId)?.client.kick();
             }),
         );
+        const publishedUsage = new Map<string, unknown>();
         this.#unwatchCatalog.push(
             this.#providerUsage.onChanged((entry) => {
+                // Sessions show only the reading itself, so a read merely starting or failing
+                // while the old reading stands changes nothing a phone displays.
+                if (publishedUsage.get(entry.providerId) === entry.usage) return;
+                publishedUsage.set(entry.providerId, entry.usage);
                 // Usage appears only in the state of sessions running on that provider.
                 for (const connected of this.#agents.values()) {
                     if (connected.client.concerns({ providerId: entry.providerId })) {

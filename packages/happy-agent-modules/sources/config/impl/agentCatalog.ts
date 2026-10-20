@@ -676,6 +676,14 @@ async function createProvider(
                               ? ("websocket" as const)
                               : provider.transport,
                   }),
+            // A ChatGPT login is measured by every response it answers, exactly like Claude's
+            // limiter; the provider stays silent for API-key traffic, which has no such account.
+            ...(onAccountUsage === undefined
+                ? {}
+                : {
+                      onAccountUsage: (usage: ProviderUsage) =>
+                          onAccountUsage({ ...usage, providerId: id }),
+                  }),
             ...retries,
         });
     }

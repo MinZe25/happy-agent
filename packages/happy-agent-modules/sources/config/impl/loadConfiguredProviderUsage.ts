@@ -1,5 +1,6 @@
 import {
     fetchClaudeProviderUsage,
+    type ClaudeUsageEndpointRefusal,
     fetchCodexProviderUsage,
     fetchGrokProviderUsage,
     type ProviderUsage,
@@ -13,6 +14,35 @@ export interface LoadConfiguredProviderUsageOptions {
     readonly providers: HappyAgentConfigValues["providers"];
     readonly ignoreEnabled?: boolean;
     readonly signal?: AbortSignal;
+    /** How to read an account whose vendor offers more than one way. */
+    readonly method?: ProviderUsageReadMethod;
+}
+
+/**
+ * Choices a caller makes about how one read reaches the vendor. Only Claude has a choice: its
+ * OAuth usage endpoint or the unified headers of a one-token inference response.
+ */
+export interface ProviderUsageReadMethod {
+    /** Skip the OAuth usage endpoint and measure the inference headers directly. */
+    readonly skipUsageEndpoint?: boolean;
+    /** Told when the OAuth usage endpoint refused this account, and until when. */
+    readonly onUsageEndpointRefused?: (refusal: ClaudeUsageEndpointRefusal) => void;
+}
+
+/**
+ * Whether an account can be asked for its usage at all. A smart alias, Bedrock, an API key, and a
+ * disabled account have no account-usage source, so nothing is gained by asking.
+ */
+export function hasConfiguredProviderUsageSource(
+    providers: HappyAgentConfigValues["providers"],
+    providerId: string,
+): boolean {
+    const provider = providers[providerId];
+    if (provider === undefined) return false;
+    if (provider.type !== "codex" && provider.type !== "claude" && provider.type !== "grok") {
+        return false;
+    }
+    return provider.apiKey === undefined;
 }
 
 /** Ask one configured account through the usage API its vendor actually supplies. */
@@ -43,12 +73,19 @@ export function loadConfiguredProviderUsage(
         // Anthropic API keys have no account-usage endpoint. OAuth and setup tokens use the
         // account-facing bearer flow, with rate-limit headers as the scoped-token fallback.
         if (provider.apiKey !== undefined) return Promise.resolve(null);
+        const configuredToken = provider.oauthToken ?? provider.authToken;
+        // A configured token is a `claude setup-token` or a gateway token: inference only, so the
+        // OAuth usage endpoint would only refuse it. A stored login decides from its own scopes.
+        const skipUsageEndpoint =
+            options.method?.skipUsageEndpoint === true || configuredToken !== undefined;
         return fetchClaudeProviderUsage({
+            ...(skipUsageEndpoint ? { usageEndpoint: false } : {}),
+            ...(options.method?.onUsageEndpointRefused === undefined
+                ? {}
+                : { onUsageEndpointRefused: options.method.onUsageEndpointRefused }),
             ...(env.ANTHROPIC_BASE_URL === undefined ? {} : { baseUrl: env.ANTHROPIC_BASE_URL }),
             ...(provider.configDir === undefined ? {} : { configDir: provider.configDir }),
-            ...((provider.oauthToken ?? provider.authToken) === undefined
-                ? {}
-                : { oauthToken: provider.oauthToken ?? provider.authToken }),
+            ...(configuredToken === undefined ? {} : { oauthToken: configuredToken }),
             env,
             providerId: options.providerId,
             ...providerFetch,

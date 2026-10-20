@@ -291,7 +291,8 @@ stalled unrelated requests for seconds:
 - Every provider-usage snapshot and every project or workspace catalog event kicked all attached
   sessions. A session now records which project, workspace, and provider its last snapshot
   published, and catalog and usage changes kick only the sessions they concern plus the agents an
-  event itself moved.
+  event itself moved. Provider-usage changes that leave the reading itself unchanged, such as a
+  read starting or failing beside an older reading, kick nothing.
 - Every durable event of a working agent started the next pass the moment the previous one ended.
   A session kicked continuously now starts a full pass at most once a second and batches what
   arrives meanwhile, so a busy agent's messages reach the phone up to a second later. Changes from

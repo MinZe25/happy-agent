@@ -289,7 +289,10 @@ replayed through the real transport to keep the parsers honest.
 `SessionCacheUsage` reports `input` (always uncached), `output`, `cacheRead`,
 `cacheWrite`, and `totalTokens`, normalized so each prompt token is counted once.
 Quota observation is best-effort, bounded, and cached, and surfaces through
-`/usage` and the `get_provider_usage` tool.
+`/usage`, the `get_provider_usage` tool, `GET /v0/usage`, and the pushed
+`provider.usage.updated` event. Claude and Codex measure the account on every
+response; an hourly poll covers cold starts and idle accounts, and a blocked account
+is read again just after its blocking window resets.
 
 Smart providers route across multiple accounts of the same vendor automatically.
 A `type = "smart"` provider with `strategy = "round_robin"` lists concrete

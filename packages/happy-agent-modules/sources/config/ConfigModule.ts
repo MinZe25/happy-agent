@@ -54,7 +54,11 @@ import {
     type AgentModelContext,
     type ConfiguredAgentModel,
 } from "./impl/agentCatalog.js";
-import { loadConfiguredProviderUsage } from "./impl/loadConfiguredProviderUsage.js";
+import {
+    hasConfiguredProviderUsageSource,
+    loadConfiguredProviderUsage,
+    type ProviderUsageReadMethod,
+} from "./impl/loadConfiguredProviderUsage.js";
 import { discoverGithubCliToken, githubTokenSchema } from "./impl/discoverGithubCliToken.js";
 import { ProviderEnablement, providerRegistryUntil } from "./impl/providerRegistryUntil.js";
 import { ProviderServiceTiers } from "./impl/ProviderServiceTiers.js";
@@ -2725,21 +2729,35 @@ export class ConfigModule implements AgentModule {
         );
     }
 
+    /**
+     * Whether an enabled account has any source of account usage to ask. Smart aliases, Bedrock,
+     * API keys, and disabled accounts have none.
+     */
+    hasProviderUsageSource(providerId: string): boolean {
+        return (
+            this.#isAccountEnabled(providerId) &&
+            hasConfiguredProviderUsageSource(this.configuration.values.providers, providerId)
+        );
+    }
+
     /** Ask one configured account for its complete normalized vendor usage reading. */
     async readProviderUsage(
         ctx: Context,
         providerId: string,
+        method?: ProviderUsageReadMethod,
     ): Promise<import("@slopus/happy-providers").ProviderUsage | null> {
         if (!this.#isAccountEnabled(providerId)) return null;
-        return await this.readProviderUsageUnchecked(ctx, providerId);
+        return await this.readProviderUsageUnchecked(ctx, providerId, method);
     }
 
     /** Authenticated usage probe that bypasses enablement for explicit verification. */
     async readProviderUsageUnchecked(
         ctx: Context,
         providerId: string,
+        method?: ProviderUsageReadMethod,
     ): Promise<import("@slopus/happy-providers").ProviderUsage | null> {
         return await loadConfiguredProviderUsage({
+            ...(method === undefined ? {} : { method }),
             environment: { ...process.env, ...this.#environment },
             providerId,
             providers: this.configuration.values.providers,

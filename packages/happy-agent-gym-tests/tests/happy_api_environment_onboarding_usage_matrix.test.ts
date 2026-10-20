@@ -1,6 +1,9 @@
 import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createAgentGym, type AgentGym } from "@slopus/happy-agent-gym";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,12 +13,19 @@ const TEST_TIMEOUT_MS = 30_000;
 describe("Happy Agent onboarding and usage matrix", () => {
     const gyms = new Set<AgentGym>();
     const servers = new Set<Server>();
+    const directories = new Set<string>();
 
     afterEach(async () => {
         await Promise.all([...gyms].map(async (gym) => await gym.dispose()));
         gyms.clear();
         await Promise.all([...servers].map(closeServer));
         servers.clear();
+        await Promise.all(
+            [...directories].map(
+                async (directory) => await rm(directory, { force: true, recursive: true }),
+            ),
+        );
+        directories.clear();
     });
 
     it(
@@ -309,6 +319,12 @@ describe("Happy Agent onboarding and usage matrix", () => {
             server.listen(0, "127.0.0.1");
             await once(server, "listening");
             const address = server.address() as AddressInfo;
+            // Only a full `claude auth login`, whose grant includes `user:profile`, can read the
+            // OAuth usage endpoint; a configured setup token is measured from inference instead.
+            const claudeConfigDir = await claudeLogin(directories, [
+                "user:inference",
+                "user:profile",
+            ]);
             const gym = await createAgentGym({
                 config: [
                     "[providers]",
@@ -320,7 +336,7 @@ describe("Happy Agent onboarding and usage matrix", () => {
                     "",
                     "[providers.claude]",
                     "enabled = true",
-                    'oauth_token = "gym-oauth-token"',
+                    `config_dir = ${JSON.stringify(claudeConfigDir)}`,
                     'include_models = ["anthropic/opus-5"]',
                 ].join("\n"),
                 environment: { ANTHROPIC_BASE_URL: `http://127.0.0.1:${String(address.port)}` },
@@ -412,10 +428,165 @@ describe("Happy Agent onboarding and usage matrix", () => {
                 },
             });
             expect(usage).toMatchObject({ day: {}, hour: {}, month: {}, week: {} });
+            expect(claude).toMatchObject({
+                refreshedAt: expect.any(Number),
+                refreshError: null,
+                retryAt: null,
+                refreshing: false,
+            });
+        },
+        TEST_TIMEOUT_MS,
+    );
+
+    it(
+        "environment-014 measures a setup token from inference headers and pushes every change",
+        async () => {
+            const paths: string[] = [];
+            const server = createServer((request, response) => {
+                paths.push(request.url ?? "");
+                response.setHeader("content-type", "application/json");
+                if (request.url === "/v1/messages") {
+                    response.setHeader("anthropic-ratelimit-unified-status", "allowed");
+                    response.setHeader("anthropic-ratelimit-unified-5h-utilization", "0.12");
+                    response.setHeader("anthropic-ratelimit-unified-5h-reset", "1893474000");
+                    response.setHeader("anthropic-ratelimit-unified-7d-utilization", "0.34");
+                    response.setHeader("anthropic-ratelimit-unified-7d-reset", "1894060800");
+                    response.end(JSON.stringify({ type: "message", content: [] }));
+                    return;
+                }
+                response.statusCode = 404;
+                response.end(JSON.stringify({ error: "not found" }));
+            });
+            servers.add(server);
+            server.listen(0, "127.0.0.1");
+            await once(server, "listening");
+            const address = server.address() as AddressInfo;
+            const gym = await createAgentGym({
+                config: [
+                    "[providers]",
+                    "default_enable = false",
+                    "",
+                    "[providers.gym]",
+                    "enabled = true",
+                    'type = "codex"',
+                    "",
+                    "[providers.claude]",
+                    "enabled = true",
+                    'oauth_token = "gym-setup-token"',
+                    'include_models = ["anthropic/opus-5"]',
+                ].join("\n"),
+                environment: { ANTHROPIC_BASE_URL: `http://127.0.0.1:${String(address.port)}` },
+                timeoutMs: 15_000,
+            });
+            gyms.add(gym);
+            // Pushed account usage is what protocol 29 adds.
+            expect((await gym.client.getHealth()).version.protocol).toBe(29);
+
+            const startupEvents = await gym.waitUntil(async () => {
+                const page = await gym.client.getEvents({ limit: 10_000 });
+                const claude = page.events.filter(
+                    (event) =>
+                        event.type === "provider.usage.updated" &&
+                        event.payload.providerId === "claude",
+                );
+                return claude.some(
+                    (event) =>
+                        event.type === "provider.usage.updated" &&
+                        !event.payload.refreshing &&
+                        event.payload.usage !== null,
+                )
+                    ? claude
+                    : undefined;
+            }, "the startup Claude reading to be published");
+
+            // The read is announced as it starts and again, complete, when it finishes.
+            expect(
+                startupEvents.map(
+                    (event) => event.type === "provider.usage.updated" && event.payload.refreshing,
+                ),
+            ).toEqual([true, false]);
+            expect(startupEvents.at(-1)).toMatchObject({
+                payload: {
+                    providerId: "claude",
+                    error: null,
+                    refreshError: null,
+                    retryAt: null,
+                    refreshedAt: expect.any(Number),
+                    usage: {
+                        windows: {
+                            fiveHour: { usedPercent: 12, capturedAt: expect.any(Number) },
+                            weekly: { usedPercent: 34, capturedAt: expect.any(Number) },
+                        },
+                    },
+                },
+            });
+            // A setup token cannot read the account endpoint, so it is never asked.
+            expect(paths).toEqual(["/v1/messages"]);
+
+            const published = startupEvents.at(-1);
+            if (published?.type !== "provider.usage.updated") throw new Error("Expected a reading");
+            const usage = await gym.client.getUsage();
+            const entry = usage.providers?.find((provider) => provider.providerId === "claude");
+            expect(entry).toMatchObject({
+                refreshedAt: published.payload.refreshedAt,
+                refreshError: null,
+                retryAt: null,
+                refreshing: false,
+            });
+
+            // Fresh readings are left alone; accounts with no usage source are never read.
+            await expect(
+                gym.client.refreshProviderUsage({ providerIds: ["claude"] }),
+            ).resolves.toEqual({ started: [] });
+            await expect(
+                gym.client.refreshProviderUsage({
+                    providerIds: ["claude", "bedrock", "missing"],
+                    olderThanMs: 0,
+                }),
+            ).resolves.toEqual({ started: [] });
+            expect(paths).toEqual(["/v1/messages"]);
+            await expect(
+                gym.client.refreshProviderUsage({ olderThanMs: -1 } as never),
+            ).rejects.toMatchObject({ status: 400 });
+
+            // An account that has never been read successfully is stale, so a refresh starts at
+            // once and its result follows as events.
+            const cursor = (await gym.client.getEvents({ limit: 10_000 })).cursor;
+            await expect(
+                gym.client.refreshProviderUsage({ providerIds: ["gym"] }),
+            ).resolves.toEqual({ started: ["gym"] });
+            const refreshEvents = await gym.waitUntil(async () => {
+                const page = await gym.client.getEvents({ after: cursor, limit: 10_000 });
+                const events = page.events.filter(
+                    (event) =>
+                        event.type === "provider.usage.updated" &&
+                        event.payload.providerId === "gym",
+                );
+                return events.length >= 2 ? events : undefined;
+            }, "the requested gym account read to be published");
+            expect(refreshEvents.map((event) => event.payload)).toMatchObject([
+                { providerId: "gym", refreshing: true },
+                {
+                    providerId: "gym",
+                    refreshing: false,
+                    refreshedAt: null,
+                    refreshError: "The provider did not report account usage.",
+                },
+            ]);
         },
         TEST_TIMEOUT_MS,
     );
 });
+
+async function claudeLogin(directories: Set<string>, scopes: readonly string[]): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), "happy-gym-claude-login-"));
+    directories.add(directory);
+    await writeFile(
+        join(directory, ".credentials.json"),
+        JSON.stringify({ claudeAiOauth: { accessToken: "gym-login-token", scopes } }),
+    );
+    return directory;
+}
 
 async function closeServer(server: Server): Promise<void> {
     if (!server.listening) return;

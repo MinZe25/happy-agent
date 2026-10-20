@@ -71,6 +71,7 @@ import {
     voiceConfigPatchSchema,
     updateArtifactRequestSchema,
     providerVerificationRequestSchema,
+    providerUsageRefreshRequestSchema,
     userIdsSchema,
     networkIdSchema,
     skillPageQuerySchema,
@@ -340,7 +341,7 @@ import {
 } from "./projectCredentialDiagnostics.js";
 import { SubtaskInputError, SubtasksModule } from "../subtasks/index.js";
 
-const API_PROTOCOL_VERSION = 28;
+const API_PROTOCOL_VERSION = 29;
 
 /**
  * How many archived agents the desktop bootstrap carries. Recent history is what the desktop
@@ -1695,6 +1696,23 @@ export class ApiModule implements AgentModule {
                 sendJson(response, 200, await this.#daemonUsage(ctx));
                 return;
             }
+            if (request.method === "POST" && url.pathname === "/v0/usage/refresh") {
+                const body = await readJson(request, MAX_JSON_BODY_BYTES, true);
+                if (!Value.Check(providerUsageRefreshRequestSchema, body)) {
+                    throw invalidRequest("The usage refresh request is invalid.");
+                }
+                sendJson(response, 202, {
+                    started: this.#providerUsage.requestRefresh(ctx, {
+                        ...(body.providerIds === undefined
+                            ? {}
+                            : { providerIds: body.providerIds }),
+                        ...(body.olderThanMs === undefined
+                            ? {}
+                            : { olderThanMs: body.olderThanMs }),
+                    }),
+                });
+                return;
+            }
             if (request.method === "GET" && url.pathname === "/v0/bootstrap/desktop") {
                 sendJson(response, 200, await this.#desktopBootstrap(ctx));
                 return;
@@ -2478,6 +2496,20 @@ export class ApiModule implements AgentModule {
                           this.#journal.appendOutsideMutation("runners.updated", snapshot);
                       }),
                   ]),
+            // Account readings change outside any mutation: a poll, a vendor reporting in band, or a
+            // refresh some other client asked for. Each change is the complete entry state.
+            this.#providerUsage.onChanged((entry) => {
+                this.#journal.appendOutsideMutation("provider.usage.updated", {
+                    providerId: entry.providerId,
+                    usage: entry.usage,
+                    checkedAt: entry.checkedAt,
+                    error: entry.error,
+                    refreshedAt: entry.refreshedAt,
+                    refreshError: entry.refreshError,
+                    retryAt: entry.retryAt,
+                    refreshing: entry.refreshing,
+                });
+            }),
             this.#connections.onUpdated((_eventCtx, snapshot, mutationId) => {
                 this.#journal.appendOutsideMutation(
                     "connections.updated",
@@ -8237,6 +8269,10 @@ export class ApiModule implements AgentModule {
                     usage: account?.usage ?? null,
                     checkedAt: account?.checkedAt ?? null,
                     error: account?.error ?? null,
+                    refreshedAt: account?.refreshedAt ?? null,
+                    refreshError: account?.refreshError ?? null,
+                    retryAt: account?.retryAt ?? null,
+                    refreshing: account?.refreshing ?? false,
                 };
             },
         );

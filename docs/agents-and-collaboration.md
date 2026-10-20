@@ -319,10 +319,12 @@ or ad-hoc promise chains:
   shutdown can be attributed to a name.
 
 Provider usage polling is the model case: one named `forever` per provider, every
-fifteen minutes, providers polled in parallel, answers kept in memory with their
-capture time and handed out by an endpoint that clients poll. Nothing there is
-durable or pushed. `get_provider_usage` reads these values, so they may be up to
-fifteen minutes old.
+hour, providers polled in parallel, answers kept in memory with their capture time.
+Vendors that measure the account on every response keep an account in use current
+between polls, a blocked account is read again just after its blocking window
+resets, and every change is pushed to clients as `provider.usage.updated`. Nothing
+there is durable. `get_provider_usage` reads these values; each window says when it
+was measured.
 
 ### What actually runs in parallel
 

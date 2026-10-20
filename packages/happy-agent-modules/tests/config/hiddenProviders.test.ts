@@ -47,7 +47,7 @@ describe("hidden providers", () => {
         const read = vi.spyOn(config, "readProviderUsageUnchecked").mockResolvedValue(null);
         const ctx = createRootContext();
         await config.readProviderUsage(ctx, "codex");
-        expect(read).toHaveBeenCalledWith(ctx, "codex");
+        expect(read).toHaveBeenCalledWith(ctx, "codex", undefined);
         config.setProviderEnabled("codex", false);
         expect(config.models.some((model) => model.providerId === "router")).toBe(false);
     });

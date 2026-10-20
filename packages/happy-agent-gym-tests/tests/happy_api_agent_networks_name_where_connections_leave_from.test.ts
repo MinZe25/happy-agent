@@ -24,7 +24,7 @@ describe("agent networks", () => {
     it("names this computer's network once for every agent here and keeps it past an archive", async () => {
         const gym = await started();
         expect((await gym.client.getHealth()).version.protocol).toBe(HAPPY_AGENT_PROTOCOL_VERSION);
-        expect(HAPPY_AGENT_PROTOCOL_VERSION).toBe(28);
+        expect(HAPPY_AGENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(28);
         const agentId = gym.defaultSessionId;
         const { workspaceId } = (await gym.client.getAgent(agentId)).agent;
         const other = (await gym.client.createAgent({ workspaceId, title: "Second" })).agent.id;
