@@ -303,6 +303,7 @@ async function fixture() {
                     providerId: "claude",
                 },
             ],
+            providerName: () => "Current CLI",
             providerType: (providerId: string) => (providerId === "codex" ? "codex" : "claude"),
         } as never,
         {
@@ -1336,6 +1337,7 @@ describe("archiving a Happy session", () => {
                         serviceTiers: [],
                     },
                 ],
+                providerName: () => "Current CLI",
                 providerType: () => "codex",
                 visibleModels: [
                     {
@@ -1563,6 +1565,7 @@ describe("archiving a Happy session", () => {
                         serviceTiers: [],
                     },
                 ],
+                providerName: () => "Current CLI",
                 providerType: () => "codex",
                 visibleModels: [
                     {
