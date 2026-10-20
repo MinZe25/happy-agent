@@ -50,6 +50,12 @@ const PREVIOUS_PROMPT_GRACE_MS = 10_000;
 const CANCEL_GRACE_MS = 2_000;
 /** The longest a new session waits for the one before it to bind its native conversation. */
 const NEW_SESSION_GATE_MS = 60_000;
+/**
+ * Waits before sending a prompt the agent's service refused as too many requests again. Agents
+ * retry only briefly themselves, and a burst — a restarted agent's first request, or several
+ * sessions on one account at once — clears within seconds.
+ */
+const RATE_LIMIT_RETRY_MS = [3_000, 10_000, 30_000];
 const ABORTED = Symbol("acp_aborted");
 const STEERED = Symbol("acp_steered");
 
@@ -92,6 +98,8 @@ interface LiveTurn {
      * takes it over, so the item it receives is not lost.
      */
     reading: Promise<TurnItem> | undefined;
+    /** The prompt last sent, so one the service refused can be sent again. */
+    sent: acp.ContentBlock[] | undefined;
 }
 
 /**
@@ -226,6 +234,7 @@ export class AcpSession extends BaseSession {
         // Steering ends this response so Agent Base can deliver the new input on the next run.
         const steered = abortPromise(request.steered).then((): typeof STEERED => STEERED);
         let finished = false;
+        let retries = 0;
         try {
             for (;;) {
                 turn.reading ??= turn.items.next();
@@ -280,6 +289,33 @@ export class AcpSession extends BaseSession {
                 yield* events.close();
                 yield* events.settleAll();
                 if (item.kind === "prompt_error") {
+                    const wait = RATE_LIMIT_RETRY_MS[retries];
+                    if (
+                        wait !== undefined &&
+                        turn.sent !== undefined &&
+                        isRateLimited(item.error) &&
+                        events.outputCharacters === 0 &&
+                        turn.awaiting.size === 0 &&
+                        this.#connection === connection &&
+                        this.#turn === turn
+                    ) {
+                        // Refused before saying anything: the same prompt, a little later.
+                        retries++;
+                        yield { type: "retrying", attempt: retries, reason: errorText(item.error) };
+                        const waited = await Promise.race([
+                            new Promise<void>((resolve) => setTimeout(resolve, wait)),
+                            aborted,
+                        ]);
+                        if (waited !== ABORTED) {
+                            this.#sendPrompt(connection, turn, turn.sent);
+                            continue;
+                        }
+                        this.#turn = undefined;
+                        finished = true;
+                        yield { type: "block_stop" };
+                        yield { type: "done", state: "cancelled" };
+                        return;
+                    }
                     this.#turn = undefined;
                     finished = true;
                     yield { type: "block_stop" };
@@ -608,6 +644,7 @@ export class AcpSession extends BaseSession {
             deferred: [],
             steering: false,
             reading: undefined,
+            sent: undefined,
         };
         this.#turn = turn;
         this.#sendPrompt(connection, turn, prompt);
@@ -617,6 +654,7 @@ export class AcpSession extends BaseSession {
     #sendPrompt(connection: AcpConnection, turn: LiveTurn, prompt: acp.ContentBlock[]): void {
         const sessionId = this.#acpSessionId!;
         const profile = this.#options.profile;
+        turn.sent = prompt;
         let send = (): Promise<acp.PromptResponse> => connection.conn.prompt({ sessionId, prompt });
         if (this.#unprompted && profile?.serializeNewSessions === true) {
             // The agent has bound its native conversation once it reports anything, so the next
@@ -763,11 +801,21 @@ function images(connection: AcpConnection): boolean {
     return connection.init.agentCapabilities?.promptCapabilities?.image === true;
 }
 
+function errorText(error: unknown): string {
+    if (typeof error !== "object" || error === null || !("message" in error)) return String(error);
+    const message = String((error as { message: unknown }).message);
+    // An ACP agent's own failure arrives as a JSON-RPC internal error carrying its text.
+    const details = (error as { data?: { details?: unknown } }).data?.details;
+    return typeof details === "string" && details.length > 0 ? `${message}: ${details}` : message;
+}
+
+/** The agent's service refused the request as too many, which passes in seconds. */
+function isRateLimited(error: unknown): boolean {
+    return /\b429\b|too many requests|rate[ _-]?limit(?:ed)?\b/iu.test(errorText(error));
+}
+
 function errorDone(error: unknown, stderr: string): SessionEvent {
-    const message =
-        typeof error === "object" && error !== null && "message" in error
-            ? String((error as { message: unknown }).message)
-            : String(error);
+    const message = errorText(error);
     const tail = stderr.trim().split("\n").slice(-5).join("\n");
     return {
         type: "done",

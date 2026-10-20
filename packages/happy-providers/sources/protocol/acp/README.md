@@ -61,6 +61,11 @@ briefly for the prompt to end, then ends every process group in the agent's tree
 cancelled command running, and some run each command in a group of its own. The next run starts
 a new agent process and restores the same foreign session, sending only what is new.
 
+A prompt the agent's service refuses as too many requests before the agent says anything is sent
+again after 3, 10 and 30 seconds, with a `retrying` event each time. Agents retry only for a
+moment themselves, and bursts — several sessions on one account, or a restarted agent's first
+request — clear within seconds. A usage limit that resets in hours is not retried.
+
 Agents whose adapter binds a new session to whichever native conversation appears next in a
 shared store set `serializeNewSessions`: a new session's first prompt waits until the previous new
 session has reported turn content, so a chat and its title request cannot swap conversations. A

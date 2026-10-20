@@ -222,6 +222,19 @@ describe("AcpSession", () => {
         expect(h.log().filter((entry) => entry.method === "newSession")).toHaveLength(2);
     }, 30_000);
 
+    it("sends a prompt the agent's service refused as too many requests again, a little later", async () => {
+        const h = harness();
+        const session = await h.session();
+        h.user("throttled hello");
+        const events = await h.run(session);
+        expect(events.find((event) => event.type === "retrying")).toMatchObject({ attempt: 1 });
+        expect(text(events).endsWith("throttled hello")).toBe(true);
+        expect(done(events)).toMatchObject({ state: "normal" });
+        const prompts = h.log().filter((entry) => entry.method === "prompt");
+        expect(prompts).toHaveLength(2);
+        expect(prompts[1]!.text).toBe(prompts[0]!.text);
+    }, 30_000);
+
     it("catches a session up on turns another account or harness answered, keeping the session", async () => {
         const h = harness();
         const session = await h.session();

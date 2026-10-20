@@ -3,7 +3,8 @@
 // JSON-lines file named by SCRIPTED_ACP_LOG so a test can assert what was sent.
 //
 // Prompt directives: "use happy" calls the bridged happy_secret tool and replies with its answer;
-// "wait" holds the prompt open until cancelled or steered; anything else is echoed back.
+// "wait" holds the prompt open until cancelled or steered; "throttled" is refused as too many
+// requests the first time it is sent; anything else is echoed back.
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 
@@ -24,6 +25,7 @@ class ScriptedAgent {
     #conn;
     #servers = new Map();
     #cancelled = new Map();
+    #throttled = false;
 
     constructor(conn) {
         this.#conn = conn;
@@ -96,6 +98,10 @@ class ScriptedAgent {
             .map((block) => (block.type === "text" ? block.text : ""))
             .join("\n");
         log({ method: "prompt", sessionId: params.sessionId, text });
+        if (text.includes("throttled") && !this.#throttled) {
+            this.#throttled = true;
+            throw new Error("exceeded retry limit, last status: 429 Too Many Requests");
+        }
         // "silent" reports nothing at all, as an agent may before it binds its conversation.
         if (!text.includes("silent"))
             await this.#conn.sessionUpdate({
