@@ -130,6 +130,18 @@ while `offeredModels` is the stable complete set the agent systems can accept af
 Happy Agent never asks a vendor which models exist — the list is source, and a configured provider
 entry decides which of them its own key serves.
 
+## Harnesses
+
+`[harnesses]` says who runs the agent loop on those accounts (`impl/harnesses.ts`). `happy` is
+Happy's own loop and lists the curated models. `claude_code` and `codex_cli` run Claude Code or
+Codex itself on the `claude` or `codex` accounts they accept, and add those agents' models to the
+same accounts. Agents with their own login (`antigravity`, `opencode`, `acp`) become provider
+entries under their harness ID while the layers merge, so the registry, enablement, names, and
+catalog treat them as accounts. `impl/createForeignAgentProvider.ts` turns each harness × account
+pair into a route; the registry sends a model with a foreign prefix to that route's agent. Foreign
+agents are the one exception to the curated list: each reports its own models when the daemon
+starts (`impl/foreignAgentModels.ts`), cached per route, with the built-in list until it answers.
+
 After startup, configuration renews enabled Codex and Grok session logins in the background,
 then repeats three hours after each completed pass. Hidden enabled accounts are included;
 disabled accounts, static API keys, smart routing aliases, Bedrock, and Claude are skipped.

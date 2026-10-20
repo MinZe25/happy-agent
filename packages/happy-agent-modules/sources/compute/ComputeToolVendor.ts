@@ -9,6 +9,8 @@ export const computeToolVendorSchema = Type.Union([
     Type.Literal("grok"),
     Type.Literal("kimi"),
     Type.Literal("glm"),
+    /** A foreign agent such as Claude Code, which brings its own filesystem and shell tools. */
+    Type.Literal("foreign"),
 ]);
 
 /** The TypeScript type inferred from {@link computeToolVendorSchema}. */
@@ -63,9 +65,9 @@ export function computeToolVendor(selection: ComputeToolSelection): ComputeToolV
         throw new Error("Compute tool model selection is invalid.");
     }
     const family = selection.model === undefined ? undefined : providerModelFamily(selection.model);
-    // A foreign agent brings its own tools, so its family names no vendor surface to hand it.
-    if (family !== undefined && family !== "foreign") return family;
+    // A foreign agent brings its own tools, whichever account it runs on.
+    if (family !== undefined) return family;
     const kind = selection.providerKind;
-    if (kind === "claude" || kind === "codex" || kind === "grok") return kind;
+    if (kind === "claude" || kind === "codex" || kind === "grok" || kind === "foreign") return kind;
     return DEFAULT_COMPUTE_TOOL_VENDOR;
 }

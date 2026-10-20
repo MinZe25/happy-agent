@@ -48,12 +48,24 @@ import {
     agentModelCatalog,
     agentModelContext,
     agentModels,
+    foreignAgentModelContext,
     agentProviders,
     configuredAnthropicBedrockTransport,
     smartProviderRoute,
     type AgentModelContext,
     type ConfiguredAgentModel,
 } from "./impl/agentCatalog.js";
+import {
+    DEFAULT_HARNESSES,
+    harnessInputSchema,
+    harnessSchema,
+    isOwnLoginHarness,
+    mergeHarnesses,
+    readHarnesses,
+    validateHarnesses,
+} from "./impl/harnesses.js";
+import { foreignAgentRoutes } from "./impl/createForeignAgentProvider.js";
+import { refreshForeignAgentModels } from "./impl/foreignAgentModels.js";
 import {
     hasConfiguredProviderUsageSource,
     loadConfiguredProviderUsage,
@@ -288,6 +300,10 @@ const settingsInputSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+/** Extra environment variables for an agent process. */
+const environmentSchema = Type.Record(configStringSchema, configStringSchema, {
+    maxProperties: MAX_CONFIG_TABLE_ENTRIES,
+});
 const providerCommonInput = {
     name: Type.Optional(Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" })),
     auto_enable: Type.Optional(Type.Boolean()),
@@ -371,6 +387,39 @@ const providerInputSchemas = {
         },
         { additionalProperties: false },
     ),
+    // Agents with their own login. They are configured under [harnesses]; a provider table of
+    // these types only ever holds the daemon's generated enablement for that harness.
+    antigravity: Type.Object(
+        {
+            ...providerCommonInput,
+            api_key: Type.Optional(configStringSchema),
+            args: Type.Optional(boundedStringArraySchema),
+            command: Type.Optional(configStringSchema),
+            type: Type.Literal("antigravity"),
+        },
+        { additionalProperties: false },
+    ),
+    opencode: Type.Object(
+        {
+            ...providerCommonInput,
+            api_key: Type.Optional(configStringSchema),
+            args: Type.Optional(boundedStringArraySchema),
+            command: Type.Optional(configStringSchema),
+            type: Type.Literal("opencode"),
+        },
+        { additionalProperties: false },
+    ),
+    acp: Type.Object(
+        {
+            ...providerCommonInput,
+            args: Type.Optional(boundedStringArraySchema),
+            // Optional in one layer: the generated runtime file records only enablement.
+            command: Type.Optional(configStringSchema),
+            env: Type.Optional(environmentSchema),
+            type: Type.Literal("acp"),
+        },
+        { additionalProperties: false },
+    ),
     smart: Type.Object(
         {
             name: Type.Optional(Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" })),
@@ -400,6 +449,9 @@ const providerInputSchema = Type.Union([
     providerInputSchemas.claude,
     providerInputSchemas.codex,
     providerInputSchemas.grok,
+    providerInputSchemas.antigravity,
+    providerInputSchemas.opencode,
+    providerInputSchemas.acp,
     providerInputSchemas.smart,
 ]);
 const providerMapInputSchema = Type.Record(configStringSchema, providerInputSchema, {
@@ -689,6 +741,11 @@ const partialValuesSchema = Type.Object(
                 { additionalProperties: false },
             ),
         ),
+        harnesses: Type.Optional(
+            Type.Record(configStringSchema, harnessInputSchema, {
+                maxProperties: MAX_CONFIG_TABLE_ENTRIES,
+            }),
+        ),
         provider_default_enable: Type.Optional(Type.Boolean()),
         providers: Type.Optional(providerMapInputSchema),
         settings: Type.Optional(settingsInputSchema),
@@ -806,6 +863,36 @@ const providerSchemas = {
         },
         { additionalProperties: false },
     ),
+    antigravity: Type.Object(
+        {
+            ...providerRecordBase,
+            apiKey: Type.Optional(configStringSchema),
+            args: Type.Optional(boundedStringArraySchema),
+            command: Type.Optional(configStringSchema),
+            type: Type.Literal("antigravity"),
+        },
+        { additionalProperties: false },
+    ),
+    opencode: Type.Object(
+        {
+            ...providerRecordBase,
+            apiKey: Type.Optional(configStringSchema),
+            args: Type.Optional(boundedStringArraySchema),
+            command: Type.Optional(configStringSchema),
+            type: Type.Literal("opencode"),
+        },
+        { additionalProperties: false },
+    ),
+    acp: Type.Object(
+        {
+            ...providerRecordBase,
+            args: Type.Optional(boundedStringArraySchema),
+            command: configStringSchema,
+            env: Type.Optional(environmentSchema),
+            type: Type.Literal("acp"),
+        },
+        { additionalProperties: false },
+    ),
     smart: Type.Object(
         {
             name: Type.Optional(Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" })),
@@ -833,6 +920,9 @@ const providerSchema = Type.Union([
     providerSchemas.claude,
     providerSchemas.codex,
     providerSchemas.grok,
+    providerSchemas.antigravity,
+    providerSchemas.opencode,
+    providerSchemas.acp,
     providerSchemas.smart,
 ]);
 
@@ -1136,6 +1226,9 @@ const resolvedValuesSchema = Type.Object(
             },
             { additionalProperties: false },
         ),
+        harnesses: Type.Record(configStringSchema, harnessSchema, {
+            maxProperties: MAX_CONFIG_TABLE_ENTRIES,
+        }),
         providerDefaultEnable: Type.Boolean(),
         providers: Type.Record(configStringSchema, providerSchema, {
             maxProperties: MAX_PROVIDER_COUNT,
@@ -1357,6 +1450,7 @@ const DEFAULT_VALUES: HappyAgentConfigValues = {
     node: {},
     permissions: { protectedPaths: [] },
     presence: { states: {} },
+    harnesses: DEFAULT_HARNESSES,
     providerDefaultEnable: false,
     providers: {
         bedrock: { enabled: false, type: "bedrock" },
@@ -1834,6 +1928,7 @@ export class ConfigModule implements AgentModule {
         afterStart: async (ctx): Promise<void> => {
             if (this.#credentialRefreshStarted) return;
             this.#credentialRefreshStarted = true;
+            this.#refreshForeignAgentModels(ctx);
             const lifetime =
                 ctx.lifetime === undefined
                     ? this.#providerLifetime.signal
@@ -1952,12 +2047,16 @@ export class ConfigModule implements AgentModule {
         });
     }
 
-    /** Curated context limits for one enabled provider/model route. */
+    /** Context limits for one enabled provider/model route: curated, or a foreign agent's own. */
     modelContext(providerId: string, modelId: string): AgentModelContext | undefined {
         const enabled = this.models.some(
             (model) => model.providerId === providerId && model.id === modelId,
         );
-        return enabled ? agentModelContext(modelId) : undefined;
+        if (!enabled) return undefined;
+        return (
+            foreignAgentModelContext(this.configuration, providerId, modelId) ??
+            agentModelContext(modelId)
+        );
     }
 
     /** The concrete Anthropic Bedrock transport used by every route behind this selection. */
@@ -2441,7 +2540,10 @@ export class ConfigModule implements AgentModule {
     /** A configuration-file setting is explicit and always outranks automatic discovery. */
     configuredProviderOverride(providerId: string): boolean | undefined {
         let explicitDefault: boolean | undefined;
-        let explicitProvider: boolean | undefined;
+        // Writing a harness table for an agent with its own login is an explicit choice.
+        const harness = this.configuration.values.harnesses[providerId];
+        let explicitProvider: boolean | undefined =
+            harness !== undefined && isOwnLoginHarness(harness) ? harness.enabled : undefined;
         const sources = [
             this.configuration.sources.global.values,
             normalizeSourceValues(this.#runtimeValues),
@@ -2854,6 +2956,22 @@ export class ConfigModule implements AgentModule {
             this.configuration,
         );
         return this.#resolvedScripted;
+    }
+
+    /**
+     * Ask each enabled foreign agent which models its account serves, in the background. Until
+     * an agent answers, its catalog is the last answer it gave or its curated list. A daemon with
+     * a test-owned catalog never starts one.
+     */
+    #refreshForeignAgentModels(ctx: Context): void {
+        if (this.#scripted !== undefined) return;
+        for (const route of foreignAgentRoutes(this.configuration)) {
+            if (!this.isProviderEnabled(route.providerId)) continue;
+            const id = route.providerId;
+            void refreshForeignAgentModels(this.configuration, route).catch((error: unknown) => {
+                ctx.log.warn(`Could not read the models of provider "${id}": ${String(error)}`);
+            });
+        }
     }
 
     /** Snapshot a test-owned catalog once while retaining only its provider gates as live state. */
@@ -3478,6 +3596,7 @@ export function parseHappyAgentConfigToml(source: string): {
         "permissions",
         "presence",
         "profile",
+        "harnesses",
         "providers",
         "settings",
         "skills",
@@ -3491,6 +3610,7 @@ export function parseHappyAgentConfigToml(source: string): {
     }
     const defaults = readDefaults(table.defaults, recordUnknown);
     const providers = readProviders(table.providers, recordUnknown);
+    const harnesses = readHarnesses(table.harnesses);
     const settings = readSettings(table.settings, recordUnknown);
     const skills = readSkills(table.skills, recordUnknown);
     const features = readFeatures(table.features, recordUnknown);
@@ -3524,6 +3644,7 @@ export function parseHappyAgentConfigToml(source: string): {
         ...(table.peer_messaging === undefined ? {} : { peer_messaging: table.peer_messaging }),
         ...(runners === undefined ? {} : { runners }),
         ...(execution === undefined ? {} : { execution }),
+        ...(harnesses === undefined ? {} : { harnesses }),
         ...(defaults === undefined ? {} : { defaults }),
         ...(features === undefined ? {} : { features }),
         ...(feature === undefined ? {} : { feature }),
@@ -3724,6 +3845,12 @@ function resolveHappyHome(input: HappyAgentConfigurationInput): string {
     return resolve(input);
 }
 
+/** What the built-in agents with their own login are called when their table names nothing. */
+const BUILT_IN_HARNESS_NAMES: Readonly<Record<string, string>> = {
+    antigravity: "Antigravity",
+    opencode: "OpenCode",
+};
+
 function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigValues {
     const merged = structuredClone(DEFAULT_VALUES) as MutableResolvedValues;
     const explicitProviderEnabled = new Set<string>();
@@ -3822,6 +3949,9 @@ function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigVal
                 if (provider.enabled !== undefined) explicitProviderEnabled.add(id);
             }
         }
+        if (partial.harnesses !== undefined) {
+            merged.harnesses = mergeHarnesses(merged.harnesses, partial.harnesses);
+        }
         if (partial.settings !== undefined) {
             Object.assign(merged.settings, normalizeSettings(partial.settings));
         }
@@ -3835,11 +3965,44 @@ function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigVal
             Object.assign(merged.workspace, normalizeWorkspace(partial.workspace));
         }
     }
+    // An agent with its own login is offered as an account named after its harness. A generated
+    // enablement the daemon stored for that account still decides whether it is on.
+    for (const [id, harness] of Object.entries(merged.harnesses)) {
+        if (!isOwnLoginHarness(harness)) continue;
+        const existing = merged.providers[id];
+        if (existing !== undefined && existing.type !== harness.type) {
+            throw new Error(`Harness "${id}" has the same ID as provider "${id}".`);
+        }
+        const name = harness.name ?? BUILT_IN_HARNESS_NAMES[id];
+        merged.providers[id] = {
+            ...(name === undefined ? {} : { name }),
+            ...(harness.hidden === undefined ? {} : { hidden: harness.hidden }),
+            ...(harness.includeModels === undefined
+                ? {}
+                : { includeModels: harness.includeModels }),
+            ...(harness.excludeModels === undefined
+                ? {}
+                : { excludeModels: harness.excludeModels }),
+            ...(harness.apiKey === undefined || harness.type === "acp"
+                ? {}
+                : { apiKey: harness.apiKey }),
+            ...(harness.args === undefined ? {} : { args: harness.args }),
+            ...(harness.command === undefined ? {} : { command: harness.command }),
+            ...(harness.env === undefined || harness.type !== "acp" ? {} : { env: harness.env }),
+            enabled:
+                explicitProviderEnabled.has(id) && existing !== undefined
+                    ? existing.enabled
+                    : harness.enabled,
+            type: harness.type,
+        } as Static<typeof providerSchema>;
+        explicitProviderEnabled.add(id);
+    }
     for (const [id, provider] of Object.entries(merged.providers)) {
         if (!explicitProviderEnabled.has(id)) {
             provider.enabled = merged.providerDefaultEnable;
         }
     }
+    validateHarnesses(merged.harnesses, merged.providers);
     assertTeamAuthentication(merged.feature.team, teamWorkOSConfigured);
     if (merged.feature.team.enabled && merged.api?.token !== undefined) {
         throw new Error("Team deployments cannot configure a standalone API token.");
@@ -4308,6 +4471,19 @@ function normalizeProvider(id: string, value: Record<string, unknown>): Record<s
                 ...(value["base_url"] === undefined ? {} : { baseUrl: value["base_url"] }),
                 type: inferred,
             };
+        case "antigravity":
+        case "opencode":
+        case "acp":
+            return {
+                ...normalizeProviderCommon(value),
+                ...(value["api_key"] === undefined ? {} : { apiKey: value["api_key"] }),
+                ...(value["args"] === undefined ? {} : { args: value["args"] }),
+                ...(value["command"] === undefined ? {} : { command: value["command"] }),
+                ...(value["config_dir"] === undefined ? {} : { configDir: value["config_dir"] }),
+                ...(value["env"] === undefined ? {} : { env: value["env"] }),
+                ...(value["oauth_token"] === undefined ? {} : { oauthToken: value["oauth_token"] }),
+                type: inferred,
+            };
         case "smart":
             return {
                 ...normalizeProviderCommon(value),
@@ -4341,33 +4517,36 @@ function normalizeProviderCommon(value: Record<string, unknown>): Record<string,
     };
 }
 
-function inferProviderType(
-    id: string,
-    type: unknown,
-): "bedrock" | "claude" | "codex" | "grok" | "smart" {
+/** Every `type` a provider table may set. */
+const CONFIGURED_PROVIDER_TYPES = [
+    "codex",
+    "claude",
+    "grok",
+    "bedrock",
+    "antigravity",
+    "opencode",
+    "acp",
+    "smart",
+] as const;
+type ConfiguredProviderType = (typeof CONFIGURED_PROVIDER_TYPES)[number];
+/** The provider types people write; agents with their own login are harnesses instead. */
+const CONFIGURED_PROVIDER_TYPE_LIST = ["codex", "claude", "grok", "bedrock", "smart"]
+    .map((type) => `"${type}"`)
+    .join(", ");
+
+function inferProviderType(id: string, type: unknown): ConfiguredProviderType {
     const builtIn = ["bedrock", "claude", "codex", "grok"].includes(id)
         ? (id as "bedrock" | "claude" | "codex" | "grok")
         : undefined;
     if (type !== undefined && type !== builtIn && builtIn !== undefined) {
         throw new Error(`Built-in provider "${id}" must use type "${builtIn}".`);
     }
-    if (
-        type !== undefined &&
-        !["bedrock", "claude", "codex", "grok", "smart"].includes(String(type))
-    ) {
+    if (type !== undefined && !(CONFIGURED_PROVIDER_TYPES as readonly unknown[]).includes(type)) {
         throw new Error(`Provider "${id}" has an unsupported type.`);
     }
-    const inferred = (type ?? builtIn) as
-        | "bedrock"
-        | "claude"
-        | "codex"
-        | "grok"
-        | "smart"
-        | undefined;
+    const inferred = (type ?? builtIn) as ConfiguredProviderType | undefined;
     if (inferred === undefined) {
-        throw new Error(
-            `Provider "${id}" must set type to "codex", "claude", "grok", "bedrock", or "smart".`,
-        );
+        throw new Error(`Provider "${id}" must set type to ${CONFIGURED_PROVIDER_TYPE_LIST}.`);
     }
     return inferred;
 }
@@ -4399,6 +4578,8 @@ function withoutProjectMachineSettings(values: PartialValues): PartialValues {
         profile: _profile,
         provider_default_enable: _providerDefaultEnable,
         providers: _providers,
+        // Which agent runs here, on which account, is this machine's choice.
+        harnesses: _harnesses,
         // Project skill folders are relative to the project they sit in and add to the machine's
         // list rather than replacing it. Skill discovery reads them beside each project root
         // through the compute, so they never enter the merged machine configuration.
@@ -5294,25 +5475,22 @@ function readProviders(
         const type =
             providerValue.type ??
             (["bedrock", "claude", "codex", "grok"].includes(id) ? id : undefined);
-        const schema =
-            type === "bedrock"
-                ? providerInputSchemas.bedrock
-                : type === "claude"
-                  ? providerInputSchemas.claude
-                  : type === "codex"
-                    ? providerInputSchemas.codex
-                    : type === "grok"
-                      ? providerInputSchemas.grok
-                      : type === "smart"
-                        ? providerInputSchemas.smart
-                        : undefined;
+        const schema = (CONFIGURED_PROVIDER_TYPES as readonly unknown[]).includes(type)
+            ? providerInputSchemas[type as ConfiguredProviderType]
+            : undefined;
         if (schema === undefined) {
-            throw new Error(
-                `Provider "${id}" must set type to "codex", "claude", "grok", "bedrock", or "smart".`,
-            );
+            throw new Error(`Provider "${id}" must set type to ${CONFIGURED_PROVIDER_TYPE_LIST}.`);
         }
         if (["bedrock", "claude", "codex", "grok"].includes(id) && type !== id) {
             throw new Error(`Built-in provider "${id}" must use type "${id}".`);
+        }
+        if (
+            ["antigravity", "opencode", "acp"].includes(String(type)) &&
+            Object.keys(providerValue).some(
+                (key) => !["type", "enabled", "auto_enable"].includes(key),
+            )
+        ) {
+            throw new Error(`Configure "${String(type)}" agents under [harnesses.${id}].`);
         }
         const allowed = Object.keys(schema.properties);
         const parsed = readTableValues(providerValue, `providers.${id}`, unknown, allowed, schema);

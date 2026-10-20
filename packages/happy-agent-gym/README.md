@@ -94,6 +94,7 @@ interface AgentGymOptions {
     inference?: readonly GymTurn[] | GymInferenceHandler;
     models?: readonly AgentModel[];
     routeConfiguredProviders?: boolean;
+    liveProviders?: readonly string[];
     permissionMode?: "read_only" | "workspace_write" | "auto" | "full_access";
     timeoutMs?: number;
     version?: string;
@@ -108,6 +109,7 @@ interface AgentGymOptions {
 | `inference`                | `[]`              | The scripted turns, or a handler answering each request                                                            |
 | `models`                   | two gym models    | Replaces the catalog the gym serves                                                                                |
 | `routeConfiguredProviders` | `false`           | Builds configured smart routes over scripted accounts instead of replacing the provider registry                   |
+| `liveProviders`            | none              | Configured provider IDs that keep their real implementation and serve live inference; for opt-in live scenarios    |
 | `permissionMode`           | the agent default | Writes `[defaults] permission_mode` into the configuration                                                         |
 | `timeoutMs`                | `10_000`          | The default budget for every `waitFor` in this gym                                                                 |
 | `version`                  | `"gym"`           | The version the daemon reports                                                                                     |

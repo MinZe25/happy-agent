@@ -105,12 +105,15 @@ describe("compute implementation contracts", () => {
         expect(() => computeToolVendor({ model: "" })).toThrow(/selection is invalid/);
     });
 
-    it("treats a foreign agent's model and provider kind as naming no vendor", () => {
-        expect(computeToolVendor({ model: "claude-code/opus", providerKind: "foreign" })).toBe(
-            "codex",
+    it("hands a foreign agent no compute tools of Happy's, whichever account it runs on", () => {
+        // Claude Code or Codex CLI on a Claude or Codex account still works with its own tools.
+        expect(computeToolVendor({ model: "claude-code/opus", providerKind: "claude" })).toBe(
+            "foreign",
         );
-        expect(computeToolVendor({ model: "acp/agent", providerKind: "claude" })).toBe("claude");
-        expect(computeToolVendor({ model: undefined, providerKind: "foreign" })).toBe("codex");
+        expect(computeToolVendor({ model: "acp/agent/m", providerKind: "foreign" })).toBe(
+            "foreign",
+        );
+        expect(computeToolVendor({ model: undefined, providerKind: "foreign" })).toBe("foreign");
     });
 
     it("accepts only plain positive decimal Claude shell IDs", () => {

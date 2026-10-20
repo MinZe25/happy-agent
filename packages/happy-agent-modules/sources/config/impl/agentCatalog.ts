@@ -21,6 +21,8 @@ import {
     GrokSessionCredential,
     KimiProvider,
     GlmProvider,
+    type ForeignAgentModel,
+    providerModelFamily,
     loadCodexCredential,
     resolveClaudeCodeExecutablePath,
     type BaseProvider,
@@ -29,6 +31,15 @@ import {
 } from "@slopus/happy-providers";
 import type { HappyAgentConfigValues, HappyAgentConfiguration } from "../ConfigModule.js";
 import { RoundRobinRouterProvider } from "./RoundRobinRouterProvider.js";
+import {
+    createForeignAgentProvider,
+    foreignAgentRouteForModel,
+    foreignAgentRoutes,
+    happyHarnessAccepts,
+    isForeignAgentProvider,
+    type ForeignAgentConfiguredProvider,
+} from "./createForeignAgentProvider.js";
+import { foreignAgentModels } from "./foreignAgentModels.js";
 import { CredentialDiagnosticSources } from "./credentialDiagnosticSanitizer.js";
 import type { ProviderCredentialFailures } from "./ProviderCredentialFailures.js";
 import { ProviderCredentialsUnavailableError } from "./ProviderCredentialsUnavailableError.js";
@@ -310,9 +321,7 @@ export function agentModelCatalog(
     const values = configuration.values;
     for (const [id, provider] of Object.entries(values.providers)) {
         if (provider.type === "smart") continue;
-        const source = provider.type === "bedrock" ? BEDROCK_CATALOG : CATALOG;
-        for (const candidate of source) {
-            if (provider.type !== "bedrock" && candidate.providerId !== provider.type) continue;
+        for (const candidate of providerCatalog(configuration, id, provider)) {
             if (!modelAvailableOnProvider(provider, candidate.id)) continue;
             const enabled =
                 isProviderEnabled(id) &&
@@ -346,6 +355,8 @@ export function smartProviderRoute(
 ): SmartProviderRoute | undefined {
     const smart = configuration.values.providers[providerId];
     if (smart?.type !== "smart") return undefined;
+    // A foreign agent's conversation lives in the account that started it, so rotating accounts
+    // would replay the whole transcript on every switch; smart providers pool Happy's own only.
     const concrete = smart.providers
         .map((id) => [id, configuration.values.providers[id]] as const)
         .filter(
@@ -353,8 +364,14 @@ export function smartProviderRoute(
                 entry,
             ): entry is readonly [
                 string,
-                Exclude<ConfiguredProvider, { readonly type: "smart" }>,
-            ] => entry[1] !== undefined && entry[1].type !== "smart",
+                Exclude<
+                    ConfiguredProvider,
+                    { readonly type: "smart" } | ForeignAgentConfiguredProvider
+                >,
+            ] =>
+                entry[1] !== undefined &&
+                entry[1].type !== "smart" &&
+                !isForeignAgentProvider(entry[1]),
         );
     const type = concrete[0]?.[1].type;
     if (type === undefined) return undefined;
@@ -370,6 +387,8 @@ export function smartProviderRoute(
         if (!compatibleIds.has(candidateId)) continue;
         for (const entry of catalog) {
             if (entry.providerId !== candidateId) continue;
+            // Claude Code and Codex CLI models stay with the account that started them.
+            if (providerModelFamily(entry.id) === "foreign") continue;
             const candidateProvider = configuration.values.providers[candidateId];
             if (
                 candidateProvider === undefined ||
@@ -411,10 +430,69 @@ export function smartProviderRoute(
     };
 }
 
+/**
+ * One foreign agent model in the catalog. A foreign agent compacts its own context, so Happy's
+ * automatic compaction is set at the full window rather than ahead of it.
+ */
+function foreignCatalogModel(candidate: ForeignAgentModel): CatalogAgentModel {
+    return {
+        providerId: "foreign",
+        id: candidate.id,
+        name: candidate.name,
+        effortLevels: candidate.effortLevels,
+        defaultEffort: candidate.defaultEffort,
+        contextWindow: candidate.contextWindow,
+        autoCompactWindow: candidate.contextWindow,
+    };
+}
+
+/**
+ * The models one configured account can serve: Happy's curated list when Happy's own loop runs on
+ * it, then the models of every foreign agent running on it, as each agent reports them.
+ */
+function providerCatalog(
+    configuration: HappyAgentConfiguration,
+    id: string,
+    provider: ConcreteConfiguredProvider,
+): readonly CatalogAgentModel[] {
+    const native = !happyHarnessAccepts(configuration, id, provider)
+        ? []
+        : provider.type === "bedrock"
+          ? BEDROCK_CATALOG
+          : CATALOG.filter((candidate) => candidate.providerId === provider.type);
+    const foreign = foreignAgentRoutes(configuration)
+        .filter((route) => route.providerId === id)
+        .flatMap((route) =>
+            foreignAgentModels(configuration.paths.agentHome, route).map(foreignCatalogModel),
+        );
+    return [...native, ...foreign];
+}
+
+/**
+ * Context limits for one foreign agent route, from the models its agent reports. Unknown when no
+ * foreign agent serves the model on that provider.
+ */
+export function foreignAgentModelContext(
+    configuration: HappyAgentConfiguration,
+    providerId: string,
+    modelId: string,
+): AgentModelContext | undefined {
+    const route = foreignAgentRouteForModel(configuration, providerId, modelId);
+    if (route === undefined) return undefined;
+    const model = foreignAgentModels(configuration.paths.agentHome, route).find(
+        (candidate) => candidate.id === modelId,
+    );
+    return model === undefined
+        ? undefined
+        : { contextWindow: model.contextWindow, autoCompactWindow: model.contextWindow };
+}
+
 /** Context limits for one enabled provider/model route, when the curated catalog knows them. */
 export function agentModelContext(modelId: string): AgentModelContext | undefined {
     const context = MODEL_CONTEXTS[modelId];
-    return context === undefined ? undefined : { ...context };
+    return context === undefined
+        ? undefined
+        : { contextWindow: context.contextWindow, autoCompactWindow: context.autoCompactWindow };
 }
 
 /**
@@ -462,15 +540,25 @@ export function agentProviders(
                         : Promise.resolve(configuration.values.node.name);
                 const sources = new CredentialDiagnosticSources(id, [hostname(), await hostName]);
                 try {
-                    const concrete = await createProvider(
-                        id,
-                        provider,
-                        selected,
-                        retryLimit,
-                        configuration.paths.claudeWorkingDirectory,
-                        sources,
-                        onAccountUsage,
-                    );
+                    const foreign = foreignAgentRouteForModel(configuration, id, selected);
+                    if (foreign === undefined && isForeignAgentProvider(provider)) {
+                        throw new Error(`Provider "${id}" does not serve "${selected ?? ""}".`);
+                    }
+                    const concrete =
+                        foreign !== undefined
+                            ? createForeignAgentProvider(foreign, configuration.paths.agentHome)
+                            : await createProvider(
+                                  id,
+                                  provider as Exclude<
+                                      ConcreteConfiguredProvider,
+                                      ForeignAgentConfiguredProvider
+                                  >,
+                                  selected,
+                                  retryLimit,
+                                  configuration.paths.claudeWorkingDirectory,
+                                  sources,
+                                  onAccountUsage,
+                              );
                     credentialFailures?.clear(id);
                     const diagnostics = sources.snapshot();
                     const protectedProvider = diagnostics.protect(concrete);
@@ -495,7 +583,7 @@ export function agentProviders(
                     throw safe;
                 }
             },
-            provider.type,
+            isForeignAgentProvider(provider) ? "foreign" : provider.type,
         );
     }
     for (const [id, provider] of Object.entries(configuration.values.providers)) {
@@ -541,9 +629,7 @@ function concreteAgentModelCatalog(
     const models: ConfiguredAgentModel[] = [];
     for (const [id, provider] of Object.entries(configuration.values.providers)) {
         if (provider.type === "smart") continue;
-        const source = provider.type === "bedrock" ? BEDROCK_CATALOG : CATALOG;
-        for (const candidate of source) {
-            if (provider.type !== "bedrock" && candidate.providerId !== provider.type) continue;
+        for (const candidate of providerCatalog(configuration, id, provider)) {
             if (!modelAvailableOnProvider(provider, candidate.id)) continue;
             models.push({ ...candidate, enabled: true, providerId: id });
         }
@@ -606,7 +692,7 @@ function sameBedrockRegion(
 
 async function createProvider(
     id: string,
-    provider: ConcreteConfiguredProvider,
+    provider: Exclude<ConcreteConfiguredProvider, ForeignAgentConfiguredProvider>,
     selectedModel: string | undefined,
     retryLimit: number | undefined,
     claudeWorkingDirectory: string,

@@ -12,6 +12,7 @@ import {
     type SendMessageResponse,
 } from "@slopus/happy-agent-client";
 import { startHappyAgentDaemon, type HappyAgentDaemon } from "@slopus/happy-agent";
+import type { ConfigInferenceOverride } from "@slopus/happy-agent-modules";
 
 import { createGymCompute, type GymMachineConnection } from "./createGymCompute.js";
 import {
@@ -44,6 +45,11 @@ export interface AgentGymOptions extends GymHomeOptions {
     readonly routeConfiguredProviders?: boolean;
     /** Concrete scripted provider instances. Defaults to the single gym provider. */
     readonly providerIds?: readonly string[];
+    /**
+     * Configured providers that keep their real implementation and serve live inference, next to
+     * the scripted ones. Only opt-in live scenarios name any, because these reach real accounts.
+     */
+    readonly liveProviders?: readonly string[];
     /** Test-owned environment values supplied to the daemon's configuration module. */
     readonly environment?: Readonly<NodeJS.ProcessEnv>;
     /** A test-issued JWT and profile for a real team-mode HTTP fixture. */
@@ -279,7 +285,12 @@ class AgentGymInstance implements AgentGym {
                 HAPPY_HOME_DIR: join(this.#home.root, "credentials", "happy"),
             },
             happyHome: this.#home.happyHome,
-            inference: this.#options.routeConfiguredProviders ? () => inference : inference,
+            inference:
+                this.#options.liveProviders !== undefined
+                    ? (real) => withLiveProviders(inference, real, this.#options.liveProviders!)
+                    : this.#options.routeConfiguredProviders
+                      ? () => inference
+                      : inference,
             version: this.#options.version ?? "gym",
         });
         this.#daemon = daemon;
@@ -679,4 +690,38 @@ function finishedRunIdOf(event: GymAgentEvent): string | undefined {
 /** Delete a path inside a gym workspace. Exported for scenarios that arrange missing files. */
 export async function removeWorkspacePath(gym: AgentGym, path: string): Promise<void> {
     await rm(resolveFixturePath(gym.workspacePath, path), { force: true, recursive: true });
+}
+
+/**
+ * Serve the named configured providers from their real implementations, next to the scripted
+ * ones. Each daemon start gets the providers that start's configuration built, so a restart still
+ * starts fresh foreign sessions the way a new process would.
+ */
+function withLiveProviders(
+    scripted: ConfigInferenceOverride,
+    real: ConfigInferenceOverride,
+    liveProviders: readonly string[],
+): ConfigInferenceOverride {
+    const providers = scripted.providers;
+    for (const providerId of liveProviders) {
+        const type = real.providers.typeOf(providerId);
+        if (type === null) throw new Error(`Live provider "${providerId}" is not configured.`);
+        providers.add(
+            providerId,
+            async (selection) => {
+                const provider = await real.providers.resolve(selection.id, selection.model);
+                if (provider === null)
+                    throw new Error(`Provider "${selection.id}" is not registered.`);
+                return provider;
+            },
+            type,
+        );
+    }
+    return {
+        models: [
+            ...scripted.models,
+            ...real.models.filter((model) => liveProviders.includes(model.providerId)),
+        ],
+        providers,
+    };
 }

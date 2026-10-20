@@ -668,6 +668,20 @@ machine-level choices or credential paths.
 A client may choose a different provider, model, effort, or permission mode when it creates a
 session; the `[defaults]` values apply otherwise.
 
+### Harnesses
+
+A provider is an account; a harness is who runs the agent loop on it. `[harnesses.happy]`, Happy's
+own loop on every provider, exists by default. `[harnesses.claude_code]` runs Claude Code itself
+(through the Claude Agent SDK) and `[harnesses.codex_cli]` runs Codex itself (through
+`codex app-server`) on the `claude` or `codex` providers they list, by default all of that type.
+`[harnesses.antigravity]`, `[harnesses.opencode]`, and any `type = "acp"` harness with a `command`
+are agents with their own login, each offered as an account named after its harness. Every
+harness accepts `enabled`, `include_models`, and `exclude_models`; `happy`, `claude_code`, and
+`codex_cli` accept `providers`; the agents with their own login accept `name`, `hidden`,
+`command`, `args`, and `api_key`, and `acp` harnesses `env`. Their models are the ones each agent
+reports, under `<harness type>/<model>` IDs. The [harnesses recipe](recipe/harnesses.md)
+covers setup, models, steering, and sub-agents.
+
 A Gemini API key adds the universal `gemini_search`, `gemini_generate_image`,
 `gemini_generate_music`, and `gemini_analyze_media` tools to every model. Set
 it in the user `happy.toml`, or set `GEMINI_API_KEY` in the daemon environment;

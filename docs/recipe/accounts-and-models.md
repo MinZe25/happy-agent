@@ -1,7 +1,8 @@
 # Accounts, models, effort, and service tier
 
 Use this recipe when the user wants to add or pool provider accounts, limit or change models, set
-the default effort or service tier, or move existing sessions to another provider. Everything here
+the default effort or service tier, or move existing sessions to another provider. To run Claude Code, Codex CLI, Antigravity, OpenCode, or another ACP agent itself on these
+accounts, add a [harness](harnesses.md). Everything here
 is machine configuration in the user `happy.toml`. [Configuration](../configuration.md) is the
 reference.
 

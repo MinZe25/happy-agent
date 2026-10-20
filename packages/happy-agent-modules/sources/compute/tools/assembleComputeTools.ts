@@ -33,5 +33,9 @@ export function assembleComputeTools(
             return assembleKimiComputeTools(compute, reads);
         case "glm":
             return assembleGlmComputeTools(compute, reads, outputWaitsReleased);
+        case "foreign":
+            // A foreign agent works the machine with its own native tools; handing it a second
+            // shell and editor would only give it two names for everything.
+            return [];
     }
 }

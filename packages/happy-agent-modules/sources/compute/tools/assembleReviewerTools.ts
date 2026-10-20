@@ -37,5 +37,7 @@ export function assembleReviewerTools(
             return assembleKimiReviewerTools(compute, reads);
         case "glm":
             return assembleGlmReviewerTools(compute, reads);
+        case "foreign":
+            return [];
     }
 }
