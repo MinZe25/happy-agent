@@ -105,6 +105,14 @@ describe("compute implementation contracts", () => {
         expect(() => computeToolVendor({ model: "" })).toThrow(/selection is invalid/);
     });
 
+    it("treats a foreign agent's model and provider kind as naming no vendor", () => {
+        expect(computeToolVendor({ model: "claude-code/opus", providerKind: "foreign" })).toBe(
+            "codex",
+        );
+        expect(computeToolVendor({ model: "acp/agent", providerKind: "claude" })).toBe("claude");
+        expect(computeToolVendor({ model: undefined, providerKind: "foreign" })).toBe("codex");
+    });
+
     it("accepts only plain positive decimal Claude shell IDs", () => {
         expect(parseClaudeBashId("1")).toBe(1);
         expect(parseClaudeBashId("9007199254740991")).toBe(Number.MAX_SAFE_INTEGER);

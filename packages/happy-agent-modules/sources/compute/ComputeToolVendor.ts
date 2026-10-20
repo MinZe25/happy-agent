@@ -19,6 +19,7 @@ const computeToolProviderKindSchema = Type.Union([
     Type.Literal("bedrock"),
     Type.Literal("claude"),
     Type.Literal("codex"),
+    Type.Literal("foreign"),
     Type.Literal("grok"),
     Type.Literal("gym"),
 ]);
@@ -62,7 +63,8 @@ export function computeToolVendor(selection: ComputeToolSelection): ComputeToolV
         throw new Error("Compute tool model selection is invalid.");
     }
     const family = selection.model === undefined ? undefined : providerModelFamily(selection.model);
-    if (family !== undefined) return family;
+    // A foreign agent brings its own tools, so its family names no vendor surface to hand it.
+    if (family !== undefined && family !== "foreign") return family;
     const kind = selection.providerKind;
     if (kind === "claude" || kind === "codex" || kind === "grok") return kind;
     return DEFAULT_COMPUTE_TOOL_VENDOR;

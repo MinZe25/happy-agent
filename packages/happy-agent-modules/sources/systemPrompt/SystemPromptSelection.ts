@@ -5,6 +5,7 @@ export const systemPromptProviderKindSchema = Type.Union([
     Type.Literal("bedrock"),
     Type.Literal("claude"),
     Type.Literal("codex"),
+    Type.Literal("foreign"),
     Type.Literal("grok"),
     Type.Literal("gym"),
 ]);

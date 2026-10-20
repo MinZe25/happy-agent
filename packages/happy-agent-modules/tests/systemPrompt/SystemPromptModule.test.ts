@@ -208,6 +208,15 @@ describe("SystemPromptModule", () => {
         );
     });
 
+    it("gives a foreign agent the same prompt as a model naming no vendor", () => {
+        expect(systemPromptForModel({ model: "claude-code/opus", providerKind: "foreign" })).toBe(
+            systemPromptForModel({}),
+        );
+        expect(systemPromptForModel({ model: "acp/agent", providerKind: "claude" })).toBe(
+            systemPromptForModel({ providerKind: "claude" }),
+        );
+    });
+
     it("appends the machine environment and every configured model route", async () => {
         const { instructions } = await moduleWithCatalog(twoModelCatalog);
 
