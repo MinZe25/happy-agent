@@ -9,8 +9,6 @@ import { assembleReviewerTools } from "../../sources/compute/tools/assembleRevie
 
 const sourcesRoot = join(dirname(fileURLToPath(import.meta.url)), "../../sources");
 const eagerDirectories = ["codeMode", "compute", "userInput"];
-/** Feature tools both native harnesses expose eagerly: Agent/spawn_agent and SendMessage/send_message. */
-const eagerFiles = ["collaboration/tools/create_agent.ts", "collaboration/tools/send_message.ts"];
 
 interface ToolDefinition {
     readonly file: string;
@@ -46,9 +44,9 @@ describe("tool discovery policy", () => {
                 continue;
             }
 
-            const eager =
-                eagerFiles.includes(definition.file) ||
-                eagerDirectories.some((directory) => definition.file.startsWith(`${directory}/`));
+            const eager = eagerDirectories.some((directory) =>
+                definition.file.startsWith(`${directory}/`),
+            );
             expect.soft(definition.properties.get("defer"), location).toBe(String(!eager));
             expect.soft(definition.properties.get("capabilities"), location).toBeDefined();
             if (eager) {

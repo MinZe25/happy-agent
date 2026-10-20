@@ -18,10 +18,9 @@ export function createAgentTool(
 ) {
     return defineAgentTool({
         name: "create_agent",
-        // Eager, like Claude Code's Agent and Codex's spawn_agent: delegation is ordinary work, and
-        // a subagent the model has to search for first is one it rarely thinks to start.
-        defer: false,
+        defer: true,
         capabilities: ["Create, message, and coordinate coding subagents."],
+        searchKeywords: ["spawn subagent", "delegate work", "parallel collaborator"],
         description: createAgentDescription(models, maxCollaborators, maxCollaborationDepth),
         parameters: collaborationCreateInputSchema,
         returnType: collaborationCreateResultSchema,
