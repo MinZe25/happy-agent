@@ -31,10 +31,13 @@ import type {
     AgentModeResponse,
     AgentResponse,
     CreateAgentRequest,
+    FailureResolutionResponse,
     MutationOnlyRequest,
     ReorderAgentRequest,
     ReorderSubtaskRequest,
+    RetryFailedTurnRequest,
     SaveAgentDraftRequest,
+    SwitchAndContinueRequest,
 } from "./protocol/agents.js";
 import {
     authenticationMethodSchema,
@@ -2932,6 +2935,36 @@ export class HappyAgentClient {
         return await this.#json({
             method: "POST",
             path: `v0/agents/${encodeURIComponent(agentId)}/compact`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** `POST /v0/agents/:agentId/messages/:messageId/retry` — runs a failed turn again. */
+    async retryFailedTurn(
+        agentId: Cuid2,
+        messageId: Cuid2,
+        request: RetryFailedTurnRequest = {},
+        options: RequestOptions = {},
+    ): Promise<FailureResolutionResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/agents/${encodeURIComponent(agentId)}/messages/${encodeURIComponent(messageId)}/retry`,
+            json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** `POST /v0/agents/:agentId/messages/:messageId/switch` — moves the chat and continues. */
+    async switchAndContinue(
+        agentId: Cuid2,
+        messageId: Cuid2,
+        request: SwitchAndContinueRequest,
+        options: RequestOptions = {},
+    ): Promise<FailureResolutionResponse> {
+        return await this.#json({
+            method: "POST",
+            path: `v0/agents/${encodeURIComponent(agentId)}/messages/${encodeURIComponent(messageId)}/switch`,
             json: request,
             signal: options.signal,
         });

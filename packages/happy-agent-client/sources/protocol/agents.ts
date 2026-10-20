@@ -19,7 +19,7 @@ import {
     timestampSchema,
 } from "./common.js";
 import type { BackgroundProcess } from "./processes.js";
-import type { CompactionMessage, Run } from "./messages.js";
+import type { CompactionMessage, Run, ServiceMessage } from "./messages.js";
 import type { SlashCommandCatalog } from "./slashCommands.js";
 
 export const MAX_AGENT_PROFILES = 256;
@@ -68,6 +68,20 @@ export const agentWaitSchema = Type.Object({
     dueAt: Type.Integer({ minimum: 0 }),
 });
 export type AgentWait = Static<typeof agentWaitSchema>;
+
+/**
+ * An automatic recovery in progress inside the current run, protocol 30 or newer. `kind` is a
+ * failure kind: a provider retry carries the kind it is retrying, and the one retry after a
+ * context reset carries `context_too_long`.
+ */
+export const agentRetryingSchema = Type.Object({
+    attempt: Type.Integer({ minimum: 1 }),
+    maxAttempts: Type.Integer({ minimum: 1 }),
+    kind: Type.String({ minLength: 1, maxLength: 64 }),
+    /** The vendor being retried as named in a sentence, such as "Claude". */
+    vendorName: Type.String({ minLength: 1, maxLength: 128 }),
+});
+export type AgentRetrying = Static<typeof agentRetryingSchema>;
 
 /** Why the agent has something the person has not looked at. */
 export const agentUnreadSchema = Type.Object({
@@ -125,6 +139,8 @@ export const agentSchema = Type.Recursive((agent) =>
         version: resourceVersionSchema,
         /** Scheduling-owned wait interval, null when cleared; absent on older daemons. */
         wait: Type.Optional(Nullable(agentWaitSchema)),
+        /** Automatic recovery in progress, null when none; absent on older daemons. */
+        retrying: Type.Optional(Nullable(agentRetryingSchema)),
         /** The workspace the agent runs in; its commands and edits land there. */
         workspaceId: cuid2Schema,
     }),
@@ -168,6 +184,27 @@ export interface AgentCompactResponse extends SlashCommandCatalog, AgentProfileC
     /** The durable service message, normally carrying a running compaction block. */
     message: CompactionMessage;
     /** The run and message lifecycle arrive through events from here. */
+    cursor: EventCursor;
+}
+
+/** `POST /v0/agents/:agentId/messages/:messageId/retry` */
+export interface RetryFailedTurnRequest {
+    mutationId?: string;
+}
+
+/** `POST /v0/agents/:agentId/messages/:messageId/switch` */
+export interface SwitchAndContinueRequest {
+    /** One of the failure's `fallbackProviders`. */
+    providerId: string;
+    modelId: string;
+    mutationId?: string;
+}
+
+/** Both failure actions answer with the failed message, now carrying its resolution. */
+export interface FailureResolutionResponse {
+    agent: Agent;
+    message: ServiceMessage;
+    /** The continued run arrives through events from here. */
     cursor: EventCursor;
 }
 

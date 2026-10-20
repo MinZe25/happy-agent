@@ -5,7 +5,7 @@
  * and events all speak it.
  */
 
-import { type Static, Type } from "@sinclair/typebox";
+import { type Static, type TSchema, Type } from "@sinclair/typebox";
 
 import {
     cuid2Schema,
@@ -382,6 +382,199 @@ export const messageErrorSchema = Type.Object({
 });
 export type MessageError = Static<typeof messageErrorSchema>;
 
+/** Failure kinds with understood remedies; unknown wire kinds are still readable. */
+export const knownMessageFailureKindSchema = Type.Union([
+    Type.Literal("signin_missing"),
+    Type.Literal("usage_limit"),
+    Type.Literal("no_account_available"),
+    Type.Literal("rate_limited"),
+    Type.Literal("provider_unavailable"),
+    Type.Literal("network"),
+    Type.Literal("context_too_long"),
+    Type.Literal("provider_disabled"),
+    Type.Literal("internal"),
+]);
+export type KnownMessageFailureKind = Static<typeof knownMessageFailureKindSchema>;
+
+/** The provider entry a failure is about. Display text is daemon-supplied, never inferred. */
+export const messageFailureProviderSchema = Type.Object({
+    id: Type.String({ minLength: 1, maxLength: 256 }),
+    /** Canonical family such as `claude`, `codex`, `grok`, or `bedrock`; extensible. */
+    type: Type.String({ minLength: 1, maxLength: 128 }),
+    /** The vendor as people say it in a sentence: "Claude", "Codex", "Grok", "Bedrock". */
+    vendorName: Type.String({ minLength: 1, maxLength: 128 }),
+    /** The configured provider entry's display label, such as "claude_work". */
+    label: Type.String({ minLength: 1, maxLength: 256 }),
+});
+export type MessageFailureProvider = Static<typeof messageFailureProviderSchema>;
+
+/** One usable account and model to switch to, ranked by the daemon. */
+/** Ranking groups with understood labels; unknown wire values are still readable. */
+export const knownFallbackGroupSchema = Type.Union([
+    Type.Literal("same_model"),
+    Type.Literal("same_family"),
+    Type.Literal("other_provider"),
+]);
+export type KnownFallbackGroup = Static<typeof knownFallbackGroupSchema>;
+
+export const messageFailureFallbackSchema = Type.Object({
+    providerId: Type.String({ minLength: 1, maxLength: 256 }),
+    /** The provider entry's display label, such as "claude_work". */
+    providerLabel: Type.String({ minLength: 1, maxLength: 256 }),
+    /** Clients name the model from the model catalog. */
+    modelId: Type.String({ minLength: 1, maxLength: 256 }),
+    /** Percentage of one usage window already used; null without a fresh reading. */
+    usedPercent: Nullable(Type.Number({ minimum: 0, maximum: 100 })),
+    /** Lowercase name of the window `usedPercent` comes from, such as "weekly" or "5h". */
+    usageWindow: Nullable(Type.String({ minLength: 1, maxLength: 64 })),
+    /** Ranking group; menus label groups only when more than one is present. */
+    group: Type.String({ minLength: 1, maxLength: 64 }),
+});
+export type MessageFailureFallback = Static<typeof messageFailureFallbackSchema>;
+
+const resolutionBaseSchema = Type.Object({ at: timestampSchema });
+
+/** The failed turn was sent again on the same route. */
+export const retriedResolutionSchema = Type.Composite([
+    resolutionBaseSchema,
+    Type.Object({ action: Type.Literal("retried") }),
+]);
+
+/** The chat moved to another route and the turn continued there. */
+export const switchedResolutionSchema = Type.Composite([
+    resolutionBaseSchema,
+    Type.Object({
+        action: Type.Literal("switched"),
+        providerId: Type.String({ minLength: 1, maxLength: 256 }),
+        modelId: Type.String({ minLength: 1, maxLength: 256 }),
+    }),
+]);
+
+/** A resolution action this client does not know; it still shows that the failure was handled. */
+export const otherResolutionSchema = Type.Composite([
+    resolutionBaseSchema,
+    Type.Object({ action: Type.String({ minLength: 1, maxLength: 64 }) }),
+]);
+
+/** What the person did about a failure. The failed message stays in history and records it. */
+export const messageFailureResolutionSchema = Type.Union([
+    retriedResolutionSchema,
+    switchedResolutionSchema,
+    otherResolutionSchema,
+]);
+export type MessageFailureResolution =
+    | Static<typeof retriedResolutionSchema>
+    | Static<typeof switchedResolutionSchema>
+    | (Static<typeof otherResolutionSchema> & { action: string & {} });
+
+/** Fields every failure carries, whatever its kind. */
+const failureBaseSchema = Type.Object({
+    /** One user-safe sentence without a clock time, for agents and unknown kinds. */
+    message: Type.String({ minLength: 1, maxLength: 512 }),
+    /** Ranked usable alternatives; empty means there is nothing to switch to. */
+    fallbackProviders: Type.Array(messageFailureFallbackSchema, { maxItems: 16 }),
+    /** Absent until the person retries or switches. */
+    resolution: Type.Optional(messageFailureResolutionSchema),
+});
+
+const failureVariant = <K extends string, F extends Record<string, TSchema>>(kind: K, fields: F) =>
+    Type.Composite([failureBaseSchema, Type.Object({ kind: Type.Literal(kind), ...fields })]);
+
+/** When the spent limit resets, Unix milliseconds; clients format it in the viewer's local time. */
+const resetsAtSchema = Nullable(timestampSchema);
+
+export const signinMissingFailureSchema = failureVariant("signin_missing", {
+    provider: messageFailureProviderSchema,
+    /** The native assistant to sign in to, such as "Claude Code"; null for other sources. */
+    product: Nullable(Type.String({ minLength: 1, maxLength: 128 })),
+    /** The vendor's own sign-in command for a default native login; null for other sources. */
+    command: Nullable(Type.String({ minLength: 1, maxLength: 256 })),
+});
+export const usageLimitFailureSchema = failureVariant("usage_limit", {
+    provider: messageFailureProviderSchema,
+    resetsAt: resetsAtSchema,
+});
+export const noAccountAvailableFailureSchema = failureVariant("no_account_available", {
+    /** Display name of the routing pool every account of which is spent. */
+    poolName: Type.String({ minLength: 1, maxLength: 256 }),
+    resetsAt: resetsAtSchema,
+});
+export const rateLimitedFailureSchema = failureVariant("rate_limited", {
+    provider: messageFailureProviderSchema,
+});
+export const providerUnavailableFailureSchema = failureVariant("provider_unavailable", {
+    provider: messageFailureProviderSchema,
+});
+export const networkFailureSchema = failureVariant("network", {
+    provider: messageFailureProviderSchema,
+});
+export const providerDisabledFailureSchema = failureVariant("provider_disabled", {
+    provider: messageFailureProviderSchema,
+});
+export const contextTooLongFailureSchema = failureVariant("context_too_long", {
+    /** The model whose window the conversation no longer fits; clients name it from the catalog. */
+    modelId: Type.String({ minLength: 1, maxLength: 256 }),
+});
+export const internalFailureSchema = failureVariant("internal", {
+    /** One sanitized sentence describing what failed. */
+    detail: Type.String({ minLength: 1, maxLength: 512 }),
+});
+
+/** A kind this client does not know: render `message` with Retry and Ask Chief of Staff. */
+export const otherFailureSchema = Type.Composite([
+    failureBaseSchema,
+    Type.Object({ kind: Type.String({ minLength: 1, maxLength: 64 }) }),
+]);
+
+/**
+ * Typed failure on an ordinary error service message, protocol 30 or newer, discriminated by
+ * `kind`. Clients write the card text from the kind and its fields; the last variant keeps
+ * kinds added later readable.
+ */
+export const messageFailureSchema = Type.Union([
+    signinMissingFailureSchema,
+    usageLimitFailureSchema,
+    noAccountAvailableFailureSchema,
+    rateLimitedFailureSchema,
+    providerUnavailableFailureSchema,
+    networkFailureSchema,
+    providerDisabledFailureSchema,
+    contextTooLongFailureSchema,
+    internalFailureSchema,
+    otherFailureSchema,
+]);
+export type KnownMessageFailure =
+    | Static<typeof signinMissingFailureSchema>
+    | Static<typeof usageLimitFailureSchema>
+    | Static<typeof noAccountAvailableFailureSchema>
+    | Static<typeof rateLimitedFailureSchema>
+    | Static<typeof providerUnavailableFailureSchema>
+    | Static<typeof networkFailureSchema>
+    | Static<typeof providerDisabledFailureSchema>
+    | Static<typeof contextTooLongFailureSchema>
+    | Static<typeof internalFailureSchema>;
+/** Narrow on `kind` with {@link isKnownMessageFailure}; anything else is an unknown kind. */
+export type MessageFailure = KnownMessageFailure | Static<typeof otherFailureSchema>;
+
+const KNOWN_FAILURE_KINDS: ReadonlySet<string> = new Set(
+    knownMessageFailureKindSchema.anyOf.map((kind) => kind.const),
+);
+
+/** Whether this failure is one of the kinds this client understands. */
+export function isKnownMessageFailure(failure: MessageFailure): failure is KnownMessageFailure {
+    return KNOWN_FAILURE_KINDS.has(failure.kind);
+}
+
+/** Service notices that are not failures; unknown kinds render the message text. */
+export const knownServiceNoticeKindSchema = Type.Literal("context_reset");
+export type KnownServiceNoticeKind = Static<typeof knownServiceNoticeKindSchema>;
+
+/** A typed service notice, protocol 30 or newer. */
+export const serviceNoticeSchema = Type.Object({
+    kind: Type.String({ minLength: 1, maxLength: 64 }),
+});
+export type ServiceNotice = Static<typeof serviceNoticeSchema>;
+
 /** An explicit request in a user message for Agent Base to execute one tool before inference. */
 export const toolCallRequestBlockSchema = Type.Object(
     {
@@ -591,6 +784,10 @@ export interface ServiceMessage {
     metadata: MessageMetadata;
     /** Supplementary diagnostics; the original full user-safe text remains in content. */
     error?: MessageError;
+    /** Typed failure the client renders from, protocol 30 or newer. */
+    failure?: MessageFailure;
+    /** Typed non-failure notice, such as a context reset; protocol 30 or newer. */
+    notice?: ServiceNotice;
 }
 
 /** One durable execution configuration transition, never model input. */

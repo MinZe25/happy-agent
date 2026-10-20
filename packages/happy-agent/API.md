@@ -221,7 +221,7 @@ none of the mobile credentials. See "Credentials on the connector's socket".
 
 All routes are prefixed with `/v0`. Independently of the path version, every daemon advertises
 its identity through the health endpoint as a single `version` object: a numeric `protocol`
-(integer, currently 29) and the `daemon` product version string. Protocol versions from 22 onward
+(integer, currently 30) and the `daemon` product version string. Protocol versions from 22 onward
 are backward-compatible and additive. Clients support that compatibility range for existing
 capabilities instead of requiring equality with their own protocol number. A client may require
 a newer protocol for a capability it needs and must explain that an upgrade is required when the
@@ -265,6 +265,12 @@ Protocol 29 adds pushed provider-account usage: the `provider.usage.updated` eve
 a usage response can tell the same thing from the entry itself: an entry without `refreshedAt`
 comes from an older compatible daemon, which never emits the event and answers the refresh route
 with `404`, so the client keeps polling `GET /v0/usage` instead.
+
+Protocol 30 adds typed failures: the optional `failure` and `notice` objects on service
+messages, the optional `retrying` field on agents, and the failed-turn `retry` and `switch`
+routes, all described under [Typed failures](#typed-failures). A client that offers those actions
+requires protocol 30 or newer. With an older compatible daemon, `failure` is absent and the
+client renders the error text and legacy `error` details as before; the two routes answer `404`.
 
 Account provenance, configuration history blocks, and structured error details are additive output
 and do not increment the protocol version. Clients tolerate their absence and older clients keep
@@ -5158,6 +5164,16 @@ Fields:
   active interval or `null`. `startedAt` never exceeds `dueAt`. Questions remain represented
   independently by `pendingQuestionId`. A scheduled message awaiting delivery does not make its
   sender or recipient a waiting agent.
+- `retrying` — optional additive object, protocol 30 or newer. `null` means no automatic recovery
+  is running; otherwise `{ "attempt": 3, "maxAttempts": 10, "kind": "provider_unavailable", "vendorName": "Claude" }`
+  describes the recovery inside the current run; `vendorName` names the vendor being retried as
+  in a sentence. `kind` is a failure kind from
+  [Typed failures](#typed-failures): a provider retry carries the kind it is retrying, and the one
+  retry after an automatic context reset carries `context_too_long` with `attempt` and
+  `maxAttempts` both `1`. `attempt` never exceeds `maxAttempts`. Every change is an
+  `agent.updated` event, and it is cleared when the attempt starts producing output or the run
+  ends. Clients show it as the live working line and never reconstruct it from text. Older
+  daemons omit it.
 - `subagents` — how many child agents, including subtasks, this agent has spawned over its life (`total`) and how many
   are running right now (`running`). Changes to either count are `agent.updated` events. The
   subagents themselves are listed by `GET /v0/agents/:agentId/activity`.
@@ -5653,7 +5669,10 @@ add an `error` object alongside `content` and `metadata`:
 }
 ```
 
-All existing messages remain valid without `error`. When present:
+All existing messages remain valid without `error`. From protocol 30, `error.credentialSource`,
+`error.recovery.steps`, and `error.recovery.commands` are legacy: daemons still send them for older
+clients, but clients at protocol 30 or newer render from `failure` when it is present. When
+present:
 
 - `code` is a nonempty stable machine-readable string of at most 128 characters. The set grows;
   clients treat unknown codes as generic failures and never classify errors by matching prose.
@@ -5685,9 +5704,9 @@ All existing messages remain valid without `error`. When present:
   commands, not permission to invent one from error text.
 
     For the default native Claude Code login only, the fallback command is `claude auth login`.
-    Its steps explain: retry the same chat first; if that still fails, run the command on the
-    machine hosting the agent as the same operating-system user that runs the daemon, complete the
-    browser sign-in, then retry the same chat. A remote daemon's machine is not necessarily the
+    A missing or rejected sign-in says to sign in first: its steps explain to run the command on
+    the machine hosting the agent as the same operating-system user that runs the daemon, complete
+    the browser sign-in, then retry the same chat. A remote daemon's machine is not necessarily the
     client's machine; the UI uses the supplied host label and never invents an SSH command. The command and steps
     remain usable with no working AI credentials. An explicit configured token, API key, environment
     override, or custom native configuration directory must not receive that default-login command.
@@ -5713,10 +5732,12 @@ Apply this projection per caller at read time to history and any other message-b
 including bootstrap, event pulls, live delivery, replay, pending-event flushes, and both
 `message.created` and `message.updated`; never change the stored message or shared event journal.
 
-The ordinary error text and other shared user-safe diagnostics must themselves be source-agnostic.
-They never contain the credential location, configuration key or environment-variable name,
-host label, native configuration directory, or a source-specific command. Source-specific advice
-belongs only in the projectable structured fields. Preserve the complete remaining user-safe text,
+The ordinary error text and other shared user-safe diagnostics must themselves be source-agnostic,
+with one exception: for a default native login, the text and `failure.command` may name the
+vendor's own sign-in command (`claude auth login`, `codex login`, `grok login`). They never contain
+the credential location, configuration key or environment-variable name, host label, native
+configuration directory, token, or path. Other source-specific advice belongs only in the
+projectable structured fields. Preserve the complete remaining user-safe text,
 including paragraphs and newlines; withholding structured fields must not leave the same details
 exposed in prose.
 
@@ -5760,6 +5781,105 @@ Chief of Staff help. These generic actions do not assert a cause or require inve
 Clients use a failed tool's existing ID or the API failure's safe request context as the reference
 when no error-message ID exists. They never classify those failures by matching error prose or
 mistake a daemon authentication failure for a provider-account failure.
+
+#### Typed failures
+
+From protocol 30 an ordinary error `service` message may also carry `failure`, a typed
+description the client renders the card from. The message's text block equals `failure.message`.
+`failure` is a union discriminated by `kind`:
+
+```json
+{
+    "kind": "usage_limit",
+    "message": "Claude usage limit reached. It resets in about 2 hours.",
+    "provider": { "id": "claude", "type": "claude", "vendorName": "Claude", "label": "claude" },
+    "resetsAt": 1755407200000,
+    "fallbackProviders": [
+        {
+            "providerId": "claude_work",
+            "providerLabel": "claude_work",
+            "modelId": "anthropic/opus-5-5",
+            "usedPercent": 38,
+            "usageWindow": "weekly",
+            "group": "same_model"
+        }
+    ]
+}
+```
+
+Every variant carries:
+
+- `kind` — a nonempty string of at most 64 characters. The set grows; clients treat an unknown
+  kind as a generic failure that shows `message` with Retry and the Chief of Staff action.
+- `message` — one user-safe sentence of at most 512 characters, the plain-text fallback for
+  agents, collaboration reports, and clients that do not know the kind. It never contains a clock
+  time; a reset is a relative duration ("in about 2 hours") or omitted. Clients that know the kind
+  write their own text from the typed fields instead.
+- `fallbackProviders` — at most 16 usable alternatives, ranked by the daemon so every client
+  agrees. An entry qualifies when its provider is enabled, serves a compatible model, and its
+  latest usage reading is at most 15 minutes old and not exhausted. Order: the same model on other
+  accounts (`group: "same_model"`), then the same family's default model (`"same_family"`), then
+  other providers' default models (`"other_provider"`); lowest usage first within each group.
+  `group` is extensible. `providerLabel` is the configured entry's display label; clients name the
+  model from the model catalog. `usedPercent` (0–100) and `usageWindow` come from one usage window:
+  the weekly window when the provider reports one, otherwise the window the percentage comes
+  from, named in lowercase ("5h", "monthly"). Both are `null` without a fresh reading. Spent
+  accounts and accounts that need a sign-in are never listed. An empty array means there is
+  nothing to switch to.
+- `resolution` — absent until the person acts on the failure, then `{ "action": "retried",
+"at": <Unix milliseconds> }` or `{ "action": "switched", "at": <Unix milliseconds>,
+"providerId": "...", "modelId": "..." }`. The action set is extensible. The failed message is
+  never removed or collapsed; it records what happened and the continued turn follows it.
+
+Per kind:
+
+| `kind`                                                                 | Additional fields                                                                                                                                                                       |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `signin_missing`                                                       | `provider`, `product` (the native assistant, such as "Claude Code", or `null`), `command` (`claude auth login`, `codex login`, or `grok login` for a default native login, else `null`) |
+| `usage_limit`                                                          | `provider`, `resetsAt`                                                                                                                                                                  |
+| `no_account_available`                                                 | `poolName`, `resetsAt`                                                                                                                                                                  |
+| `rate_limited`, `provider_unavailable`, `network`, `provider_disabled` | `provider`                                                                                                                                                                              |
+| `context_too_long`                                                     | `modelId`                                                                                                                                                                               |
+| `internal`                                                             | `detail`, one sanitized sentence                                                                                                                                                        |
+
+`provider` is `{ id, type, vendorName, label }`: the entry ID, the canonical family, the vendor as
+named in a sentence ("Claude"), and the configured entry's display label. `resetsAt` is the
+absolute Unix-millisecond instant the spent limit resets, or `null` when unknown. Clients format it
+in the viewer's own locale and time zone, include a day or date when it is not today, and never
+show UTC or a raw timestamp.
+
+`signin_missing` covers both a missing credential and a rejected one (an expired `401` after the
+provider's own refresh failed). `context_too_long` appears only after the automatic recovery: on
+a context overflow before any visible output, the daemon resets the model's private context once,
+exactly like an incompatible model switch, records a `service` message with
+`notice: { "kind": "context_reset" }` and the text "Context reset", reports `retrying` with
+`kind: "context_too_long"`, and retries the turn once. Only if that retry overflows too does the
+failure appear. A cancelled run creates no failure.
+
+`failure` is identical for every reader. It contains no credential location, host, or
+configuration key, so the per-caller projection above keeps withholding only the legacy
+`credentialSource`, source-specific steps, and commands.
+
+##### `POST /v0/agents/:agentId/messages/:messageId/retry`
+
+Runs the failed turn again on the route it failed on. `messageId` names a service message
+carrying `failure`. Request: `{ "mutationId": "..." }`, all optional. The daemon records
+`resolution: { "action": "retried" }` on that message and starts a run that answers the same
+request without adding a user message. Response — `202`: `{ "agent": { ... }, "message": { ... },
+"cursor": "..." }`, where `message` is the failed message now carrying its resolution; the run
+arrives through events from `cursor`. A message already resolved returns its current state
+unchanged and starts nothing. `404` when the message does not exist or carries no `failure`;
+`409` when the agent is not idle.
+
+##### `POST /v0/agents/:agentId/messages/:messageId/switch`
+
+Moves the chat to another route and continues the failed turn there. Request:
+`{ "providerId": "claude_work", "modelId": "anthropic/opus-5-5", "mutationId": "..." }`. The pair
+must be one of the failure's `fallbackProviders`; otherwise `400`. The daemon records
+`resolution: { "action": "switched", "providerId", "modelId" }` and starts a run on that route with
+the failed attempt's effort when the model supports it, else the model's default, and the same
+permission mode. A switch to an incompatible model resets the private context with the usual
+handoff. The response, idempotency, `404`, and `409` follow the retry route.
 
 `ask_chief` resolves an active bot whose `systemKey` is `chief_of_staff` on the same daemon.
 It may open a diagnostic draft for the person to review and send; a direct send requires an
