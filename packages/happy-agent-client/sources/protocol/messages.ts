@@ -6,6 +6,7 @@
  */
 
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 
 import {
     cuid2Schema,
@@ -556,13 +557,29 @@ export type KnownMessageFailure =
 /** Narrow on `kind` with {@link isKnownMessageFailure}; anything else is an unknown kind. */
 export type MessageFailure = KnownMessageFailure | Static<typeof otherFailureSchema>;
 
-const KNOWN_FAILURE_KINDS: ReadonlySet<string> = new Set(
-    knownMessageFailureKindSchema.anyOf.map((kind) => kind.const),
-);
+const KNOWN_FAILURE_SCHEMAS: ReadonlyMap<string, TSchema> = new Map<
+    KnownMessageFailureKind,
+    TSchema
+>([
+    ["signin_missing", signinMissingFailureSchema],
+    ["usage_limit", usageLimitFailureSchema],
+    ["no_account_available", noAccountAvailableFailureSchema],
+    ["rate_limited", rateLimitedFailureSchema],
+    ["provider_unavailable", providerUnavailableFailureSchema],
+    ["network", networkFailureSchema],
+    ["provider_disabled", providerDisabledFailureSchema],
+    ["context_too_long", contextTooLongFailureSchema],
+    ["internal", internalFailureSchema],
+]);
 
-/** Whether this failure is one of the kinds this client understands. */
+/**
+ * Whether this failure is one of the kinds this client understands, with every field that kind
+ * requires. A known kind missing its typed fields stays an unknown-shaped failure, so a client
+ * never reads a field such as `resetsAt` that is not there.
+ */
 export function isKnownMessageFailure(failure: MessageFailure): failure is KnownMessageFailure {
-    return KNOWN_FAILURE_KINDS.has(failure.kind);
+    const schema = KNOWN_FAILURE_SCHEMAS.get(failure.kind);
+    return schema !== undefined && Value.Check(schema, failure);
 }
 
 /** Service notices that are not failures; unknown kinds render the message text. */

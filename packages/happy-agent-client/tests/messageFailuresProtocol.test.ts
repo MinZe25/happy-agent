@@ -121,6 +121,26 @@ describe("typed message failures", () => {
     });
 
     it.each([
+        { kind: "usage_limit", message: "Usage reached.", fallbackProviders: [] },
+        { kind: "usage_limit", message: "Usage reached.", fallbackProviders: [], provider: claude },
+        {
+            kind: "signin_missing",
+            message: "Sign in.",
+            fallbackProviders: [],
+            product: null,
+            command: null,
+        },
+        { kind: "context_too_long", message: "Too long.", fallbackProviders: [] },
+    ])("never narrows a malformed $kind to its known type", (failure) => {
+        expect(Value.Check(messageFailureSchema, failure)).toBe(true);
+        expect(isKnownMessageFailure(failure)).toBe(false);
+    });
+
+    it("narrows every well-formed known kind", () => {
+        for (const failure of failures) expect(isKnownMessageFailure(failure)).toBe(true);
+    });
+
+    it.each([
         { action: "retried", at: 2 },
         { action: "switched", at: 2, providerId: "codex", modelId: "openai/gpt-6.1-sol" },
         { action: "dismissed", at: 2 },
