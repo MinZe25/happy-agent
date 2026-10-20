@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
  *
  * pnpm gives a `workspace:*` link and a version pin two separate copies of the same package, and
  * two copies mean two copies of every class: `instanceof` fails across the seam, and an error
- * thrown by one copy is not recognized by the other. Every package therefore has to name the same
- * published version.
+ * thrown by one copy is not recognized by the other. Every package therefore has to resolve to
+ * the same published version, including pnpm's root override for frozen package declarations.
  */
 const PUBLISHED_SDK_PACKAGES = [
     "@slopus/happy-providers",
@@ -20,6 +20,13 @@ const PUBLISHED_SDK_PACKAGES = [
 ] as const;
 
 const PACKAGES_DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "packages");
+
+async function rootOverride(dependency: string): Promise<string | undefined> {
+    const manifest = JSON.parse(
+        await readFile(join(PACKAGES_DIRECTORY, "..", "package.json"), "utf8"),
+    ) as { pnpm?: { overrides?: Record<string, string> } };
+    return manifest.pnpm?.overrides?.[dependency];
+}
 
 async function declaredVersions(dependency: string): Promise<ReadonlyMap<string, string>> {
     const found = new Map<string, string>();
@@ -58,17 +65,27 @@ describe("published SDK dependencies", () => {
                 `${dependency} must come from npm, but ${linked.join(", ")} links the workspace copy.`,
             );
 
+            const override = await rootOverride(dependency);
+            for (const specifier of [
+                ...declared.values(),
+                ...(override === undefined ? [] : [override]),
+            ])
+                assert.match(
+                    publishedVersion(dependency, specifier),
+                    /^\d+\.\d+\.\d+(?:-[\da-z.-]+)?$/iu,
+                    `${dependency} must use an exact published version: ${specifier}.`,
+                );
             const versions = [
                 ...new Set(
                     [...declared.values()].map((specifier) =>
-                        publishedVersion(dependency, specifier),
+                        publishedVersion(dependency, override ?? specifier),
                     ),
                 ),
             ];
             assert.equal(
                 versions.length,
                 1,
-                `${dependency} is pinned to more than one version: ${versions.join(", ")}.`,
+                `${dependency} resolves to more than one version: ${versions.join(", ")}.`,
             );
         });
     }
