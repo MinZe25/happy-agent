@@ -16,10 +16,11 @@ import { claudeShellName } from "../claude/impl/claudeShellName.js";
 export function assembleGlmComputeTools(
     compute: Compute,
     reads: FileReadLog,
+    outputWaitsReleased: AbortSignal,
 ): readonly AnyAgentTool[] {
     const shell = claudeShellName(compute);
     return [
-        claudeBashOutputTool(compute, shell),
+        claudeBashOutputTool(compute, shell, outputWaitsReleased),
         claudeBashTool(compute, shell),
         claudeTextReadTool(compute, reads),
         claudeEditTool(compute, reads),

@@ -48,6 +48,7 @@ export async function startHappyAgentDaemon(
     options: StartHappyAgentDaemonOptions = {},
 ): Promise<HappyAgentDaemon> {
     const { persistPid = false, ...runtimeOptions } = options;
+    const startedAt = performance.now();
     let bound: BoundAgentSocket | BoundAgentHttpServer | undefined;
     let mobileBound: BoundAgentHttpServer | undefined;
     let preparedRuntime: Parameters<typeof bindAgentSocket>[0] | undefined;
@@ -152,6 +153,12 @@ export async function startHappyAgentDaemon(
 
     const startedRuntime = runtime;
     const drainContext = runtime.ctx.named("daemon-local-drain");
+    withLogContext(runtime.ctx.named("daemon-start"), {
+        module: "daemon",
+        pid: process.pid,
+    }).log.info(
+        `daemon:ready pid=${String(process.pid)} durationMs=${String(Math.round(performance.now() - startedAt))}`,
+    );
     return {
         close: closeDaemon,
         closed,

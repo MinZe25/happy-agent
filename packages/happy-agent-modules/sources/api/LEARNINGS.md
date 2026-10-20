@@ -314,3 +314,14 @@ as immutable rather than with the shorter image policy. Range, ETag, `nosniff`, 
 CSP come from the same stored-file sender as artifact files. `media` and `artifact` blocks keep
 their raw data under `omitToolData`, as `agent_spawn` does, so released desktops that render
 these calls from raw data do not regress to an empty block.
+
+## A drain logs what holds it open
+
+A slow reload could not be explained afterwards because only lingering HTTP mutations were ever
+logged. The drain now logs `daemon:drain:start`, then `daemon:drain:waiting` at once and whenever
+its blockers change, or every five seconds otherwise, and finally `daemon:drain:finish` with its
+duration. Blockers are grouped by running tool name, or by agent stage when no tool runs, with the
+age of the oldest of each. A drain source may supply `work`, which the runtime takes from
+Observation's active tools and inferences. Lines carry names, counts, and ages only, never
+arguments, commands, prompts, or output. The report runs in its own `daemon-drain` context
+because it outlives the request or signal that started the drain.

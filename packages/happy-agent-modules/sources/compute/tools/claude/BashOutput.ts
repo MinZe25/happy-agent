@@ -18,8 +18,17 @@ const CLAUDE_BASH_OUTPUT_DESCRIPTION = `Read output from a background shell comm
 
 Only what the command has produced since your last read comes back; you already have everything before that. Set block to false to look without waiting.`;
 
-/** Claude's `BashOutput`: what a background shell command has said since it was last read. */
-export function claudeBashOutputTool(compute: Compute, shellName: "Bash" | "PowerShell" = "Bash") {
+/**
+ * Claude's `BashOutput`: what a background shell command has said since it was last read.
+ *
+ * `outputWaitsReleased` ends a blocking read early with the output it has so far; see
+ * {@link readComputeCommand}.
+ */
+export function claudeBashOutputTool(
+    compute: Compute,
+    shellName: "Bash" | "PowerShell",
+    outputWaitsReleased: AbortSignal,
+) {
     return defineAgentTool({
         name: `${shellName}Output`,
         defer: false,
@@ -77,6 +86,7 @@ export function claudeBashOutputTool(compute: Compute, shellName: "Bash" | "Powe
                 commandId,
                 waitMs:
                     block === false ? 0 : Math.min(MAX_TIMEOUT_MS, timeout ?? DEFAULT_TIMEOUT_MS),
+                released: outputWaitsReleased,
             });
             const produced = [snapshot.stdoutDelta, snapshot.stderrDelta]
                 .filter((part) => part.length > 0)

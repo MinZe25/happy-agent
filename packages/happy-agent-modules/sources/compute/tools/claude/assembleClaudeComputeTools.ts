@@ -22,10 +22,11 @@ import { claudeShellName } from "./impl/claudeShellName.js";
 export function assembleClaudeComputeTools(
     compute: Compute,
     reads: FileReadLog,
+    outputWaitsReleased: AbortSignal,
 ): readonly AnyAgentTool[] {
     const shellName = claudeShellName(compute);
     return [
-        claudeBashOutputTool(compute, shellName),
+        claudeBashOutputTool(compute, shellName, outputWaitsReleased),
         claudeBashTool(compute, shellName),
         claudeReadTool(compute, reads),
         claudeEditTool(compute, reads),

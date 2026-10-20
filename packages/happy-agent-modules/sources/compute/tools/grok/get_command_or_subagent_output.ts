@@ -25,8 +25,16 @@ const taskOutputSchema = Type.Object({
     truncated: Type.Boolean(),
 });
 
-/** Grok's `get_command_or_subagent_output`, scoped here to the background commands this machine runs. */
-export function grokGetCommandOrSubagentOutputTool(compute: Compute) {
+/**
+ * Grok's `get_command_or_subagent_output`, scoped here to the background commands this machine runs.
+ *
+ * `outputWaitsReleased` ends the wait early with the output each command has so far; see
+ * {@link readComputeCommand}.
+ */
+export function grokGetCommandOrSubagentOutputTool(
+    compute: Compute,
+    outputWaitsReleased: AbortSignal,
+) {
     return defineAgentTool({
         name: "get_command_or_subagent_output",
         defer: false,
@@ -84,6 +92,7 @@ Usage notes:
                     outcome = await readComputeCommand(compute, ctx, {
                         commandId,
                         waitMs: Math.max(0, deadline - Date.now()),
+                        released: outputWaitsReleased,
                     });
                 } catch (error) {
                     if (ctx.lifetime?.aborted === true) throw error;

@@ -204,3 +204,20 @@ read the database and credentials. Resolution now asks `RunnersModule.userFor` f
 host compute only when there is no runner, no container, and no user; every other agent machine,
 the permission reviewer's included, is built on the user's local runner. Secrets are refused there
 because they would have to be delivered across the user boundary first.
+
+## A drain answers reads that are only waiting for output
+
+A reload spent four minutes draining because a Claude `BashOutput` with `block: true` and a
+ten-minute timeout was waiting on a benchmark that kept running. Drain lets ordinary tools finish,
+so it waited for that read to time out. `ComputeModule.releaseOutputWaits` is raised when the
+daemon starts draining. Every read through `readComputeCommand`, which serves Claude and GLM
+`BashOutput`, Codex's empty `write_stdin` poll, and Grok's `get_command_or_subagent_output`,
+then stops waiting and returns what the command has said so far as its ordinary, committed result.
+Reads that start later don't wait. The command keeps running, and the cursor advances only past
+output that was returned. Foreground commands, typed input, and every other tool keep their
+behavior, and there is no drain deadline.
+
+The release is an abort signal passed to the shell's wait, so it relies on the shell answering a
+cancelled wait with its snapshot. Host, Docker, and just-bash shells do. A runner's transport
+rejects a cancelled request and drops the delta the runner already consumed, so a read on a runner
+machine can still lose that output. Fixing it belongs in the compute package's runner client.

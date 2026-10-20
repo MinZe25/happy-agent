@@ -17,10 +17,11 @@ import { codexWriteStdinTool } from "./write_stdin.js";
 export function assembleCodexComputeTools(
     compute: Compute,
     reads: FileReadLog,
+    outputWaitsReleased: AbortSignal,
 ): readonly AnyAgentTool[] {
     return [
         codexExecCommandTool(compute),
-        codexWriteStdinTool(compute),
+        codexWriteStdinTool(compute, outputWaitsReleased),
         codexKillSessionTool(compute),
         codexApplyPatchTool(compute, reads),
         codexViewImageTool(compute, reads),

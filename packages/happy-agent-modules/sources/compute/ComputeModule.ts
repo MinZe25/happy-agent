@@ -276,6 +276,8 @@ export class ComputeModule implements AgentModule {
     readonly #reviewerReadLocks: MapAsyncLock<string> = mapAsyncLock<string>();
     /** The one machine the automatic permission reviewer investigates local state through. */
     #reviewer: HostCompute | undefined;
+    /** Raised once, when the daemon starts draining; see {@link releaseOutputWaits}. */
+    readonly #outputWaits = new AbortController();
     /** Compute's one durable store shared by every agent in this collection. */
     #sharedKV: AgentKV | undefined;
     #closed = false;
@@ -707,6 +709,21 @@ export class ComputeModule implements AgentModule {
         return describeComputePathAction(compute, path, operation, options);
     }
 
+    /**
+     * Stop every read that is only waiting for a background command to say more.
+     *
+     * A drain lets each running tool finish, and an output read with a long wait would hold the
+     * reload open until that wait ran out while the command itself kept running. Each such read
+     * now answers at once with what the command has said so far, through its ordinary result, so
+     * nothing it consumed is lost. The command keeps running. Reads that start later answer
+     * without waiting. Commands, typed input, and every other tool are unaffected.
+     */
+    releaseOutputWaits(): void {
+        this.#outputWaits.abort(
+            new Error("Happy Agent is restarting, so this read stopped waiting for more output."),
+        );
+    }
+
     /** Dispose every cached compute when the owning host shuts down. */
     async dispose(ctx: Context): Promise<void> {
         if (this.#disposePromise !== undefined) return await this.#disposePromise;
@@ -750,7 +767,7 @@ export class ComputeModule implements AgentModule {
     async reviewerTools(ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> {
         const compute = await this.#reviewerCompute(ctx);
         const reads = new FileReadLog(scope.kv, this.#reviewerReadLocks, scope.agent.id);
-        return assembleReviewerTools(vendorFor(scope), compute, reads);
+        return assembleReviewerTools(vendorFor(scope), compute, reads, this.#outputWaits.signal);
     }
 
     /** The reviewer's own machine, created on first use and kept for as long as this module runs. */
@@ -839,7 +856,7 @@ export class ComputeModule implements AgentModule {
             const compute = await this.resolve(ctx, scope.agent.id);
             if (compute === undefined) return [];
             const reads = new FileReadLog(scope.kv, this.#readLocks, scope.agent.id);
-            return assembleComputeTools(vendorFor(scope), compute, reads);
+            return assembleComputeTools(vendorFor(scope), compute, reads, this.#outputWaits.signal);
         },
 
         beforeInferenceTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {

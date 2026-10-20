@@ -75,7 +75,10 @@ it("reloads only after the caller exits", async () => {
     await runDetachedAgentDaemonReload(4242);
 
     expect(mocks.waitForExit).toHaveBeenCalledWith(4242, 60_000);
-    expect(mocks.reload).toHaveBeenCalledWith("reload", { log: expect.any(Function) });
+    expect(mocks.reload).toHaveBeenCalledWith("reload", {
+        diagnostics: expect.any(Function),
+        log: expect.any(Function),
+    });
     expect(mocks.waitForExit.mock.invocationCallOrder[0]).toBeLessThan(
         mocks.reload.mock.invocationCallOrder[0]!,
     );

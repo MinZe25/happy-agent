@@ -61,3 +61,17 @@ Verify authenticated profile and project requests and the actual Desktop view,
 then observe real session work. A health response or a short transport smoke
 alone cannot establish recovery from an intermittent native crash. Preserve the
 live database and reproduce against an isolated copy whenever possible.
+
+## Reload reports its own phases in reload.json
+
+Desktop could show progress only for updates it ran itself, so a CLI or agent reload looked like a
+dead connection. The daemon can't report the gap between stopping and starting. `happy-agent reload`,
+including the `--detach` worker, therefore writes `<happyHome>/agent/reload.json` itself. The
+file is mode 0600, written to a temporary file and renamed, and carries an operation ID, the
+start time, the phase (draining, stopping, starting, done, failed), the daemon's drain report
+during draining, and where and why a reload failed. It is rewritten at least every two seconds
+while running, so a reader treats a running phase as abandoned once `pid` has exited or
+`updatedAt` stops moving. It is never deleted. A refused reload, such as one from inside the
+daemon, writes nothing. Writing the file is optional reporting that never fails a reload. The
+detached worker's `reload.log` gets timed `reload:phase` lines, and a terminal reload leaves
+them out. The daemon also logs `daemon:ready` with its startup time.

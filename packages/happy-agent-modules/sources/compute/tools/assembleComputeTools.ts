@@ -20,17 +20,18 @@ export function assembleComputeTools(
     vendor: ComputeToolVendor,
     compute: Compute,
     reads: FileReadLog,
+    outputWaitsReleased: AbortSignal,
 ): readonly AnyAgentTool[] {
     switch (vendor) {
         case "claude":
-            return assembleClaudeComputeTools(compute, reads);
+            return assembleClaudeComputeTools(compute, reads, outputWaitsReleased);
         case "codex":
-            return assembleCodexComputeTools(compute, reads);
+            return assembleCodexComputeTools(compute, reads, outputWaitsReleased);
         case "grok":
-            return assembleGrokComputeTools(compute, reads);
+            return assembleGrokComputeTools(compute, reads, outputWaitsReleased);
         case "kimi":
             return assembleKimiComputeTools(compute, reads);
         case "glm":
-            return assembleGlmComputeTools(compute, reads);
+            return assembleGlmComputeTools(compute, reads, outputWaitsReleased);
     }
 }

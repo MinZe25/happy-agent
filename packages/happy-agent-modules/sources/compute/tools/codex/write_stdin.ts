@@ -19,8 +19,13 @@ const MAXIMUM_WRITE_WAIT_MS = 30_000;
 const DEFAULT_POLL_WAIT_MS = 5_000;
 const MAXIMUM_POLL_WAIT_MS = 300_000;
 
-/** Codex's own tool for typing into a running session, and for simply waiting on one. */
-export function codexWriteStdinTool(compute: Compute) {
+/**
+ * Codex's own tool for typing into a running session, and for simply waiting on one.
+ *
+ * `outputWaitsReleased` ends an empty poll's wait early with the output it has so far; see
+ * {@link readComputeCommand}. Typed input keeps its own short wait.
+ */
+export function codexWriteStdinTool(compute: Compute, outputWaitsReleased: AbortSignal) {
     return defineAgentTool({
         name: "write_stdin",
         defer: false,
@@ -85,7 +90,11 @@ export function codexWriteStdinTool(compute: Compute) {
                       input: chars,
                       waitMs,
                   })
-                : await readComputeCommand(compute, ctx, { commandId, waitMs });
+                : await readComputeCommand(compute, ctx, {
+                      commandId,
+                      waitMs,
+                      released: outputWaitsReleased,
+                  });
             return createUnifiedExecOutput(snapshot, wallTimeSeconds, max_output_tokens);
         },
         isError: (result) => result.exit_code !== undefined && result.exit_code !== 0,

@@ -77,5 +77,5 @@ export async function runDetachedAgentDaemonReload(callerPid: number): Promise<v
             `Process ${String(callerPid)} did not exit; the daemon was left running.`,
         );
     }
-    await runAgentDaemonCommand("reload", { log });
+    await runAgentDaemonCommand("reload", { diagnostics: log, log });
 }

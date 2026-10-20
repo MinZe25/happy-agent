@@ -1,4 +1,4 @@
-export { ObservationModule } from "./ObservationModule.js";
+export { ObservationModule, type ObservedWork } from "./ObservationModule.js";
 export {
     DEFAULT_OBSERVATION_SETTINGS,
     MAX_OBSERVATION_FILE_BYTES,

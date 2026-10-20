@@ -7,7 +7,9 @@ import { isDaemonProcessRunning, killDaemonFromPidFile, readDaemonPid } from "./
 import { readDaemonTokenIfPresent } from "./daemonToken.js";
 import { drainDaemonFromSignal } from "./drainDaemonFromSignal.js";
 import { ensureAgentDaemon } from "./ensureAgentDaemon.js";
+import { getDaemonIdentity } from "./getDaemonIdentity.js";
 import { getHappyDaemonPaths } from "./getHappyDaemonPaths.js";
+import { startReloadStatus } from "./reloadStatus.js";
 import {
     drainLocalProtocolServer,
     formatDrainProgress,
@@ -31,6 +33,11 @@ export interface RunAgentDaemonCommandOptions {
     /** The daemon entrypoint handed to {@link ensureAgentDaemon} when a daemon must be spawned. */
     entrypoint?: string;
     log?: (line: string) => void;
+    /**
+     * Where timed reload phase lines go. They are diagnostics for a log file, not messages for a
+     * person, so a reload run in a terminal leaves them out.
+     */
+    diagnostics?: (line: string) => void;
     /** Test-only: run a started daemon inside the calling process instead of spawning one. */
     runInProcess?: boolean;
 }
@@ -85,14 +92,36 @@ export async function runAgentDaemonCommand(
     if (command === "reload") {
         if (connection !== undefined) {
             await assertReloadCallerOutsideDaemon(await readDaemonPid(paths.pidPath));
-            await stopLocalProtocolServer(connection.client, paths, { onDrainProgress: log });
         } else {
             await assertNoUnresponsiveDaemon(paths.pidPath);
         }
-        const reloaded = await ensureAgentDaemon({
-            confirmRestart: async () => true,
-            ...ensureOptions,
+        // Clients that did not start this reload read its phases from reload.json.
+        const status = startReloadStatus(paths, {
+            firstPhase: connection === undefined ? "starting" : "draining",
+            log: options.diagnostics ?? (() => undefined),
+            version: getDaemonIdentity().version,
         });
+        let reloaded: Awaited<ReturnType<typeof ensureAgentDaemon>>;
+        try {
+            if (connection !== undefined) {
+                await stopLocalProtocolServer(connection.client, paths, {
+                    onDrainProgress: log,
+                    onDrainWaiting: (waiting) => status.draining(waiting),
+                    onStopping: () => status.phase("stopping"),
+                });
+            }
+            status.phase("starting");
+            reloaded = await ensureAgentDaemon({
+                confirmRestart: async () => true,
+                ...ensureOptions,
+            });
+            status.done();
+        } catch (error) {
+            status.failed(error);
+            throw error;
+        } finally {
+            await status.close();
+        }
         log(`Daemon is running at ${reloaded.paths.socketPath}`);
         log(`Daemon PID: ${String((await readDaemonPid(reloaded.paths.pidPath)) ?? "unknown")}`);
         log(`Daemon log: ${reloaded.paths.logPath}`);

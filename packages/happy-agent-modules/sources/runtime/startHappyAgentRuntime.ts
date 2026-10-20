@@ -868,7 +868,12 @@ export async function startHappyAgentRuntime(
         system = agentSystem;
         let mainDraining: Promise<void> | undefined;
         const drainMain = (): Promise<void> => {
-            mainDraining ??= agentSystem.drain();
+            if (mainDraining === undefined) {
+                // A read only waiting on a background command would otherwise hold the drain open
+                // for as long as it asked to wait; it answers now with what it has.
+                compute.computeModule.releaseOutputWaits();
+                mainDraining = agentSystem.drain();
+            }
             return mainDraining;
         };
         let draining: Promise<void> | undefined;
@@ -884,6 +889,7 @@ export async function startHappyAgentRuntime(
         apiModule.onDrain("agent-system", {
             start: drainMain,
             progress: () => agentSystem.drainProgress(),
+            work: () => observation.activeWork(),
         });
         apiModule.onDrain("auto-agent-system", {
             start: drain,

@@ -15,6 +15,9 @@ import { codexWriteStdinTool } from "./write_stdin.js";
  * tool. Every review runs `read_only`, and the compute sandbox is the real boundary for redirection
  * and subprocesses. The array is written out in Codex's own order, not filtered from a larger one.
  */
-export function assembleCodexReviewerTools(compute: Compute): readonly AnyAgentTool[] {
-    return [codexExecCommandTool(compute), codexWriteStdinTool(compute)];
+export function assembleCodexReviewerTools(
+    compute: Compute,
+    outputWaitsReleased: AbortSignal,
+): readonly AnyAgentTool[] {
+    return [codexExecCommandTool(compute), codexWriteStdinTool(compute, outputWaitsReleased)];
 }

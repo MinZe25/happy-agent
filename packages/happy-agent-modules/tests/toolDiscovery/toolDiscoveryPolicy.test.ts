@@ -63,8 +63,8 @@ describe("tool discovery policy", () => {
             const compute = {} as never;
             const reads = {} as never;
             const surfaces = [
-                assembleComputeTools(vendor, compute, reads),
-                assembleReviewerTools(vendor, compute, reads),
+                assembleComputeTools(vendor, compute, reads, new AbortController().signal),
+                assembleReviewerTools(vendor, compute, reads, new AbortController().signal),
             ];
 
             for (const tools of surfaces) {

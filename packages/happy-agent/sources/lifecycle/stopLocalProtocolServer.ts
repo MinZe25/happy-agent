@@ -19,6 +19,10 @@ const DRAIN_MUTATION_TIMEOUT_MS = 30_000;
 
 export interface StopLocalProtocolServerOptions {
     readonly onDrainProgress?: (message: string) => void;
+    /** Every drain report the daemon gives, as it changes. */
+    readonly onDrainWaiting?: (waiting: readonly DrainWaitingFor[]) => void;
+    /** The drain is over and the daemon is being asked to exit. */
+    readonly onStopping?: () => void;
 }
 
 export async function stopLocalProtocolServer(
@@ -28,7 +32,8 @@ export async function stopLocalProtocolServer(
 ): Promise<void> {
     const socketPath = typeof paths === "string" ? paths : paths.socketPath;
     let pid = typeof paths === "string" ? undefined : await readDaemonPid(paths.pidPath);
-    await drainLocalProtocolServer(client, options.onDrainProgress, true);
+    await drainLocalProtocolServer(client, options.onDrainProgress, true, options.onDrainWaiting);
+    options.onStopping?.();
     try {
         pid = (await client.shutdown()).pid;
     } catch (error) {
@@ -55,6 +60,7 @@ export async function drainLocalProtocolServer(
     client: HappyAgentClient,
     report: ((message: string) => void) | undefined,
     allowShutdownFallback = false,
+    onWaiting?: (waiting: readonly DrainWaitingFor[]) => void,
 ): Promise<void> {
     try {
         await client.drain();
@@ -76,6 +82,7 @@ export async function drainLocalProtocolServer(
         const changed = current !== previous;
         if (changed) {
             report?.(formatDrainProgress(waiting));
+            onWaiting?.(waiting);
             previous = current;
         }
         if (waiting.length === 0) return;

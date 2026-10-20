@@ -336,6 +336,7 @@ import {
 } from "./ApiSchemas.js";
 import { WorkspaceProxy, type WorkspaceProxyTcpHop } from "./WorkspaceProxy.js";
 import { requestedAgentMode } from "./requestedAgentMode.js";
+import { describeDrainBlockers, type DrainBlocker } from "./impl/describeDrainBlockers.js";
 import {
     projectEventDiagnostics,
     projectMessageDiagnostics,
@@ -371,6 +372,9 @@ const MAX_ANNOUNCED_AGENT_CREATIONS = 10_000;
 const MAX_ANNOUNCED_TERMINAL_RUNS = 10_000;
 const MAX_ANNOUNCED_EXECUTION_CONFIGURATIONS = 512 * 64;
 const DRAIN_MUTATION_LOG_INTERVAL_MS = 5_000;
+/** How often a drain looks at what still holds it open; it logs only on change or every 5s. */
+const DRAIN_REPORT_TICK_MS = 1_000;
+const DRAIN_REPORT_INTERVAL_MS = 5_000;
 /** What `artifact.updated` and `artifact.deleted` always carry in `changes`. */
 const ARTIFACT_UPDATED_FIELDS = [
     "latestVersion",
@@ -483,11 +487,21 @@ export interface ApiDrainProgress {
     readonly truncated?: true;
 }
 
+/** Work one agent is doing right now, named for the drain log and never shown to clients. */
+export interface ApiDrainWork {
+    readonly agentId: string;
+    /** A running tool's name, or the agent's stage when no tool is running. */
+    readonly category: string;
+    readonly startedAt: number;
+}
+
 export interface ApiDrainSource {
     /** Publish the component's sticky drain and resolve when it reaches its safe edge. */
     readonly start: () => Promise<void>;
     /** Read the component's current structured progress without waiting. */
     readonly progress: () => ApiDrainProgress;
+    /** What the agents in `progress` are doing, so the drain log can say what it waits for. */
+    readonly work?: () => readonly ApiDrainWork[];
 }
 
 interface ApiRunningDrain {
@@ -626,6 +640,15 @@ export class ApiModule implements AgentModule {
     #ready = false;
     #draining = false;
     #drainMutationsLoggedAt = 0;
+    /** The drain's own log of what holds it open, from its start until it is drained. */
+    #drainReport:
+        | {
+              readonly startedAt: number;
+              readonly timer: NodeJS.Timeout;
+              key: string | undefined;
+              loggedAt: number;
+          }
+        | undefined;
     #closed = false;
     #token: string | undefined;
     #preparePromise: Promise<void> | undefined;
@@ -810,6 +833,8 @@ export class ApiModule implements AgentModule {
         this.#ready = false;
         for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
         this.#shutdownListeners.clear();
+        if (this.#drainReport !== undefined) clearInterval(this.#drainReport.timer);
+        this.#drainReport = undefined;
         this.#drainSources.clear();
         this.#runningDrains.clear();
         this.#apiMutations.clear();
@@ -8360,13 +8385,21 @@ export class ApiModule implements AgentModule {
     }
 
     /** Publish sticky draining before starting every registered component. */
-    #beginDrain(ctx: Context): void {
+    #beginDrain(callerCtx: Context): void {
         if (this.#draining) return;
         this.#draining = true;
+        // The drain outlives the request or signal that started it.
+        const ctx = detach(callerCtx).named("daemon-drain");
         this.#journal.append("daemon.draining", {
             daemonId: this.#daemonId,
             draining: true,
         });
+        ctx.log.info(
+            `daemon:drain:start pid=${String(process.pid)} mutations=${String(this.#apiMutations.size)}`,
+        );
+        const timer = setInterval(() => this.#reportDrain(ctx), DRAIN_REPORT_TICK_MS);
+        timer.unref();
+        this.#drainReport = { key: undefined, loggedAt: 0, startedAt: Date.now(), timer };
         for (const [name, source] of this.#drainSources) {
             const running: ApiRunningDrain = { finished: false };
             this.#runningDrains.set(name, running);
@@ -8385,6 +8418,8 @@ export class ApiModule implements AgentModule {
                 },
             );
         }
+        // What was running when the drain began, before any of it has had a chance to finish.
+        this.#reportDrain(ctx);
     }
 
     /** Build bounded, stable progress without allowing optional reporting to break health. */
@@ -8430,6 +8465,67 @@ export class ApiModule implements AgentModule {
             });
         }
         return waiting;
+    }
+
+    /**
+     * Log what holds the drain open, grouped by tool or stage with the age of the oldest of each,
+     * whenever that changes and otherwise every five seconds; then log how long the drain took.
+     * A slow reload is read from these lines afterwards, so they name work and never its content.
+     */
+    #reportDrain(ctx: Context): void {
+        const report = this.#drainReport;
+        if (report === undefined) return;
+        const now = Date.now();
+        const waiting = this.#drainWaitingFor(ctx);
+        if (waiting.length === 0) {
+            clearInterval(report.timer);
+            this.#drainReport = undefined;
+            ctx.log.info(
+                `daemon:drain:finish pid=${String(process.pid)} durationMs=${String(now - report.startedAt)}`,
+            );
+            return;
+        }
+        const blockers: DrainBlocker[] = [];
+        for (const row of waiting) {
+            if (row.name === "api-mutations") {
+                for (const mutation of this.#apiMutations.values()) {
+                    blockers.push({ category: "api-mutation", startedAt: mutation.startedAt });
+                }
+                continue;
+            }
+            if (row.agents === undefined) {
+                for (let index = 0; index < row.count; index += 1) {
+                    blockers.push({ category: row.name, startedAt: undefined });
+                }
+                continue;
+            }
+            let work: readonly ApiDrainWork[] = [];
+            try {
+                work = this.#drainSources.get(row.name)?.work?.() ?? [];
+            } catch {
+                // The log is optional; the drain itself does not depend on it.
+            }
+            for (const agent of row.agents) {
+                const own = work.filter((entry) => entry.agentId === agent.id);
+                if (own.length === 0)
+                    blockers.push({ category: agent.stage, startedAt: undefined });
+                for (const entry of own) {
+                    blockers.push({ category: entry.category, startedAt: entry.startedAt });
+                }
+            }
+            // Agents beyond the reported list, or a source that has not settled yet.
+            for (let index = row.agents.length; index < row.count; index += 1) {
+                blockers.push({ category: row.name, startedAt: undefined });
+            }
+        }
+        const summary = describeDrainBlockers(blockers, now);
+        if (summary.key === report.key && now - report.loggedAt < DRAIN_REPORT_INTERVAL_MS) return;
+        report.key = summary.key;
+        report.loggedAt = now;
+        const counts = waiting.map((row) => `${row.name}=${String(row.count)}`).join(" ");
+        ctx.log.info(
+            `daemon:drain:waiting pid=${String(process.pid)} elapsedMs=${String(now - report.startedAt)} ${counts} blockers=${summary.text}`,
+        );
     }
 
     /**

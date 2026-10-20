@@ -20,6 +20,7 @@ export {
     type ApiDrainAgentProgress,
     type ApiDrainProgress,
     type ApiDrainSource,
+    type ApiDrainWork,
     type ApiSocketRejection,
     type PreparedBridgeSocket,
     type PreparedTerminalSocket,

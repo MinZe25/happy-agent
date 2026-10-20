@@ -18,7 +18,11 @@ async function toolsFor(platform: string, kind: "host" | "docker" | "emulated") 
     Object.defineProperty(compute, "kind", { value: kind });
     // Alternate computes go directly through assembly; withProvider intentionally accepts hosts only.
     if (kind !== "host") {
-        const tools = assembleClaudeComputeTools(compute, undefined as never);
+        const tools = assembleClaudeComputeTools(
+            compute,
+            undefined as never,
+            new AbortController().signal,
+        );
         return {
             compute,
             tools,

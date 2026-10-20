@@ -154,6 +154,25 @@ export class ObservationModule implements AgentModule {
         await this.#historyDump?.record(agentId, messages);
     };
 
+    /**
+     * What every agent is doing right now: each running tool by name, and each inference or
+     * compaction, with when it started. Names only, so a caller may log this without exposing
+     * arguments, prompts, or output.
+     */
+    activeWork(): readonly ObservedWork[] {
+        const work: ObservedWork[] = [];
+        for (const [agentId, inference] of this.#activeInferences) {
+            work.push({ agentId, category: "inference", startedAt: inference.startedAt });
+        }
+        for (const [agentId, compaction] of this.#activeCompactions) {
+            work.push({ agentId, category: "compaction", startedAt: compaction.startedAt });
+        }
+        for (const tool of this.#activeTools.values()) {
+            work.push({ agentId: tool.agentId, category: tool.name, startedAt: tool.startedAt });
+        }
+        return work;
+    }
+
     /** Resolve once everything observed so far has reached its file. */
     async flush(): Promise<void> {
         await Promise.all([this.#historyDump?.flush(), this.#logWriter?.flush()]);
@@ -325,6 +344,8 @@ export class ObservationModule implements AgentModule {
             call: AgentBaseToolCall,
         ): undefined => {
             this.#activeTools.set(toolKey(scope.agent.id, call.callId), {
+                agentId: scope.agent.id,
+                name: call.tool.name,
                 startedAt: Date.now(),
             });
             withLogContext(ctx, {
@@ -427,6 +448,16 @@ interface ActiveInference {
 }
 
 interface ActiveTool {
+    readonly agentId: string;
+    readonly name: string;
+    readonly startedAt: number;
+}
+
+/** One piece of an agent's current work, named without its content. */
+export interface ObservedWork {
+    readonly agentId: string;
+    /** The running tool's name, `inference`, or `compaction`. */
+    readonly category: string;
     readonly startedAt: number;
 }
 

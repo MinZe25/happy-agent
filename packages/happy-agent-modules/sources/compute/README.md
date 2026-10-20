@@ -139,7 +139,9 @@ vendor-shaped skin over one shared helper in `impl/`, so behavior cannot drift b
 - `writeComputeTextFile`, `editComputeText`, `deleteComputeFile`, `moveComputeFile` — the write
   path, each checking remembered freshness unless a caller proves current contents another way.
 - `startComputeCommand`, `readComputeCommand`, `writeComputeCommandInput`, `stopComputeCommand` —
-  the command lifecycle, including the background grace period and delta-only reads.
+  the command lifecycle, including the background grace period and delta-only reads. An output
+  read also takes the module's release signal, raised by `releaseOutputWaits` when the daemon
+  drains, so a waiting read answers at once with what it has.
 - `shouldReviewComputePath`, `canonicalComputePath`, `boundOutputText` — permission and bounding
   mechanics. `FileReadLog` is shared beyond this module and lives in the package's `sources/impl/`.
 

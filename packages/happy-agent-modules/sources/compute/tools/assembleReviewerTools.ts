@@ -24,12 +24,13 @@ export function assembleReviewerTools(
     vendor: ComputeToolVendor,
     compute: Compute,
     reads: FileReadLog,
+    outputWaitsReleased: AbortSignal,
 ): readonly AnyAgentTool[] {
     switch (vendor) {
         case "claude":
             return assembleClaudeReviewerTools(compute, reads);
         case "codex":
-            return assembleCodexReviewerTools(compute);
+            return assembleCodexReviewerTools(compute, outputWaitsReleased);
         case "grok":
             return assembleGrokReviewerTools(compute, reads);
         case "kimi":
