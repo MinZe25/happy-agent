@@ -92,14 +92,29 @@ const mcpJsonLeafSchema = Type.Union([
 function jsonValueAtDepth(depth: number): TSchema {
     if (depth <= 0) return mcpJsonLeafSchema;
     const child = jsonValueAtDepth(depth - 1);
-    return Type.Union([
+    const schema = Type.Union([
         mcpJsonLeafSchema,
         Type.Array(child, { maxItems: MAX_MCP_JSON_ARRAY_ITEMS }),
         Type.Record(Type.String({ maxLength: MAX_MCP_JSON_KEY_LENGTH }), child, {
             maxProperties: MAX_MCP_JSON_OBJECT_PROPERTIES,
         }),
     ]);
+    // Arrays and records share one child per level, so serializing the levels expands that
+    // sharing: one MCP tool result schema was 12 million characters of JSON. Anything that
+    // stringifies a tool, such as a provider keying its live query on the tools, paid that on
+    // every turn and kept the string. Validation still walks the bounded levels in memory; the
+    // serialized form describes the collections without repeating their members.
+    Object.defineProperty(schema, "toJSON", { value: () => serializedMcpJsonValueSchema });
+    return schema;
 }
+
+const serializedMcpJsonValueSchema = {
+    anyOf: [
+        mcpJsonLeafSchema,
+        { type: "array", maxItems: MAX_MCP_JSON_ARRAY_ITEMS },
+        { type: "object", maxProperties: MAX_MCP_JSON_OBJECT_PROPERTIES },
+    ],
+};
 
 /**
  * A finite JSON value.  MCP arguments and structured output are untrusted JSON, so a recursive
