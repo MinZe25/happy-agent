@@ -9380,7 +9380,7 @@ credentials to the page. It does not expose the artifact data bridge or rewrite 
 access and the page's scripts remain a potential vulnerability, as with any live web page.
 
 New clients prefer `live` to the file entry. For compatibility, every live version also holds
-one daemon-generated inert `index.html`, containing the escaped title and a notice to open the
+one daemon-generated inert `index.html`, containing a fixed, title-independent notice to open the
 artifact in a newer Happy client. It contains no redirect, iframe, script, or active link to the
 live URL. `entry`, `files`, `fileCount`, and `size` describe this real fallback file under their
 existing rules. The fallback is not the live page's contents, and a pinned version fixes the
@@ -9907,8 +9907,8 @@ change is being made; it becomes the new version's `source` and the artifact's `
 `major` makes the new version that major version, as "Versions" describes; without it the new
 version is the next minor one.
 
-For live-URL artifacts, metadata-only changes preserve `live` and regenerate the inert entry
-when the title changes. `files`, `remove`, and `replaceAll` are refused even when empty or false;
+For live-URL artifacts, metadata-only changes preserve `live` and keep the existing inert entry,
+including when the title changes. `files`, `remove`, and `replaceAll` are refused even when empty or false;
 the live URL can only be changed through the agent tools.
 
 Response — `200`: `{ "artifact": { ... } }` with the new `latestVersion`, and an `artifact.updated`
