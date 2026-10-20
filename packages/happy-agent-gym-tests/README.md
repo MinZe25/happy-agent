@@ -43,6 +43,11 @@ Run one chaos seed:
 API_CHAOS_SEED=S007 pnpm --filter @slopus/happy-agent-gym-tests exec vitest run tests/happy_api_chaos_sync.test.ts
 ```
 
+`cli_reload_reports_its_phases_and_releases_a_waiting_read.test.ts` runs the real CLI and daemon
+as separate processes in a throwaway Happy home, with inference served over the daemon's gym HTTP
+seam. It uses `HAPPY_AGENT_RELOAD_GYM_BINARY` when set, else the binary from
+`pnpm --filter @slopus/happy-agent build:bun` when present, else the built CLI under Node.
+
 Run every scenario with `pnpm test:gym`. The exhaustive API gate, `pnpm test:gym:api`, also
 verifies the minimum scenario count and every chaos seed; it takes a long time and runs only when a
 human asks for it or a release or API-contract milestone closes.
