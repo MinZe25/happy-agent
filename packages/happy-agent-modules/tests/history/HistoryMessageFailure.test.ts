@@ -36,6 +36,8 @@ const build = (fields: Partial<Parameters<typeof messageFailure>[0]>) =>
         attempt: undefined,
         unavailable: undefined,
         provider,
+        disabled: false,
+        spentPool: undefined,
         fallbackProviders: [fallback],
         now,
         ...fields,
@@ -141,6 +143,50 @@ describe("a failed turn's typed failure", () => {
             },
         });
         expect(failure).toMatchObject({ kind: "signin_missing", command: "grok login" });
+    });
+
+    it("says a turned-off route needs turning on before any attempt", () => {
+        const failure = build({ disabled: true });
+        expect(failure).toMatchObject({
+            kind: "provider_disabled",
+            message: "claude is turned off. Turn it on in settings, then retry.",
+            provider,
+        });
+        expect(isKnownMessageFailure(failure)).toBe(true);
+        // An attempt that reached the provider reports what the provider said instead.
+        expect(build({ disabled: true, attempt: attempt({ errorCode: "rate_limit" }) }).kind).toBe(
+            "rate_limited",
+        );
+    });
+
+    it("names a spent pool and when its first account resets", () => {
+        const resetsAt = now + 3 * 60 * 60_000;
+        const failure = build({
+            spentPool: { name: "claude-pool", resetsAt },
+            attempt: attempt({ errorCode: "out_of_tokens", resetsAt: now + 9 * 60 * 60_000 }),
+        });
+        expect(failure).toMatchObject({
+            kind: "no_account_available",
+            message: "No claude-pool account is available. The first one resets in about 3 hours.",
+            poolName: "claude-pool",
+            resetsAt,
+        });
+        expect(isKnownMessageFailure(failure)).toBe(true);
+        expect(build({ spentPool: { name: "claude-pool", resetsAt: null } })).toMatchObject({
+            kind: "no_account_available",
+            message: "No claude-pool account is available.",
+            resetsAt: null,
+        });
+    });
+
+    it("keeps a sign-in or overload ahead of a spent pool", () => {
+        const spentPool = { name: "claude-pool", resetsAt: null };
+        expect(
+            build({ spentPool, attempt: attempt({ errorCode: "authentication_failed" }) }).kind,
+        ).toBe("signin_missing");
+        expect(
+            build({ spentPool, attempt: attempt({ errorCode: "server_overloaded" }) }).kind,
+        ).toBe("provider_unavailable");
     });
 
     it("keeps only a bounded first line of an unclassified error", () => {

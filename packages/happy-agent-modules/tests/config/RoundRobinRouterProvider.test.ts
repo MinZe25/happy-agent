@@ -83,6 +83,7 @@ describe("RoundRobinRouterProvider", () => {
         };
         const provider = routedProvider(accounts, 0);
         const session = await provider.session("agent-a", sessionOptions());
+        expect(provider.spent("agent-a")).toBe(false);
 
         const first = await eventsOf(session.run(createRootContext(), request));
         const second = await eventsOf(session.run(createRootContext(), request));
@@ -94,6 +95,40 @@ describe("RoundRobinRouterProvider", () => {
         expect(second).toEqual([first.at(-1)]);
         expect(accounts.first.runs).toBe(1);
         expect(accounts.second.runs).toBe(1);
+        // The spent pool is this agent's alone, and a person's next request reopens it.
+        expect(provider.spent("agent-a")).toBe(true);
+        expect(provider.spent("agent-b")).toBe(false);
+        provider.acceptUserMessage("agent-a", "retry");
+        expect(provider.spent("agent-a")).toBe(false);
+    });
+
+    it("does not call a pool that ended on a rejected sign-in spent", async () => {
+        const accounts = {
+            first: scriptedAccount([outOfTokens("quota spent")]),
+            second: scriptedAccount([authenticationFailure("signed out")]),
+        };
+        const provider = routedProvider(accounts, 0);
+        const session = await provider.session("agent-a", sessionOptions());
+        try {
+            const events = await eventsOf(session.run(createRootContext(), request));
+            expect(events.at(-1)).toMatchObject({ providerError: { type: "authentication" } });
+            expect(provider.spent("agent-a")).toBe(false);
+        } finally {
+            await session.destroy();
+        }
+    });
+
+    it("counts a pool whose every account is turned off as spent", () => {
+        const enabled = new Set(["second"]);
+        const provider = new RoundRobinRouterProvider({
+            candidates: ["first", "second"].map((providerId) => ({ providerId })),
+            model: request.model!,
+            isEnabled: (id) => enabled.has(id),
+            resolve: async () => null,
+        });
+        expect(provider.spent("agent-a")).toBe(false);
+        enabled.clear();
+        expect(provider.spent("agent-a")).toBe(true);
     });
 
     it("retains a healthy sticky account when a new human message clears old exclusions", async () => {

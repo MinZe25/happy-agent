@@ -10,8 +10,9 @@ const MAX_TEXT = 512;
 
 /**
  * The typed failure a failed turn's service message carries. The kind comes only from typed
- * provider classification — the last actual attempt, or the missing credential configuration
- * raised — never from the displayed error text, which survives only as `internal`'s detail.
+ * provider classification — the last actual attempt, the missing credential configuration raised,
+ * or the route's own state: turned off, or a smart route with no account left — never from the
+ * displayed error text, which survives only as `internal`'s detail.
  *
  * `message` is the plain-text fallback for agents, collaboration reports, and clients that do not
  * know the kind. It never contains a clock time: a reset is a relative duration, because the
@@ -22,6 +23,10 @@ export function messageFailure(input: {
     readonly attempt: ProviderExecutionAttempt | undefined;
     readonly unavailable: UnavailableCredentialFailure | undefined;
     readonly provider: MessageFailureProvider;
+    /** The chat's own route is turned off. */
+    readonly disabled: boolean;
+    /** The chat's smart route ran out of usable accounts, and when its first one resets. */
+    readonly spentPool: { readonly name: string; readonly resetsAt: number | null } | undefined;
     readonly fallbackProviders: readonly MessageFailureFallback[];
     readonly now: number;
 }): MessageFailure {
@@ -40,6 +45,31 @@ export function messageFailure(input: {
             provider,
             product: signIn?.product ?? null,
             command,
+        };
+    }
+    if (input.disabled && attempt?.errorCode === undefined) {
+        return {
+            ...base,
+            kind: "provider_disabled",
+            message: `${provider.label} is turned off. Turn it on in settings, then retry.`,
+            provider,
+        };
+    }
+    const pool = input.spentPool;
+    if (
+        pool !== undefined &&
+        (attempt?.errorCode === undefined || attempt.errorCode === "out_of_tokens")
+    ) {
+        return {
+            ...base,
+            kind: "no_account_available",
+            message: `No ${pool.name} account is available.${
+                pool.resetsAt === null
+                    ? ""
+                    : ` The first one resets ${relativeTime(pool.resetsAt, input.now)}.`
+            }`,
+            poolName: pool.name,
+            resetsAt: pool.resetsAt,
         };
     }
     switch (attempt?.errorCode) {

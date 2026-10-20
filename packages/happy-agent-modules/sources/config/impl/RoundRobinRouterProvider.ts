@@ -93,6 +93,17 @@ export class RoundRobinRouterProvider extends BaseProvider {
         delete state.terminal;
     }
 
+    /**
+     * Whether this agent's pool has no account to offer because usage ran out: the last account
+     * it tried was spent, or every account is turned off. A pool that ended on a rejected sign-in
+     * is not spent; the person has to sign in, not wait.
+     */
+    spent(id: string): boolean {
+        const terminal = this.#agents.get(id)?.terminal;
+        if (terminal !== undefined) return terminal.providerError?.type === "out_of_tokens";
+        return this.#candidates.every((candidate) => !this.#isEnabled(candidate.providerId));
+    }
+
     #stateFor(id: string): AgentRouteState {
         let state = this.#agents.get(id);
         if (state === undefined) {

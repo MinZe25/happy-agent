@@ -226,3 +226,14 @@ ProviderUsage: accounts with a reading at most fifteen minutes old that is not e
 same model, same family, other provider, lowest usage first. Retry and Switch record `resolution`
 on the failed row in the transaction that queues a hidden notice, so the history line survives a
 reload and no user message is added; a resolved failure starts nothing again.
+
+The route's own state also decides the kind. A chat whose provider is turned off, and which never
+reached a provider, gets `provider_disabled`. A smart route gets `no_account_available` only when
+it is spent: its last account ran out of usage, or every account is turned off. A pool that ended on
+a rejected sign-in is not spent, because the person has to sign in rather than wait; an early
+version called every failed-over pool spent and hid sign-in problems. Its `resetsAt` is the
+earliest reset among the spent accounts. A retry reopens the smart route the way a sent message
+does, so its accounts are tried again.
+
+Record IDs are the API's message IDs, so they are CUID2s as API.md requires. Error rows once got
+UUIDs, which the retry and switch routes could not address.

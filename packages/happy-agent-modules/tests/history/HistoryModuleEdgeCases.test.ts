@@ -66,7 +66,8 @@ describe("HistoryModule edge cases", () => {
                 role: "user",
             });
             const page = await history.read(database.context, "agent-a");
-            expect(page.messages[0]?.message.recordId).toMatch(/^[0-9a-f-]{36}$/i);
+            // A record ID is the API message ID, which API.md defines as a CUID2.
+            expect(page.messages[0]?.message.recordId).toMatch(/^[a-z][a-z0-9]{23}$/);
             expect(page.messages[0]?.message.at).toEqual(expect.any(Number));
             await expect(
                 history.record(database.context, "bad\nagent", {

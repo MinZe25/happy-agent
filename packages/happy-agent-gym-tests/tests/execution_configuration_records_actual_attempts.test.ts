@@ -1,4 +1,4 @@
-import type { MessageMode } from "@slopus/happy-agent-client";
+import type { MessageMode, ServiceMessage } from "@slopus/happy-agent-client";
 import { createAgentGym, type AgentGym } from "@slopus/happy-agent-gym";
 import { afterEach, expect, it } from "vitest";
 
@@ -143,18 +143,17 @@ it("keeps scripted terminal source and provenance unknown while preserving the t
     running.push(gym);
     await gym.send("Exercise unknown credential provenance.");
     const page = await gym.client.getMessages(gym.defaultSessionId);
+    // The row shows its typed failure's sentence rather than the provider's own text.
     const error = page.runs
         .flatMap((run) => run.messages)
-        .filter((message) => message.role === "service")
         .find(
-            (message) =>
-                message.role === "service" &&
-                message.content.some(
-                    (block) =>
-                        block.type === "text" &&
-                        block.text.includes("Synthetic authentication failure."),
-                ),
+            (message): message is ServiceMessage =>
+                message.role === "service" && message.failure !== undefined,
         );
+    expect(error?.failure).toMatchObject({
+        kind: "signin_missing",
+        provider: { id: "gym" },
+    });
     // API.md:4688-4706: mode may be available without an observed source or account identity.
     expect.soft(error?.error).toMatchObject({
         code: "authentication_failed",

@@ -1,3 +1,4 @@
+import { createId } from "@paralleldrive/cuid2";
 import type {
     AgentBaseAcceptedMessage,
     AgentBaseInference,
@@ -1338,7 +1339,12 @@ export class HistoryModule implements AgentModule {
                           scope.agent.provider,
                       )
                     : undefined;
-            const failure = this.#failure(scope, inference.errorMessage, attempt, unavailable);
+            const failure = await this.#failure(
+                scope,
+                inference.errorMessage,
+                attempts,
+                unavailable,
+            );
             messages.push({
                 role: "error",
                 blocks: [{ type: "text", text: failure?.message ?? inference.errorMessage }],
@@ -1541,7 +1547,7 @@ export class HistoryModule implements AgentModule {
         if (existing[0] !== undefined) return;
         // A provider with no credential fails while opening, before any attempt exists.
         const unavailable = this.#config?.unavailableCredentialFailure(error, scope.agent.provider);
-        const failure = this.#failure(scope, error, undefined, unavailable);
+        const failure = await this.#failure(scope, error, undefined, unavailable);
         await this.#append(ctx, scope.agent.id, {
             at: Date.now(),
             blocks: [{ type: "text", text: failure?.message ?? error }],
@@ -1559,21 +1565,39 @@ export class HistoryModule implements AgentModule {
      * The typed failure for a failed turn, with the alternatives the person can switch to. Without
      * configuration there is no provider to describe, so the row keeps only its text.
      */
-    #failure(
+    async #failure(
         scope: AgentModuleScope,
         text: string,
-        attempt: ProviderExecutionAttempt | undefined,
+        attempts: readonly ProviderExecutionAttempt[] | undefined,
         unavailable: UnavailableCredentialFailure | undefined,
-    ): MessageFailure | undefined {
-        if (this.#config === undefined) return undefined;
-        const providerId =
-            unavailable?.providerId ?? attempt?.mode.providerId ?? scope.agent.provider;
-        const modelId = attempt?.mode.modelId ?? scope.agent.model;
+    ): Promise<MessageFailure | undefined> {
+        const config = this.#config;
+        if (config === undefined) return undefined;
+        const attempt = attempts?.at(-1);
+        const { id: agentId, provider: routeId, model } = scope.agent;
+        const providerId = unavailable?.providerId ?? attempt?.mode.providerId ?? routeId;
+        const modelId = attempt?.mode.modelId ?? model;
+        let spentPool: { name: string; resetsAt: number | null } | undefined;
+        if (await config.routeSpent(agentId, routeId, model)) {
+            // The pool has an account again as soon as any one of its spent accounts resets.
+            const resets = [
+                this.#providerUsage?.firstBlockedReset(config.smartRouteAccounts(routeId) ?? []),
+                ...(attempts ?? []).map((tried) =>
+                    tried.errorCode === "out_of_tokens" ? tried.resetsAt : undefined,
+                ),
+            ].filter((at): at is number => typeof at === "number");
+            spentPool = {
+                name: config.failureProvider(routeId).label,
+                resetsAt: resets.length === 0 ? null : Math.min(...resets),
+            };
+        }
         return messageFailure({
             text,
             attempt,
             unavailable,
-            provider: this.#config.failureProvider(providerId),
+            provider: config.failureProvider(providerId),
+            disabled: !config.isProviderEnabled(routeId),
+            spentPool,
             // The failed route itself is the one to move away from, even behind a smart alias.
             fallbackProviders:
                 modelId === undefined
@@ -2985,8 +3009,9 @@ function parseArguments(value: string): HistoryToolArguments {
     return value;
 }
 
+/** A record ID doubles as the API message ID, which API.md defines as a CUID2. */
 function createRecordId(): string {
-    return globalThis.crypto.randomUUID();
+    return createId();
 }
 
 function toHistoryInputBlock(block: SessionInputBlock): HistoryBlock {

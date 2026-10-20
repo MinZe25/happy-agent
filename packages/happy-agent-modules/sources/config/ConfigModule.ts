@@ -1557,6 +1557,51 @@ export class ConfigModule implements AgentModule {
         return this.#credentialFailures.find(message, [providerId, ...new Set(candidates)]);
     }
 
+    /**
+     * Let a smart route reconsider every account for this agent, once per request the person made:
+     * a message they sent, or their explicit retry of a failed turn. Accounts that failed stay
+     * skipped otherwise, so an automatic run never spins through spent accounts again.
+     */
+    async reopenRoute(
+        agentId: string,
+        providerId: string,
+        model: string | undefined,
+        requestId: string,
+    ): Promise<void> {
+        if (
+            this.configuration.values.providers[providerId]?.type !== "smart" ||
+            !this.isProviderEnabled(providerId)
+        )
+            return;
+        const provider = await this.providers.resolve(providerId, model);
+        if (provider instanceof RoundRobinRouterProvider) {
+            provider.acceptUserMessage(agentId, requestId);
+        }
+    }
+
+    /**
+     * Whether this agent's smart route has no account to offer because usage ran out, or because
+     * every account is turned off. Any other provider is never a spent pool.
+     */
+    async routeSpent(
+        agentId: string,
+        providerId: string,
+        model: string | undefined,
+    ): Promise<boolean> {
+        if (this.configuration.values.providers[providerId]?.type !== "smart") return false;
+        if (!this.isProviderEnabled(providerId)) return false;
+        // Describing a failure must never fail it again; a route that cannot open says nothing.
+        const provider = await this.providers.resolve(providerId, model).catch(() => null);
+        return provider instanceof RoundRobinRouterProvider && provider.spent(agentId);
+    }
+
+    /** The accounts a smart route sends to, or null when the provider is not a smart route. */
+    smartRouteAccounts(providerId: string): readonly string[] | null {
+        const route = smartProviderRoute(this.configuration, providerId);
+        if (route === undefined) return null;
+        return [...new Set(route.models.flatMap((model) => model.candidates))];
+    }
+
     /** Whether this provider's last construction found no credential to sign in with. */
     providerNeedsSignIn(providerId: string): boolean {
         return this.#credentialFailures.has(providerId);
@@ -1911,16 +1956,12 @@ export class ConfigModule implements AgentModule {
         messageAccepted: async (_ctx, scope, accepted): Promise<void> => {
             if (accepted.message.role !== "user" || !isUserOriginMetadata(accepted.metadata))
                 return;
-            const providerId = scope.agent.provider;
-            if (
-                this.configuration.values.providers[providerId]?.type !== "smart" ||
-                !this.isProviderEnabled(providerId)
-            )
-                return;
-            const provider = await this.providers.resolve(providerId, scope.agent.model);
-            if (provider instanceof RoundRobinRouterProvider) {
-                provider.acceptUserMessage(scope.agent.id, accepted.id);
-            }
+            await this.reopenRoute(
+                scope.agent.id,
+                scope.agent.provider,
+                scope.agent.model,
+                accepted.id,
+            );
         },
         /** Apply configured root instructions through the normal pre-inference hook. */
         instructions: async (): Promise<string> =>

@@ -39,9 +39,8 @@ describe("smart route recovery on a new human turn", () => {
         });
         try {
             await gym.send("Try the selected account.", { providerId: "router", modelId });
-            expect(JSON.stringify(await gym.history())).toContain(
-                "Synthetic routed authentication rejection.",
-            );
+            // The rejection is recorded as its typed failure, not the provider's own text.
+            expect(JSON.stringify(await gym.history())).toContain('"kind":"signin_missing"');
             expect(gym.inference.requests).toHaveLength(1);
 
             await gym.send("Continue after credentials have recovered.", {

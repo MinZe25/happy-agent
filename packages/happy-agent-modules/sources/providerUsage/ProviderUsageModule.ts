@@ -188,6 +188,20 @@ export class ProviderUsageModule implements AgentModule {
     }
 
     /**
+     * When the first of these accounts that a full usage window blocks works again, which is when
+     * a pool of them has an account to offer. Null when none of them reports such a reset.
+     */
+    firstBlockedReset(providerIds: readonly string[]): number | null {
+        let first: number | null = null;
+        for (const providerId of providerIds) {
+            const entry = this.#entries.get(providerId);
+            const resetAt = entry === undefined ? null : blockingResetAt(entry.usage);
+            if (resetAt !== null) first = Math.min(first ?? resetAt, resetAt);
+        }
+        return first;
+    }
+
+    /**
      * Observes every change to an entry — a read starting or finishing, an in-band reading, a
      * failure — in the order the changes happened, so consumers can republish them immediately.
      */

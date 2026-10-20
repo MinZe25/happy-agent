@@ -83,6 +83,19 @@ it("records a retry on the failed message, runs again, and stays idempotent", as
         expect(again.message).toEqual(retried.message);
         await new Promise((resolve) => setTimeout(resolve, 200));
         expect(await failures()).toHaveLength(2);
+
+        // With the chat's own provider turned off, the retried turn says so instead.
+        await owner.patchConfig({ providers: { private_account: { enabled: false } } });
+        await owner.retryFailedTurn(agent.id, second!.id);
+        await vi.waitFor(async () => expect(await failures()).toHaveLength(3), {
+            timeout: 10_000,
+            interval: 10,
+        });
+        expect((await failures())[2]?.failure).toMatchObject({
+            kind: "provider_disabled",
+            message: "private_account is turned off. Turn it on in settings, then retry.",
+            provider: { id: "private_account", vendorName: "Claude" },
+        });
     } finally {
         await fixture?.close();
         vi.restoreAllMocks();

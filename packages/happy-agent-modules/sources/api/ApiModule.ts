@@ -4898,6 +4898,17 @@ export class ApiModule implements AgentModule {
             failure: { ...stored.failure, resolution },
         };
         await this.#withMutationId(body.mutationId, async () => {
+            // The person's own retry lets a spent smart route try every account again, as a sent
+            // message would; reopening early is harmless if the transaction below rolls back.
+            const routeId = options.provider ?? stored.provider;
+            if (routeId !== undefined) {
+                await this.#config.reopenRoute(
+                    agentId,
+                    routeId,
+                    options.model ?? stored.model,
+                    options.id ?? messageId,
+                );
+            }
             await ctx.inTx(async (txCtx) => {
                 await this.#history.replace(txCtx, agentId, resolved);
                 await this.#agentSystem().send(
