@@ -225,6 +225,10 @@ service notices, before tags are named. It needs no lookup, so it can never stal
   `providers[]` and `models[].provider`, and machine `models[].provider`. A missing or null kind
   fails the parse and the phone discards the whole session metadata (title, path, models, bot) or
   the machine's whole model list. Never omit `kind` or send null; publish `"unknown"` instead.
+- Session and machine metadata receive configuration's resolved friendly account name, including
+  each model's `providerName`, while retaining provider IDs and kinds. Configuration alone owns
+  Current CLI defaults; descriptors only keep a readable-ID fallback when no name is supplied.
+  Explicit names are displayed verbatim, without inferred email shortening or plan suffixes.
 - Session metadata carries `depth`, the number of Agent Base `parentOf` hops. Only top-level
   agents are published now, so it is always 0; the field stays because phones read it, and a
   missing depth still means unknown. Only the number is published, never parent ids or titles.

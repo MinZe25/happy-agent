@@ -15,21 +15,30 @@ final class DaemonClient {
 
     /// One `GET` returning the parsed JSON body, or `nil` when the daemon is not answering yet.
     func get(_ path: String) -> Any? {
+        request("GET", path, status: 200)
+    }
+
+    func refreshUsage() {
+        _ = request("POST", "/v0/usage/refresh", status: 202)
+    }
+
+    private func request(_ method: String, _ path: String, status: Int) -> Any? {
         guard let token = try? String(contentsOfFile: tokenPath, encoding: .utf8) else {
             return nil
         }
         guard let socket = try? DaemonSocket(path: socketPath, timeout: 15) else { return nil }
         let request = """
-            GET \(path) HTTP/1.1\r
+            \(method) \(path) HTTP/1.1\r
             Host: happy-agent\r
             Authorization: Bearer \(token.trimmingCharacters(in: .whitespacesAndNewlines))\r
             Accept: application/json\r
             Connection: close\r
+            Content-Length: 0\r
             \r
 
             """
         guard (try? socket.write(request)) != nil else { return nil }
-        guard let head = try? readHead(socket), head.status == 200 else { return nil }
+        guard let head = try? readHead(socket), head.status == status else { return nil }
         guard let body = try? readBody(socket, head: head) else { return nil }
         return try? JSONSerialization.jsonObject(with: body)
     }

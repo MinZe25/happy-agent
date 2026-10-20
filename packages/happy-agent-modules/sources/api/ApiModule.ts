@@ -8265,7 +8265,10 @@ export class ApiModule implements AgentModule {
                 const account = accountUsage.get(providerId);
                 return {
                     providerId,
-                    ...provider,
+                    type: provider.type,
+                    enabled: provider.enabled,
+                    hidden: provider.hidden,
+                    models: provider.models,
                     usage: account?.usage ?? null,
                     checkedAt: account?.checkedAt ?? null,
                     error: account?.error ?? null,
@@ -8548,6 +8551,7 @@ export class ApiModule implements AgentModule {
         const providers: Record<string, ApiProviderDefinition> = {};
         for (const providerId of Object.keys(this.#config.configuration.values.providers)) {
             providers[providerId] = {
+                name: this.#config.providerName(providerId),
                 type: this.#config.providerType(providerId) ?? "codex",
                 enabled: this.#config.isProviderEnabled(providerId),
                 hidden: this.#config.isProviderHidden(providerId),
@@ -8558,6 +8562,7 @@ export class ApiModule implements AgentModule {
             let provider = providers[route.providerId];
             if (provider === undefined) {
                 provider = {
+                    name: this.#config.providerName(route.providerId),
                     type: this.#config.providerType(route.providerId) ?? "codex",
                     enabled: this.#config.isProviderEnabled(route.providerId),
                     hidden: this.#config.isProviderHidden(route.providerId),
@@ -9164,6 +9169,7 @@ interface ApiModelDefinition {
 }
 
 interface ApiProviderDefinition {
+    readonly name: string;
     readonly type: string;
     readonly enabled: boolean;
     readonly hidden: boolean;

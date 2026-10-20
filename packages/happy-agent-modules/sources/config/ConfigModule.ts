@@ -283,6 +283,7 @@ const settingsInputSchema = Type.Object(
     { additionalProperties: false },
 );
 const providerCommonInput = {
+    name: Type.Optional(Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" })),
     auto_enable: Type.Optional(Type.Boolean()),
     credential_isolation: Type.Optional(Type.Literal(true)),
     enabled: Type.Optional(Type.Boolean()),
@@ -366,6 +367,7 @@ const providerInputSchemas = {
     ),
     smart: Type.Object(
         {
+            name: Type.Optional(Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" })),
             auto_enable: Type.Optional(Type.Boolean()),
             enabled: Type.Optional(Type.Boolean()),
             hidden: Type.Optional(Type.Boolean()),
@@ -716,6 +718,7 @@ const partialValuesSchema = Type.Object(
 );
 
 const providerRecordBase = {
+    name: Type.Optional(Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" })),
     autoEnable: Type.Optional(Type.Boolean()),
     credentialIsolation: Type.Optional(Type.Literal(true)),
     enabled: Type.Boolean(),
@@ -799,6 +802,7 @@ const providerSchemas = {
     ),
     smart: Type.Object(
         {
+            name: Type.Optional(Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" })),
             autoEnable: Type.Optional(Type.Boolean()),
             enabled: Type.Boolean(),
             hidden: Type.Optional(Type.Boolean()),
@@ -1350,9 +1354,9 @@ const DEFAULT_VALUES: HappyAgentConfigValues = {
     providerDefaultEnable: false,
     providers: {
         bedrock: { enabled: false, type: "bedrock" },
-        claude: { enabled: false, type: "claude" },
-        codex: { enabled: false, type: "codex" },
-        grok: { enabled: false, type: "grok" },
+        claude: { enabled: false, name: "Current CLI", type: "claude" },
+        codex: { enabled: false, name: "Current CLI", type: "codex" },
+        grok: { enabled: false, name: "Current CLI", type: "grok" },
     },
     settings: {
         compactCompletedTurns: false,
@@ -2321,6 +2325,16 @@ export class ConfigModule implements AgentModule {
     /** Display-only: a hidden provider stays out of model pickers and new-subagent choices. */
     isProviderHidden(providerId: string): boolean {
         return this.configuration.values.providers[providerId]?.hidden === true;
+    }
+
+    /** Friendly account label, independent of credentials, provider type, and routing identity. */
+    providerName(providerId: string): string {
+        return (
+            this.configuration.values.providers[providerId]?.name ??
+            providerId
+                .replaceAll(/[_-]+/gu, " ")
+                .replaceAll(/\b\w/gu, (character) => character.toUpperCase())
+        );
     }
 
     /** The enabled models a picker offers, which leaves out hidden providers. */
@@ -4256,6 +4270,7 @@ function normalizeProvider(id: string, value: Record<string, unknown>): Record<s
 
 function normalizeProviderCommon(value: Record<string, unknown>): Record<string, unknown> {
     return {
+        ...(value["name"] === undefined ? {} : { name: (value["name"] as string).trim() }),
         ...(value["auto_enable"] === undefined ? {} : { autoEnable: value["auto_enable"] }),
         ...(value["credential_isolation"] === true ? { credentialIsolation: true } : {}),
         ...(value["enabled"] === undefined ? {} : { enabled: value["enabled"] }),

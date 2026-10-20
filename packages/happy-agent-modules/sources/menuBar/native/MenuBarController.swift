@@ -20,7 +20,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var isMenuOpen = false
     private var phase = 0.0
 
-    private static let planRefreshInterval: TimeInterval = 60
+    private static let planRefreshInterval: TimeInterval = 24 * 60 * 60
     /// A calm three seconds per turn, fast enough to read as activity and slow enough to ignore.
     private static let spinFrameInterval: TimeInterval = 1.0 / 30
     private static let spinPerFrame = 2 * Double.pi / (3 * 30)
@@ -63,7 +63,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func changesTheMenu(_ type: String) -> Bool {
-        type.hasPrefix("agent.") || type.hasPrefix("workspace.") || type.hasPrefix("project.")
+        if type == "provider.usage.updated" || type == "config.updated" { refreshPlans() }
+        return type.hasPrefix("agent.") || type.hasPrefix("workspace.") || type.hasPrefix("project.")
     }
 
     /// Coalesces the bursts of events a single turn produces into one read.
@@ -96,10 +97,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func refreshPlans() {
+    private func refreshPlans(refreshAccounts: Bool = false) {
         fetchQueue.async { [weak self] in
             guard let self else { return }
-            guard let read = DaemonSnapshotReader.plans(usageBody: self.client.get("/v0/usage"))
+            if refreshAccounts { self.client.refreshUsage() }
+            guard let read = DaemonSnapshotReader.plans(usageBody: self.client.get("/v0/usage"), configBody: self.client.get("/v0/config"))
             else {
                 return
             }
@@ -178,7 +180,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         isMenuOpen = true
-        refreshPlans()
+        refreshPlans(refreshAccounts: true)
         // Elapsed times are the only thing that moves without an event to announce it.
         openMenuTick = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.rebuildMenu()

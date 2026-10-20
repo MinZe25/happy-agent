@@ -159,7 +159,13 @@ export function createHappySessionMetadata(options: {
     );
     const providers =
         models.length === 0
-            ? [describeHappyProvider(session.providerId, session.providerType)]
+            ? [
+                  describeHappyProvider(
+                      session.providerId,
+                      session.providerType,
+                      session.providerName,
+                  ),
+              ]
             : describeHappyProviders(models);
     const efforts = selected?.effortLevels ?? [];
     const title = session.task?.name ?? session.bot?.name ?? session.title;
@@ -199,7 +205,11 @@ export function createHappySessionMetadata(options: {
         currentOperatingModeCode: session.permissionMode,
         ...(session.effort === undefined ? {} : { currentThoughtLevelCode: session.effort }),
         permissionMode: session.permissionMode,
-        provider: describeHappyProvider(session.providerId, session.providerType),
+        provider: describeHappyProvider(
+            session.providerId,
+            session.providerType,
+            session.providerName,
+        ),
         flavor: session.providerId,
         happyHomeDir: configuration.happyHome,
         homeDir: homedir(),
@@ -267,7 +277,11 @@ export function createHappySessionMetadata(options: {
 
 /** One model as both machine and session metadata publish it. */
 export function publishHappyModel(model: HappyModel): HappyPublishedModel {
-    const provider = describeHappyProvider(model.providerId, model.providerType);
+    const provider = describeHappyProvider(
+        model.providerId,
+        model.providerType,
+        model.providerName,
+    );
     return {
         code: model.id,
         ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),

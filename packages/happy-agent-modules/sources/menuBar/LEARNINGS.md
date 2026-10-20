@@ -73,6 +73,11 @@ tints and inverts a template image, so anything less than full strength is wrong
 
 A provider ID is whatever someone called their account, so `bulka_happy_codex` is shown as
 "Bulka Happy Codex". Never render a raw ID.
+Both native apps use configuration's friendly account name verbatim, with vendor context shown
+separately, such as "Codex · Current CLI". Account names never acquire plan suffixes or automatic
+email shortening. Opening a menu calls the existing `POST /v0/usage/refresh`; ordinary snapshot
+reads remain cached. macOS reacts to the existing usage events, while Windows reads cached
+snapshots on its existing open-menu timer.
 
 ## The existing private API is the boundary
 

@@ -595,15 +595,20 @@ in the catalog with their known models marked disabled. Those models are omitted
 from the model picker and the agent's available-model guidance. Startup credential
 discovery reads local state and does not ping provider servers.
 
-Add any number of named instances when you need separate accounts. For custom
-instances, the section suffix is the provider ID shown in the model picker and
-accepted by `defaults.provider`. Custom instances must set
+Every provider accepts an optional friendly `name`, including built-in accounts and smart pools.
+Built-in `claude`, `codex`, and `grok` default to **Current CLI**; custom accounts without a name
+use a readable version of their ID. Names are trimmed, nonblank, and at most 256 characters, then
+displayed verbatim. They never change credentials, routing, or account IDs.
+
+Add any number of named instances when you need separate accounts. The section suffix remains
+the provider ID accepted by `defaults.provider` and pool membership. Custom instances must set
 `type`; all parameters stay flat in the same section. The built-in Claude Code
 provider ID is `claude`:
 
 ```toml
 [providers.work_codex]
 type = "codex"
+name = "Work"
 enabled = true
 auth_file = "/Users/me/.codex-work/auth.json"
 transport = "auto"

@@ -20,6 +20,7 @@ export interface HappyModel {
     readonly id: string;
     readonly name: string;
     readonly providerId: string;
+    readonly providerName?: string;
     /** The provider type `/v0/config` reports for `providerId`; null when it is unknown. */
     readonly providerType: string | null;
     readonly serviceTiers: readonly string[];
@@ -79,6 +80,7 @@ export interface HappySessionSnapshot {
     };
     readonly projectName: string;
     readonly providerId: string;
+    readonly providerName?: string;
     /** The provider type `/v0/config` reports for `providerId`; null when it is unknown. */
     readonly providerType: string | null;
     readonly serviceTier?: string;

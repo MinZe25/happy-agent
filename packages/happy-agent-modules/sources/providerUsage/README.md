@@ -13,7 +13,8 @@ already known rather than replacing it and erasing a window the vendor stayed si
 
 The module also asks `ConfigModule` to read each account through its vendor's native usage API.
 Each provider has an independent named polling loop, runs immediately at startup, and refreshes
-every hour. A slow or unavailable provider cannot delay another one. A poll answers about every
+once a day, skipping accounts measured by ordinary inference in the last day. A slow or unavailable
+provider cannot delay another one. A poll answers about every
 window it can, so unlike an in-band reading it supersedes what came before. Reads of one account
 never overlap: polls, rechecks, and client refreshes share its one-at-a-time queue.
 
@@ -51,7 +52,7 @@ reports — the module schedules one read for 30 seconds after the last full win
 the vendor's `retryAt` if that is later. A newer reading that names another reset moves it, and
 one showing the account working cancels it. If the read still finds the same window blocked, the
 vendor's reset was soft: the module reads again after one, two, then five minutes, up to six reads,
-before leaving the account to the hourly poll and in-band readings. An exhausted account whose
+before leaving the account to the daily poll and in-band readings. An exhausted account whose
 blocking window is unknown has no reset to wait for and gets no recheck. Rechecks end on `close()`.
 
 Routing does not depend on any of this: a smart provider skips a failed account only for the
@@ -70,6 +71,12 @@ readings are older than `olderThanMs` (five minutes by default, at least one min
 accounts without a usage source, under `retryAt`, or already being read. It returns the accounts it
 started at once. Those reads run in the module's own named context and end with it, never with the
 request that asked. `ApiModule` serves it as `POST /v0/usage/refresh`.
+
+Actual fallback inference probes have a separate budget: each admitted probe, successful or not,
+waits 5 minutes, 40 minutes, 5 hours 20 minutes, then a day before another. Refresh requests never
+reset this budget. Ordinary inference that measures a window resets escalation and postpones
+probes for a day. Inexpensive account endpoints remain eligible under the ordinary refresh policy;
+existing endpoint refusals, vendor retry deadlines, pushed events, and reset rechecks remain in use.
 
 `onChanged()` reports every change to an entry, in order, including `refreshing` turning on and
 off. `ApiModule` publishes each one as `provider.usage.updated`; presentation modules republish

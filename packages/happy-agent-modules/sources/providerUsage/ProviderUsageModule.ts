@@ -18,7 +18,7 @@ import {
 import { ConfigModule } from "../config/index.js";
 
 /** How often every account is asked in the background, after the read at startup. */
-export const PROVIDER_USAGE_POLL_INTERVAL_MS = 60 * 60 * 1_000;
+export const PROVIDER_USAGE_POLL_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 /** How old a reading must be before a client's refresh request reads it again, by default. */
 export const PROVIDER_USAGE_REFRESH_DEFAULT_AGE_MS = 5 * 60 * 1_000;
 /** The freshest a client may demand, so a refresh cannot hammer a rate-limited vendor API. */
@@ -31,7 +31,7 @@ export const PROVIDER_USAGE_RESET_RECHECK_BACKOFF_MS: readonly number[] = [
     2 * 60 * 1_000,
     5 * 60 * 1_000,
 ];
-/** After this many reads past the reset the hourly poll and in-band readings take over again. */
+/** After this many reads past the reset the daily poll and in-band readings take over again. */
 export const PROVIDER_USAGE_RESET_RECHECK_ATTEMPTS = 6;
 
 const NOT_REPORTED = "The provider did not report account usage.";
@@ -88,6 +88,8 @@ export class ProviderUsageModule implements AgentModule {
     readonly #endpointRefused = new Set<string>();
     /** Accounts whose OAuth usage endpoint throttled us, until the instant it named. */
     readonly #endpointRetryAt = new Map<string, number>();
+    /** A separate budget for actual fallback inference, including successful probes. */
+    readonly #probes = new Map<string, { attempts: number; nextAt: number }>();
     readonly #rechecks = new Map<string, ResetRecheck>();
     readonly #closing = new AbortController();
     #backgroundContext: Context | undefined;
@@ -134,7 +136,9 @@ export class ProviderUsageModule implements AgentModule {
                 loopCtx,
                 { delay: PROVIDER_USAGE_POLL_INTERVAL_MS, delayFirst: false, name },
                 async (pollCtx) => {
-                    await this.refresh(pollCtx, providerId);
+                    await this.refresh(pollCtx, providerId, {
+                        olderThanMs: PROVIDER_USAGE_POLL_INTERVAL_MS,
+                    });
                 },
             ).catch((error: unknown) => {
                 if (!isAbortedError(error)) {
@@ -205,6 +209,11 @@ export class ProviderUsageModule implements AgentModule {
         if (previous === undefined) return;
         const now = Date.now();
         const measured = measuresWindow(usage);
+        if (measured)
+            this.#probes.set(usage.providerId, {
+                attempts: 0,
+                nextAt: now + PROVIDER_USAGE_POLL_INTERVAL_MS,
+            });
         this.#set({
             ...previous,
             usage: mergeProviderUsage(previous.usage, stampWindows(usage), now),
@@ -244,7 +253,7 @@ export class ProviderUsageModule implements AgentModule {
         const previous = this.#entries.get(providerId);
         if (previous === undefined) return undefined;
         if (!this.#config.hasProviderUsageSource(providerId)) {
-            // Nothing can be asked, so record that once instead of announcing it every hour.
+            // Nothing can be asked, so record that once instead of announcing it every day.
             if (previous.usage !== null || previous.error !== null) return previous;
             return this.#set({ ...previous, checkedAt: Date.now(), error: NOT_REPORTED });
         }
@@ -259,8 +268,14 @@ export class ProviderUsageModule implements AgentModule {
             return previous;
         }
         this.#set({ ...previous, refreshing: true });
+        let probeDeferred = false;
         try {
             const usage = await this.#config.readProviderUsage(ctx, providerId, {
+                shouldProbe: () => {
+                    const admitted = this.#admitProbe(providerId);
+                    probeDeferred = !admitted;
+                    return admitted;
+                },
                 skipUsageEndpoint: this.#skipsUsageEndpoint(providerId),
                 onUsageEndpointRefused: (refusal) => {
                     this.#recordEndpointRefusal(providerId, refusal);
@@ -269,6 +284,8 @@ export class ProviderUsageModule implements AgentModule {
             const current = this.#current(providerId);
             const now = Date.now();
             if (usage === null) {
+                if (probeDeferred)
+                    return this.#set({ ...current, checkedAt: now, refreshing: false });
                 return this.#set({
                     ...current,
                     checkedAt: now,
@@ -311,6 +328,20 @@ export class ProviderUsageModule implements AgentModule {
                 refreshing: false,
             });
         }
+    }
+
+    /** Each actual fallback probe grows its cooldown, even after a successful measurement. */
+    #admitProbe(providerId: string): boolean {
+        const now = Date.now();
+        const previous = this.#probes.get(providerId);
+        if (previous !== undefined && now < previous.nextAt) return false;
+        const attempts = Math.min((previous?.attempts ?? 0) + 1, 4);
+        const cooldown = Math.min(
+            PROVIDER_USAGE_POLL_INTERVAL_MS,
+            5 * 60_000 * 8 ** (attempts - 1),
+        );
+        this.#probes.set(providerId, { attempts, nextAt: now + cooldown });
+        return true;
     }
 
     /** Stop every polling loop, recheck, and background read, and wait for them to finish. */
@@ -473,7 +504,7 @@ function isStale(entry: ProviderUsageEntry, olderThanMs: number, now: number): b
  *
  * A window at 100% blocks until it resets; an account the vendor refuses is blocked by its full
  * windows. With several full windows the account works again only once the last one resets. An
- * exhausted account whose full window is unknown has no reset to wait for, so the hourly poll and
+ * exhausted account whose full window is unknown has no reset to wait for, so the daily poll and
  * in-band readings remain its only rechecks.
  */
 function blockingResetAt(usage: ProviderUsage | null): number | null {

@@ -16,17 +16,17 @@ older meaning for compatibility.
 
 ## Clients are told, not made to poll
 
-The human asked for usage changes to be pushed as `provider.usage.updated` and for an hourly
-background poll instead of fifteen minutes, overriding master plans 11 and 12 for this work; those
-plans still describe polling clients and a fifteen-minute cadence until the human amends them.
-In-band readings carry an account in use; the hourly poll covers cold starts and idle accounts;
+Usage changes are pushed as `provider.usage.updated`. Background checks run daily and skip
+accounts measured by ordinary inference within the last day. These human-directed behaviors
+override master plans 11 and 12, which still describe polling clients and a fifteen-minute cadence.
+In-band readings carry an account in use;
 `POST /v0/usage/refresh` lets a client ask for fresher readings without waiting.
 
 ## Read a blocked account again as soon as it can work
 
 The human asked that an account blocked by a window be read again just after that window resets,
 so a client learns quickly that inference is unblocked. Vendors' resets can be soft, so a read that
-still finds the same window full backs off briefly before giving up to the hourly poll.
+still finds the same window full backs off briefly before giving up to the daily poll.
 
 ## Claude's usage method follows its credential
 
@@ -34,3 +34,13 @@ Setup tokens and gateway tokens can never read the OAuth usage endpoint, and ask
 spends that endpoint's rate limit. The method is chosen from the credential instead of a setting:
 a login with `user:profile` asks the endpoint, everything else measures inference headers. A `429`
 falls back to the headers immediately rather than leaving a stale reading on screen.
+
+## Fallback inference needs its own budget
+
+Every admitted usage probe grows a separate cooldown from 5 minutes to 40 minutes, 5 hours
+20 minutes, and a day, even when successful. Menu requests cannot reset it; cheap account endpoints
+remain eligible. An ordinary inference reading that measures a window resets escalation and
+postpones probes for a day. Admission happens immediately before the actual inference request,
+covering inference-only credentials and throttled-endpoint fallbacks without bypassing the
+existing endpoint-refusal, retry, push, or reset-recheck machinery. A deferred probe retains the
+cached reading and its existing error state; intentional backoff is not a failed refresh.

@@ -43,8 +43,8 @@ struct PlanWindow {
 
 /// A provider's plan, with the session and week windows the menu shows side by side.
 struct PlanEntry {
+    let vendor: String
     let name: String
-    let plan: String?
     let windows: [PlanWindow]
     let exhausted: Bool
 }
@@ -100,8 +100,10 @@ enum DaemonSnapshotReader {
         }
     }
 
-    static func plans(usageBody: Any?) -> ([PlanEntry], TokenTotals, TokenTotals)? {
+    static func plans(usageBody: Any?, configBody: Any? = nil) -> ([PlanEntry], TokenTotals, TokenTotals)? {
         guard let body = usageBody as? [String: Any] else { return nil }
+        let config = (configBody as? [String: Any])?["config"] as? [String: Any]
+        let configured = config?["providers"] as? [String: [String: Any]] ?? [:]
         var plans: [PlanEntry] = []
         for provider in body["providers"] as? [[String: Any]] ?? [] {
             guard let id = provider["providerId"] as? String else { continue }
@@ -111,8 +113,8 @@ enum DaemonSnapshotReader {
             guard !windows.isEmpty else { continue }
             plans.append(
                 PlanEntry(
-                    name: providerName(id),
-                    plan: usage["planName"] as? String,
+                    vendor: vendorName(provider["type"] as? String ?? "unknown"),
+                    name: configured[id]?["name"] as? String ?? providerName(id),
                     windows: windows,
                     exhausted: usage["exhausted"] as? Bool ?? false
                 )
@@ -142,15 +144,24 @@ enum DaemonSnapshotReader {
     /// unfamiliar ID becomes words rather than being shown as the raw identifier it is.
     private static func providerName(_ id: String) -> String {
         switch id {
-        case "claude": return "Claude"
-        case "codex": return "Codex"
-        case "grok": return "Grok"
+        case "claude", "codex", "grok": return "Current CLI"
         case "bedrock": return "Bedrock"
         default:
             return id
                 .split(whereSeparator: { $0 == "_" || $0 == "-" || $0 == "." })
                 .map { $0.prefix(1).uppercased() + $0.dropFirst() }
                 .joined(separator: " ")
+        }
+    }
+
+    private static func vendorName(_ type: String) -> String {
+        switch type {
+        case "claude": return "Claude"
+        case "codex": return "Codex"
+        case "grok": return "Grok"
+        case "bedrock": return "Amazon Bedrock"
+        case "smart": return "Pool"
+        default: return "Provider"
         }
     }
 

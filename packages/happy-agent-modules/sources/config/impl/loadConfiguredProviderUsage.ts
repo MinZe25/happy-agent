@@ -23,6 +23,8 @@ export interface LoadConfiguredProviderUsageOptions {
  * OAuth usage endpoint or the unified headers of a one-token inference response.
  */
 export interface ProviderUsageReadMethod {
+    /** Admit only the fallback inference request, after any inexpensive account endpoint. */
+    readonly shouldProbe?: () => boolean;
     /** Skip the OAuth usage endpoint and measure the inference headers directly. */
     readonly skipUsageEndpoint?: boolean;
     /** Told when the OAuth usage endpoint refused this account, and until when. */
@@ -79,6 +81,9 @@ export function loadConfiguredProviderUsage(
         const skipUsageEndpoint =
             options.method?.skipUsageEndpoint === true || configuredToken !== undefined;
         return fetchClaudeProviderUsage({
+            ...(options.method?.shouldProbe === undefined
+                ? {}
+                : { shouldProbe: options.method.shouldProbe }),
             ...(skipUsageEndpoint ? { usageEndpoint: false } : {}),
             ...(options.method?.onUsageEndpointRefused === undefined
                 ? {}

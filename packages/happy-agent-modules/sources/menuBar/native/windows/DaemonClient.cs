@@ -21,11 +21,25 @@ internal sealed class DaemonClient
         this.tokenFile = tokenFile;
     }
 
-    public DaemonUsage Usage()
+    public DaemonUsage Usage(bool refreshAccounts)
     {
+        if (refreshAccounts) Request("POST", "/v0/usage/refresh", 202);
+        DaemonUsage usage;
         using (var body = new MemoryStream(Request("GET", "/v0/usage", 200)))
-            return (DaemonUsage)new DataContractJsonSerializer(typeof(DaemonUsage),
+            usage = (DaemonUsage)new DataContractJsonSerializer(typeof(DaemonUsage),
                 new DataContractJsonSerializerSettings { UseSimpleDictionaryFormat = true }).ReadObject(body);
+        using (var body = new MemoryStream(Request("GET", "/v0/config", 200)))
+        {
+            var configuration = (DaemonConfiguration)new DataContractJsonSerializer(typeof(DaemonConfiguration),
+                new DataContractJsonSerializerSettings { UseSimpleDictionaryFormat = true }).ReadObject(body);
+            foreach (var provider in usage.Providers ?? new UsageProvider[0])
+            {
+                ConfiguredProvider configured;
+                if (configuration.Config != null && configuration.Config.Providers != null &&
+                    configuration.Config.Providers.TryGetValue(provider.Id, out configured)) provider.Name = configured.Name;
+            }
+        }
+        return usage;
     }
 
     public void Stop() { Request("POST", "/v0/shutdown", 202); }
@@ -98,9 +112,23 @@ internal sealed class DaemonClient
 }
 [DataContract] internal sealed class UsageProvider
 {
+    public string Name { get; set; }
+    [DataMember(Name = "type")] public string Type { get; set; }
     [DataMember(Name = "providerId")] public string Id { get; set; }
     [DataMember(Name = "enabled")] public bool Enabled { get; set; }
     [DataMember(Name = "usage")] public ProviderUsage Usage { get; set; }
+}
+[DataContract] internal sealed class DaemonConfiguration
+{
+    [DataMember(Name = "config")] public EffectiveConfiguration Config { get; set; }
+}
+[DataContract] internal sealed class EffectiveConfiguration
+{
+    [DataMember(Name = "providers")] public Dictionary<string, ConfiguredProvider> Providers { get; set; }
+}
+[DataContract] internal sealed class ConfiguredProvider
+{
+    [DataMember(Name = "name")] public string Name { get; set; }
 }
 [DataContract] internal sealed class ProviderUsage
 {

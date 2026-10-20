@@ -404,3 +404,11 @@ project layer, because a repository must never choose the account its own code r
 must match `^[a-z_][a-z0-9_-]{0,31}$` and must not be `root`; the executable must be an absolute
 path; per-bot keys must be bot IDs. The table is refused beside `[runners]`, where nothing runs on
 this machine to separate, and on Windows, which has no sudo. Changing it takes a restart.
+
+## Friendly account names do not change identity
+
+Every provider accepts optional `name`. Built-in Claude, Codex, and Grok slots default to Current
+CLI; custom accounts without a name use a readable ID. Names are trimmed and validated, then
+displayed verbatim. Configuration owns the defaults. Names never change credentials, provider
+types, enabled or hidden flags, pool membership, defaults, or routing. Email shortening belongs
+only to recipe guidance when choosing a name, never to a runtime formatter.

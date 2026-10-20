@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigModule } from "../../sources/config/index.js";
 import {
     PROVIDER_USAGE_RESET_RECHECK_DELAY_MS,
+    PROVIDER_USAGE_POLL_INTERVAL_MS,
     ProviderUsageModule,
     type ProviderUsageEntry,
 } from "../../sources/providerUsage/index.js";
@@ -32,6 +33,7 @@ afterEach(async () => {
 });
 
 type ReadMethod = {
+    readonly shouldProbe?: () => boolean;
     readonly skipUsageEndpoint?: boolean;
     readonly onUsageEndpointRefused?: (refusal: ClaudeUsageEndpointRefusal) => void;
 };
@@ -114,6 +116,80 @@ function window(usedPercent: number, resetsAt: number) {
 }
 
 describe("ProviderUsageModule", () => {
+    it("backs off successful inference probes independently of cheap reads and menu refreshes", async () => {
+        vi.useFakeTimers({ now: 1_800_000_000_000 });
+        const harness = await createHarness({ sources: ["claude"], start: true });
+        await vi.advanceTimersByTimeAsync(0);
+        let probes = 0;
+        harness.answer(async (_id, method) => {
+            if (!method?.shouldProbe?.()) return null;
+            probes += 1;
+            return reading({
+                windows: {
+                    fiveHour: window(25, Date.now() + 18_000_000),
+                    weekly: null,
+                    monthly: null,
+                },
+            });
+        });
+        for (const delay of [
+            5 * 60_000,
+            40 * 60_000,
+            320 * 60_000,
+            PROVIDER_USAGE_POLL_INTERVAL_MS,
+        ]) {
+            const before = probes;
+            await harness.module.refresh(harness.ctx, "claude");
+            expect(probes).toBe(before + 1);
+            vi.setSystemTime(Date.now() + 60_000);
+            harness.module.requestRefresh(harness.ctx, {
+                providerIds: ["claude"],
+                olderThanMs: 60_000,
+            });
+            await harness.module.refresh(harness.ctx, "claude");
+            expect(probes).toBe(before + 1);
+            vi.setSystemTime(Date.now() + delay - 60_000);
+        }
+        harness.observe(
+            reading({
+                windows: {
+                    fiveHour: window(25, Date.now() + 18_000_000),
+                    weekly: null,
+                    monthly: null,
+                },
+            }),
+        );
+        vi.setSystemTime(Date.now() + 60_000);
+        await harness.module.refresh(harness.ctx, "claude");
+        expect(probes).toBe(4);
+        vi.setSystemTime(Date.now() + PROVIDER_USAGE_POLL_INTERVAL_MS - 60_000);
+        await harness.module.refresh(harness.ctx, "claude");
+        expect(probes).toBe(5);
+        vi.setSystemTime(Date.now() + 5 * 60_000);
+        await harness.module.refresh(harness.ctx, "claude");
+        expect(probes).toBe(6);
+    });
+
+    it("checks in the background daily and skips accounts measured by ordinary inference within a day", async () => {
+        vi.useFakeTimers({ now: 1_800_000_000_000 });
+        const harness = await createHarness({ sources: ["claude"], start: true });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(harness.load).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(23 * 60 * 60_000);
+        harness.observe(
+            reading({
+                windows: {
+                    fiveHour: window(25, Date.now() + 18_000_000),
+                    weekly: null,
+                    monthly: null,
+                },
+            }),
+        );
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+        expect(harness.load).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(PROVIDER_USAGE_POLL_INTERVAL_MS);
+        expect(harness.load).toHaveBeenCalledTimes(2);
+    });
     it("keeps every provider and every normalized quota field without discarding a good reading", async () => {
         const harness = await createHarness();
         const codex: ProviderUsage = {

@@ -22,6 +22,7 @@ internal sealed class WindowsTray : ApplicationContext
     private readonly Process parent;
     private readonly DaemonClient client;
     private bool refreshing;
+    private bool refreshAccountsPending;
     private bool closed;
     private bool stopping;
     private DateTime sampledAt = DateTime.UtcNow;
@@ -61,7 +62,7 @@ internal sealed class WindowsTray : ApplicationContext
         force.Visible = false;
         menu.Items.AddRange(new ToolStripItem[] { status, resources, usage, new ToolStripSeparator(), stop, force });
         icon = new NotifyIcon { Icon = CreateIcon(), Text = "Happy Agent is running", ContextMenuStrip = menu, Visible = true };
-        menu.Opening += delegate { Refresh(); refreshTimer.Start(); };
+        menu.Opening += delegate { Refresh(true); refreshTimer.Start(); };
         menu.Closed += delegate { refreshTimer.Stop(); };
         refreshTimer.Tick += delegate { Refresh(); };
         stop.Click += async delegate { await Stop(); };
@@ -78,9 +79,10 @@ internal sealed class WindowsTray : ApplicationContext
         });
     }
 
-    private async void Refresh()
+    private async void Refresh(bool refreshAccounts = false)
     {
-        if (closed || refreshing) return;
+        if (closed) return;
+        if (refreshing) { refreshAccountsPending |= refreshAccounts; return; }
         refreshing = true;
         try
         {
@@ -92,13 +94,13 @@ internal sealed class WindowsTray : ApplicationContext
             resources.Text = string.Format(CultureInfo.CurrentCulture, "CPU {0:0.0}% average | Memory {1:N0} MB", percent, parent.WorkingSet64 / 1048576.0);
             sampledCpu = cpu;
             sampledAt = now;
-            DaemonUsage snapshot = await Task.Run(() => client.Usage());
+            DaemonUsage snapshot = await Task.Run(() => client.Usage(refreshAccounts));
             if (closed) return;
             usage.DropDownItems.Clear();
             foreach (UsageProvider provider in snapshot.Providers ?? new UsageProvider[0])
             {
                 if (!provider.Enabled) continue;
-                string name = CultureInfo.CurrentCulture.TextInfo.ToTitleCase((provider.Id ?? "Provider").Replace('_', ' ').Replace('-', ' ').Replace('.', ' '));
+                string name = VendorName(provider.Type) + " · " + (provider.Name ?? ProviderName(provider.Id));
                 if (provider.Usage == null || provider.Usage.Windows == null)
                 {
                     AddUsage(name + ": usage unavailable");
@@ -121,7 +123,11 @@ internal sealed class WindowsTray : ApplicationContext
         {
             if (!closed) status.Text = stopping ? "Stopping Happy Agent..." : "Happy Agent is not responding";
         }
-        finally { refreshing = false; }
+        finally
+        {
+            refreshing = false;
+            if (refreshAccountsPending) { refreshAccountsPending = false; Refresh(true); }
+        }
     }
 
     private void AddWindow(string label, UsageWindow window)
@@ -133,6 +139,25 @@ internal sealed class WindowsTray : ApplicationContext
     }
 
     private void AddUsage(string text) { usage.DropDownItems.Add(new ToolStripMenuItem(text) { Enabled = false }); }
+
+    private static string ProviderName(string id)
+    {
+        if (id == "claude" || id == "codex" || id == "grok") return "Current CLI";
+        return CultureInfo.CurrentCulture.TextInfo.ToTitleCase((id ?? "Provider").Replace('_', ' ').Replace('-', ' ').Replace('.', ' '));
+    }
+
+    private static string VendorName(string type)
+    {
+        switch (type)
+        {
+            case "claude": return "Claude";
+            case "codex": return "Codex";
+            case "grok": return "Grok";
+            case "bedrock": return "Amazon Bedrock";
+            case "smart": return "Pool";
+            default: return "Provider";
+        }
+    }
 
     private async Task Stop()
     {

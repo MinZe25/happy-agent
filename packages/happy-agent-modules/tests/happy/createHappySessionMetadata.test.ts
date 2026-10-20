@@ -27,6 +27,7 @@ const MODELS: readonly HappyModel[] = [
         id: "gpt-5.6-sol",
         name: "GPT-5.6 Sol",
         providerId: "codex",
+        providerName: "Current CLI",
         providerType: "codex",
         serviceTiers: ["priority"],
     },
@@ -36,6 +37,7 @@ const MODELS: readonly HappyModel[] = [
         id: "opus-5",
         name: "Opus 5",
         providerId: "claude",
+        providerName: "Current CLI",
         providerType: "claude",
         serviceTiers: [],
     },
@@ -53,6 +55,7 @@ function snapshot(overrides: Partial<HappySessionSnapshot> = {}): HappySessionSn
         permissionMode: "auto",
         projectName: "rig",
         providerId: "codex",
+        providerName: "Current CLI",
         providerType: "codex",
         sessionId: "session-1",
         status: "running",
@@ -162,7 +165,7 @@ describe("describing a Happy Agent session in Happy's own terms", () => {
             currentOperatingModeCode: "auto",
             currentThoughtLevelCode: "high",
             permissionMode: "auto",
-            provider: { id: "codex", kind: "codex", name: "OpenAI Codex" },
+            provider: { id: "codex", kind: "codex", name: "Current CLI" },
             session: { modelLocked: false, permissionMode: "auto", status: "running" },
         });
     });
@@ -171,13 +174,24 @@ describe("describing a Happy Agent session in Happy's own terms", () => {
         const published = createHappySessionMetadata({
             configuration: CONFIGURATION,
             models: [
-                { ...MODELS[1]!, providerId: "claude_extra", providerType: "claude" },
-                { ...MODELS[1]!, providerId: "east", providerType: "bedrock" },
+                {
+                    ...MODELS[1]!,
+                    providerId: "claude_extra",
+                    providerType: "claude",
+                    providerName: "alex@gmail.com",
+                },
+                {
+                    ...MODELS[1]!,
+                    providerId: "east",
+                    providerType: "bedrock",
+                    providerName: "East",
+                },
             ],
             session: snapshot({
                 modelId: "opus-5",
                 providerId: "claude_extra",
                 providerType: "claude",
+                providerName: "alex@gmail.com",
             }),
             summaryUpdatedAt: 5_000,
             version: "1.2.3",
@@ -185,7 +199,7 @@ describe("describing a Happy Agent session in Happy's own terms", () => {
         expect(published.provider).toEqual({
             id: "claude_extra",
             kind: "claude",
-            name: "Anthropic Claude",
+            name: "alex@gmail.com",
         });
         expect(published.providers.map((provider) => provider.kind)).toEqual(["claude", "bedrock"]);
         expect(published.models.map((model) => model.providerKind)).toEqual(["claude", "bedrock"]);
@@ -195,8 +209,11 @@ describe("describing a Happy Agent session in Happy's own terms", () => {
         // The phone discards the whole session's metadata over one provider without a string kind.
         const published = createHappySessionMetadata({
             configuration: CONFIGURATION,
-            models: [...MODELS, { ...MODELS[1]!, providerId: "gone", providerType: null }],
-            session: snapshot({ providerId: "gone", providerType: null }),
+            models: [
+                ...MODELS,
+                { ...MODELS[1]!, providerId: "gone", providerType: null, providerName: "Gone" },
+            ],
+            session: snapshot({ providerId: "gone", providerType: null, providerName: "Gone" }),
             summaryUpdatedAt: 5_000,
             version: "1.2.3",
         });

@@ -20,6 +20,7 @@ const MODELS: readonly HappyModel[] = [
         id: "gpt-5.6-sol",
         name: "GPT-5.6 Sol",
         providerId: "codex",
+        providerName: "Current CLI",
         providerType: "codex",
         serviceTiers: ["priority"],
     },
@@ -76,14 +77,32 @@ describe("describing this computer to Happy", () => {
         const published = createHappyMachineMetadata({
             configuration: CONFIGURATION,
             models: [
-                { ...model, id: "opus-5", providerId: "claude_extra", providerType: "claude" },
-                { ...model, id: "opus-5", providerId: "east", providerType: "bedrock" },
-                { ...model, id: "mystery", providerId: "gone", providerType: null },
+                {
+                    ...model,
+                    id: "opus-5",
+                    providerId: "claude_extra",
+                    providerType: "claude",
+                    providerName: "alex@gmail.com",
+                },
+                {
+                    ...model,
+                    id: "opus-5",
+                    providerId: "east",
+                    providerType: "bedrock",
+                    providerName: "East",
+                },
+                {
+                    ...model,
+                    id: "mystery",
+                    providerId: "gone",
+                    providerType: null,
+                    providerName: "Gone",
+                },
             ],
             version: "1.2.3",
         });
         expect(published.providers).toEqual([
-            { id: "claude_extra", kind: "claude", name: "Anthropic Claude" },
+            { id: "claude_extra", kind: "claude", name: "alex@gmail.com" },
             { id: "east", kind: "bedrock", name: "East" },
             { id: "gone", kind: "unknown", name: "Gone" },
         ]);

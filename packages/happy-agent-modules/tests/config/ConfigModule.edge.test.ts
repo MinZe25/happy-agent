@@ -347,6 +347,7 @@ describe("ConfigModule edge coverage", () => {
                 expect(configuration.values).not.toHaveProperty("observation.traces", true);
                 expect(configuration.values.providers.codex).toEqual({
                     enabled: false,
+                    name: "Current CLI",
                     type: "codex",
                 });
                 expect(configuration.provenance).not.toHaveProperty("providers");

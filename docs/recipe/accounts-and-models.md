@@ -20,8 +20,14 @@ reference.
 
 ## Accounts
 
-Each extra account is a `[providers.<id>]` table with a `type`. The `<id>` is what the model picker
-shows.
+Each extra account is a `[providers.<id>]` table with a `type` and optional friendly `name`.
+Built-in `claude`, `codex`, and `grok` default to **Current CLI**; other accounts without a name
+use a readable version of the ID. Configuration, defaults, and pools continue to use the IDs.
+
+Choose a short name the person recognizes. Email can help: when proposing a name,
+`alex@gmail.com` can become `alex`, and `alex@acme.dev` can become `alex acme`. This is guidance for
+choosing a name. The product displays explicit names verbatim; it never shortens emails or
+appends plan names automatically.
 
 | Vendor  | Settings                                | How the user gets the credential                                                                     |
 | ------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------- |

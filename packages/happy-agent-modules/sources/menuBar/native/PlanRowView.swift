@@ -20,7 +20,7 @@ final class PlanRowView: NSView {
         // Longer conversation titles widen the menu; the bars follow it rather than ending short.
         autoresizingMask = [.width]
 
-        title.stringValue = [entry.name, entry.plan].compactMap { $0 }.joined(separator: " · ")
+        title.stringValue = "\(entry.vendor) · \(entry.name)"
         title.font = .menuFont(ofSize: 13)
         title.textColor = .labelColor
         title.lineBreakMode = .byTruncatingTail

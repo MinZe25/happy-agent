@@ -9,12 +9,6 @@ export interface HappyProviderDescriptor {
     name: string;
 }
 
-const KNOWN_PROVIDER_NAMES: Readonly<Record<string, string>> = {
-    claude: "Anthropic Claude",
-    codex: "OpenAI Codex",
-    grok: "xAI Grok",
-};
-
 /**
  * Describes a provider for the phone, in words rather than an identifier.
  *
@@ -25,12 +19,13 @@ const KNOWN_PROVIDER_NAMES: Readonly<Record<string, string>> = {
 export function describeHappyProvider(
     providerId: string,
     providerType: string | null,
+    name?: string,
 ): HappyProviderDescriptor {
     return {
         id: providerId,
         kind: providerType ?? "unknown",
         name:
-            (providerType === null ? undefined : KNOWN_PROVIDER_NAMES[providerType]) ??
+            name ??
             providerId
                 .replaceAll(/[_-]+/gu, " ")
                 .replaceAll(/\b\w/gu, (character) => character.toUpperCase()),
@@ -39,14 +34,18 @@ export function describeHappyProvider(
 
 /** Each provider behind these models once, in the order its first model appears. */
 export function describeHappyProviders(
-    models: readonly { readonly providerId: string; readonly providerType: string | null }[],
+    models: readonly {
+        readonly providerId: string;
+        readonly providerType: string | null;
+        readonly providerName?: string;
+    }[],
 ): HappyProviderDescriptor[] {
     const providers = new Map<string, HappyProviderDescriptor>();
     for (const model of models) {
         if (providers.has(model.providerId)) continue;
         providers.set(
             model.providerId,
-            describeHappyProvider(model.providerId, model.providerType),
+            describeHappyProvider(model.providerId, model.providerType, model.providerName),
         );
     }
     return [...providers.values()];

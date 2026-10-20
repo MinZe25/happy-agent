@@ -1349,6 +1349,7 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
             id: model.id,
             name: model.name,
             providerId: model.providerId,
+            providerName: this.#config.providerName(model.providerId),
             providerType: this.#config.providerType(model.providerId),
             serviceTiers: model.serviceTiers === undefined ? [] : [...model.serviceTiers],
         }));
@@ -2829,6 +2830,7 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
             ...(owner.project === undefined ? {} : { project: owner.project }),
             projectName: owner.project?.name ?? basename(cwd) ?? cwd,
             providerId: selection.providerId,
+            providerName: this.#config.providerName(selection.providerId),
             providerType: this.#config.providerType(selection.providerId),
             sessionId: agentId,
             status: "idle",
