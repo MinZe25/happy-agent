@@ -106,6 +106,7 @@ describe("a drain that starts during a waiting output read", () => {
         expect(JSON.stringify(completed)).toContain(
             `Process running with session ID ${String(polledSession)}`,
         );
+        expect(JSON.stringify(completed)).toContain("Happy Agent is restarting");
         // The drain released only the wait: the benchmark is still running, and no new inference
         // started after the batch reached its edge.
         const activity = await gym.client.getAgentActivity(gym.defaultSessionId);

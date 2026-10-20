@@ -278,6 +278,14 @@ export class ComputeModule implements AgentModule {
     #reviewer: HostCompute | undefined;
     /** Raised once, when the daemon starts draining; see {@link releaseOutputWaits}. */
     readonly #outputWaits = new AbortController();
+    /**
+     * Machines reached through a runner's transport. Their output reads are never released: a
+     * runner request cancelled mid-wait is rejected here while the runner has already consumed
+     * the output it would have answered with, so releasing it would lose that output. They keep
+     * waiting as they always have. Every other machine is this process's own shell, which answers
+     * a released wait with what it read.
+     */
+    readonly #runnerMachines = new WeakSet<Compute>();
     /** Compute's one durable store shared by every agent in this collection. */
     #sharedKV: AgentKV | undefined;
     #closed = false;
@@ -716,12 +724,18 @@ export class ComputeModule implements AgentModule {
      * reload open until that wait ran out while the command itself kept running. Each such read
      * now answers at once with what the command has said so far, through its ordinary result, so
      * nothing it consumed is lost. The command keeps running. Reads that start later answer
-     * without waiting. Commands, typed input, and every other tool are unaffected.
+     * without waiting. Commands, typed input, and every other tool are unaffected, and so are
+     * reads on a runner's machine; see {@link #runnerMachines}.
      */
     releaseOutputWaits(): void {
         this.#outputWaits.abort(
             new Error("Happy Agent is restarting, so this read stopped waiting for more output."),
         );
+    }
+
+    /** The release signal for one machine's output reads, or none for a runner's machine. */
+    #outputWaitsFor(compute: Compute): AbortSignal | undefined {
+        return this.#runnerMachines.has(compute) ? undefined : this.#outputWaits.signal;
     }
 
     /** Dispose every cached compute when the owning host shuts down. */
@@ -767,7 +781,12 @@ export class ComputeModule implements AgentModule {
     async reviewerTools(ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> {
         const compute = await this.#reviewerCompute(ctx);
         const reads = new FileReadLog(scope.kv, this.#reviewerReadLocks, scope.agent.id);
-        return assembleReviewerTools(vendorFor(scope), compute, reads, this.#outputWaits.signal);
+        return assembleReviewerTools(
+            vendorFor(scope),
+            compute,
+            reads,
+            this.#outputWaitsFor(compute),
+        );
     }
 
     /** The reviewer's own machine, created on first use and kept for as long as this module runs. */
@@ -820,7 +839,9 @@ export class ComputeModule implements AgentModule {
                 },
             },
         );
-        return refuseAttachedSecrets(compute);
+        const reviewer = refuseAttachedSecrets(compute);
+        this.#runnerMachines.add(reviewer);
+        return reviewer;
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -856,7 +877,12 @@ export class ComputeModule implements AgentModule {
             const compute = await this.resolve(ctx, scope.agent.id);
             if (compute === undefined) return [];
             const reads = new FileReadLog(scope.kv, this.#readLocks, scope.agent.id);
-            return assembleComputeTools(vendorFor(scope), compute, reads, this.#outputWaits.signal);
+            return assembleComputeTools(
+                vendorFor(scope),
+                compute,
+                reads,
+                this.#outputWaitsFor(compute),
+            );
         },
 
         beforeInferenceTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
@@ -1001,6 +1027,7 @@ export class ComputeModule implements AgentModule {
                 ? detachedProcessContext
                 : withAgentDatabase(detachedProcessContext, database);
         let compute: Compute;
+        let onRunner = true;
         const policy = {
             protectedProjectFiles: [...(this.hostPolicy.protectedProjectFiles ?? [])],
         };
@@ -1027,6 +1054,7 @@ export class ComputeModule implements AgentModule {
             });
         } else {
             this.#runners?.assertLocalExecution();
+            onRunner = false;
             compute = createDockerCompute({
                 docker: {
                     image: config.docker!.image,
@@ -1041,8 +1069,10 @@ export class ComputeModule implements AgentModule {
             await compute.dispose(ctx);
             throw new Error("The agent's machine opened in another folder.");
         }
+        const machine = refuseAttachedSecrets(compute);
+        if (onRunner) this.#runnerMachines.add(machine);
         return {
-            compute: refuseAttachedSecrets(compute),
+            compute: machine,
             processContext,
             processManager: undefined,
         };

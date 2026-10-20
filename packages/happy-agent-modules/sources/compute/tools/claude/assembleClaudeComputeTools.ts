@@ -22,7 +22,7 @@ import { claudeShellName } from "./impl/claudeShellName.js";
 export function assembleClaudeComputeTools(
     compute: Compute,
     reads: FileReadLog,
-    outputWaitsReleased: AbortSignal,
+    outputWaitsReleased: AbortSignal | undefined,
 ): readonly AnyAgentTool[] {
     const shellName = claudeShellName(compute);
     return [

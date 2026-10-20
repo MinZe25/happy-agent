@@ -17,7 +17,7 @@ import { codexWriteStdinTool } from "./write_stdin.js";
 export function assembleCodexComputeTools(
     compute: Compute,
     reads: FileReadLog,
-    outputWaitsReleased: AbortSignal,
+    outputWaitsReleased: AbortSignal | undefined,
 ): readonly AnyAgentTool[] {
     return [
         codexExecCommandTool(compute),

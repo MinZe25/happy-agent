@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 
 import type { Compute } from "../../Compute.js";
-import { readComputeCommand } from "../../impl/readComputeCommand.js";
+import { OUTPUT_WAIT_RELEASED_NOTICE, readComputeCommand } from "../../impl/readComputeCommand.js";
 import { boundClaudeShellOutput } from "./impl/boundClaudeShellOutput.js";
 import { parseClaudeBashId } from "./impl/parseClaudeBashId.js";
 
@@ -22,12 +22,12 @@ Only what the command has produced since your last read comes back; you already 
  * Claude's `BashOutput`: what a background shell command has said since it was last read.
  *
  * `outputWaitsReleased` ends a blocking read early with the output it has so far; see
- * {@link readComputeCommand}.
+ * {@link readComputeCommand}. A machine whose reads are never released passes none.
  */
 export function claudeBashOutputTool(
     compute: Compute,
     shellName: "Bash" | "PowerShell",
-    outputWaitsReleased: AbortSignal,
+    outputWaitsReleased: AbortSignal | undefined,
 ) {
     return defineAgentTool({
         name: `${shellName}Output`,
@@ -72,6 +72,8 @@ export function claudeBashOutputTool(
                     Type.Literal("success"),
                     Type.Literal("timeout"),
                 ]),
+                /** The wait ended early because Happy Agent is restarting. */
+                restarting: Type.Optional(Type.Literal(true)),
             },
             exact,
         ),
@@ -82,7 +84,7 @@ export function claudeBashOutputTool(
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, { bash_id, block, timeout }) => {
             const commandId = parseClaudeBashId(bash_id);
-            const { snapshot } = await readComputeCommand(compute, ctx, {
+            const { released, snapshot } = await readComputeCommand(compute, ctx, {
                 commandId,
                 waitMs:
                     block === false ? 0 : Math.min(MAX_TIMEOUT_MS, timeout ?? DEFAULT_TIMEOUT_MS),
@@ -107,6 +109,7 @@ export function claudeBashOutputTool(
                         ? ("not_ready" as const)
                         : ("timeout" as const)
                     : ("success" as const),
+                ...(released ? { restarting: true as const } : {}),
             };
         },
         toLLM: (result) => {
@@ -119,7 +122,11 @@ export function claudeBashOutputTool(
             return [
                 {
                     type: "text",
-                    text: `${heading}\n${result.output.length > 0 ? result.output : "(no new output)"}`,
+                    text: [
+                        heading,
+                        ...(result.restarting === true ? [OUTPUT_WAIT_RELEASED_NOTICE] : []),
+                        result.output.length > 0 ? result.output : "(no new output)",
+                    ].join("\n"),
                 },
             ];
         },

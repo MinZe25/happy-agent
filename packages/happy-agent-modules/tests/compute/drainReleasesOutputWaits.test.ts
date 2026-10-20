@@ -60,12 +60,18 @@ async function machine(model: string) {
     };
     const run = async (name: string, input: unknown): Promise<any> =>
         await tool(name).execute(ctx, input, call);
-    return { cwd, module, run };
+    /** The text the model is shown for one result. */
+    const shown = (name: string, result: unknown): string =>
+        tool(name)
+            .toLLM(result)
+            .map((block) => (block.type === "text" ? block.text : ""))
+            .join("\n");
+    return { cwd, module, run, shown };
 }
 
 describe.skipIf(process.platform === "win32")("a drain releases output waits", () => {
     it("answers a blocking BashOutput at once with its output, and the command keeps running", async () => {
-        const { cwd, module, run } = await machine("anthropic/opus-5");
+        const { cwd, module, run, shown } = await machine("anthropic/opus-5");
         const started = await run(SHELL, {
             command:
                 "while [ ! -e go ]; do sleep 0.05; done; printf 'first\\n'; : > printed; sleep 30; printf 'never\\n'",
@@ -87,6 +93,7 @@ describe.skipIf(process.platform === "win32")("a drain releases output waits", (
         expect(released).toMatchObject({
             bash_id: bashId,
             output: "first\n",
+            restarting: true,
             retrieval_status: "timeout",
             status: "running",
         });
@@ -100,14 +107,17 @@ describe.skipIf(process.platform === "win32")("a drain releases output waits", (
             timeout: 600_000,
         });
         expect(Date.now() - laterAt).toBeLessThan(2_000);
-        expect(later).toMatchObject({ output: "", status: "running" });
+        expect(later).toMatchObject({ output: "", restarting: true, status: "running" });
+        expect(shown(`${SHELL}Output`, released)).toContain(
+            "Happy Agent is restarting, so this read stopped waiting before the command finished.",
+        );
 
         const stopped = await run(`${SHELL}Stop`, { bash_id: bashId });
         expect(stopped).toMatchObject({ bash_id: bashId, stopped: true });
     }, 30_000);
 
     it("answers a Codex empty poll at once with its output", async () => {
-        const { cwd, module, run } = await machine("openai/gpt-5.6-sol");
+        const { cwd, module, run, shown } = await machine("openai/gpt-5.6-sol");
         const started = await run("exec_command", {
             cmd: "sleep 0.5; printf 'first\\n'; : > printed; sleep 30",
             yield_time_ms: 250,
@@ -123,7 +133,8 @@ describe.skipIf(process.platform === "win32")("a drain releases output waits", (
 
         expect(Date.now() - releasedAt).toBeLessThan(2_000);
         expect(released.output).toContain("first");
-        expect(released.session_id).toBe(sessionId);
+        expect(released).toMatchObject({ restarting: true, session_id: sessionId });
+        expect(shown("write_stdin", released)).toContain("Happy Agent is restarting");
         await run("kill_session", { session_id: sessionId });
     }, 30_000);
 

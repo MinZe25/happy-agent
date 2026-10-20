@@ -3,7 +3,7 @@ import { defineAgentTool } from "@slopus/happy-agent-base";
 
 import type { Compute } from "../../Compute.js";
 import { boundOutputText } from "../../impl/boundOutputText.js";
-import { readComputeCommand } from "../../impl/readComputeCommand.js";
+import { OUTPUT_WAIT_RELEASED_NOTICE, readComputeCommand } from "../../impl/readComputeCommand.js";
 import { parseGrokTaskId } from "./impl/parseGrokTaskId.js";
 
 /** The longest one call may wait for the commands it was given to finish. */
@@ -23,17 +23,19 @@ const taskOutputSchema = Type.Object({
     exit_code: Type.Optional(Type.Union([Type.Integer(), Type.Null()])),
     output: Type.String(),
     truncated: Type.Boolean(),
+    /** The wait ended early because Happy Agent is restarting. */
+    restarting: Type.Optional(Type.Literal(true)),
 });
 
 /**
  * Grok's `get_command_or_subagent_output`, scoped here to the background commands this machine runs.
  *
  * `outputWaitsReleased` ends the wait early with the output each command has so far; see
- * {@link readComputeCommand}.
+ * {@link readComputeCommand}. A machine whose reads are never released passes none.
  */
 export function grokGetCommandOrSubagentOutputTool(
     compute: Compute,
-    outputWaitsReleased: AbortSignal,
+    outputWaitsReleased: AbortSignal | undefined,
 ) {
     return defineAgentTool({
         name: "get_command_or_subagent_output",
@@ -104,7 +106,7 @@ Usage notes:
                     });
                     continue;
                 }
-                const { snapshot } = outcome;
+                const { released, snapshot } = outcome;
                 const bounded = boundOutputText(
                     [snapshot.stdoutDelta, snapshot.stderrDelta]
                         .filter((part) => part.length > 0)
@@ -118,6 +120,7 @@ Usage notes:
                     ...(snapshot.status === "running" ? {} : { exit_code: snapshot.exitCode }),
                     output: bounded.text,
                     truncated: bounded.truncated,
+                    ...(released ? { restarting: true as const } : {}),
                 });
             }
             return { results };
@@ -135,6 +138,7 @@ Usage notes:
                                   : task.exit_code === null || task.exit_code === undefined
                                     ? `Task ${task.task_id} has ended without an exit code, which is what a stopped command looks like: ${task.command ?? ""}`
                                     : `Task ${task.task_id} has ended with exit code ${String(task.exit_code)}: ${task.command ?? ""}`,
+                            ...(task.restarting === true ? [OUTPUT_WAIT_RELEASED_NOTICE] : []),
                             ...(task.status === "not_found"
                                 ? []
                                 : [task.output.length > 0 ? task.output : "(no new output)"]),

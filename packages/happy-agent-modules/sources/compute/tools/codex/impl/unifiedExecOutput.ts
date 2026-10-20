@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 import type { ComputeSessionSnapshot } from "../../../Compute.js";
+import { OUTPUT_WAIT_RELEASED_NOTICE } from "../../../impl/readComputeCommand.js";
 
 /** The output budget Codex assumes when the model does not name one. */
 export const CODEX_DEFAULT_OUTPUT_TOKENS = 10_000;
@@ -30,6 +31,8 @@ export const unifiedExecOutputSchema = Type.Object(
         output: Type.String(),
         session_id: Type.Optional(Type.Integer()),
         wall_time_seconds: Type.Number(),
+        /** A poll's wait ended early because Happy Agent is restarting. */
+        restarting: Type.Optional(Type.Literal(true)),
     },
     { additionalProperties: false },
 );
@@ -94,6 +97,7 @@ export function formatUnifiedExecOutput(result: UnifiedExecOutput): string {
             "Process ended without an exit code, which is what a stopped session looks like",
         );
     }
+    if (result.restarting === true) sections.push(OUTPUT_WAIT_RELEASED_NOTICE);
     if (result.original_token_count !== undefined) {
         sections.push(`Original token count: ${String(result.original_token_count)}`);
     }

@@ -16,7 +16,7 @@ import { claudeShellName } from "../claude/impl/claudeShellName.js";
 export function assembleGlmComputeTools(
     compute: Compute,
     reads: FileReadLog,
-    outputWaitsReleased: AbortSignal,
+    outputWaitsReleased: AbortSignal | undefined,
 ): readonly AnyAgentTool[] {
     const shell = claudeShellName(compute);
     return [

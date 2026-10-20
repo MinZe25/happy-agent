@@ -22,7 +22,7 @@ import { grokWriteTool } from "./write.js";
 export function assembleGrokComputeTools(
     compute: Compute,
     reads: FileReadLog,
-    outputWaitsReleased: AbortSignal,
+    outputWaitsReleased: AbortSignal | undefined,
 ): readonly AnyAgentTool[] {
     return [
         grokRunTerminalCommandTool(compute),

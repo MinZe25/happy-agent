@@ -20,7 +20,7 @@ export function assembleComputeTools(
     vendor: ComputeToolVendor,
     compute: Compute,
     reads: FileReadLog,
-    outputWaitsReleased: AbortSignal,
+    outputWaitsReleased: AbortSignal | undefined,
 ): readonly AnyAgentTool[] {
     switch (vendor) {
         case "claude":

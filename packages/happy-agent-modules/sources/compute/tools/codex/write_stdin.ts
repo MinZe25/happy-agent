@@ -23,9 +23,13 @@ const MAXIMUM_POLL_WAIT_MS = 300_000;
  * Codex's own tool for typing into a running session, and for simply waiting on one.
  *
  * `outputWaitsReleased` ends an empty poll's wait early with the output it has so far; see
- * {@link readComputeCommand}. Typed input keeps its own short wait.
+ * {@link readComputeCommand}. Typed input keeps its own short wait. A machine whose reads are
+ * never released passes none.
  */
-export function codexWriteStdinTool(compute: Compute, outputWaitsReleased: AbortSignal) {
+export function codexWriteStdinTool(
+    compute: Compute,
+    outputWaitsReleased: AbortSignal | undefined,
+) {
     return defineAgentTool({
         name: "write_stdin",
         defer: false,
@@ -84,18 +88,24 @@ export function codexWriteStdinTool(compute: Compute, outputWaitsReleased: Abort
                     yield_time_ms ?? (typing ? DEFAULT_WRITE_WAIT_MS : DEFAULT_POLL_WAIT_MS),
                 ),
             );
-            const { snapshot, wallTimeSeconds } = typing
-                ? await writeComputeCommandInput(compute, ctx, {
-                      commandId,
-                      input: chars,
-                      waitMs,
-                  })
+            const { released, snapshot, wallTimeSeconds } = typing
+                ? {
+                      ...(await writeComputeCommandInput(compute, ctx, {
+                          commandId,
+                          input: chars,
+                          waitMs,
+                      })),
+                      released: false,
+                  }
                 : await readComputeCommand(compute, ctx, {
                       commandId,
                       waitMs,
                       released: outputWaitsReleased,
                   });
-            return createUnifiedExecOutput(snapshot, wallTimeSeconds, max_output_tokens);
+            return {
+                ...createUnifiedExecOutput(snapshot, wallTimeSeconds, max_output_tokens),
+                ...(released ? { restarting: true as const } : {}),
+            };
         },
         isError: (result) => result.exit_code !== undefined && result.exit_code !== 0,
         toLLM: (result) => [{ type: "text", text: formatUnifiedExecOutput(result) }],

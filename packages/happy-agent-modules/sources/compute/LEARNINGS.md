@@ -217,7 +217,11 @@ Reads that start later don't wait. The command keeps running, and the cursor adv
 output that was returned. Foreground commands, typed input, and every other tool keep their
 behavior, and there is no drain deadline.
 
-The release is an abort signal passed to the shell's wait, so it relies on the shell answering a
-cancelled wait with its snapshot. Host, Docker, and just-bash shells do. A runner's transport
-rejects a cancelled request and drops the delta the runner already consumed, so a read on a runner
-machine can still lose that output. Fixing it belongs in the compute package's runner client.
+The release is an abort signal passed to the shell's wait. It is safe only where the shell
+answers a cancelled wait with its snapshot, as host, Docker, and just-bash shells do. A runner's
+transport rejects a cancelled request after the runner has already consumed the output it would
+have returned, so releasing a runner read would lose that output. Compute therefore records every
+machine it builds on a runner, including the reviewer's workload-user runner, and hands those tools
+no release signal: a runner read keeps waiting exactly as before. Tools never guess this from a
+name or a compute kind. A released read also tells the model that Happy Agent is restarting, so a
+result saying the command is still running is not mistaken for an ordinary timeout.
