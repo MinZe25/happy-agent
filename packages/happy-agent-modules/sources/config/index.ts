@@ -39,6 +39,8 @@ export {
     type ExecutionConfig,
 } from "./ExecutionConfig.js";
 export { VoiceCredentialPoolError } from "./VoiceCredentialPoolError.js";
+export type { UnavailableCredentialFailure } from "./impl/ProviderCredentialFailures.js";
+export type { ProviderSignIn } from "./impl/ProviderCredentialsUnavailableError.js";
 export type {
     CurrentProviderExecutionAttempt,
     ProviderExecutionAttempt,

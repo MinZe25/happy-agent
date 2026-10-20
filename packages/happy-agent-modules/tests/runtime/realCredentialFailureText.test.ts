@@ -175,8 +175,16 @@ api_url = "http://127.0.0.1:${address.port}"
                 for (const value of [historyContent, eventContent, delivered, settled]) {
                     const serialized = JSON.stringify(value);
                     for (const marker of markers) expect(serialized).not.toContain(marker);
-                    expect(serialized).toContain(JSON.stringify(suffix).slice(1, -1));
                 }
+                // The provider's cleaned text still reaches the stream and the settlement; the
+                // transcript row shows the typed sign-in failure's own sentence instead.
+                for (const value of [delivered, settled])
+                    expect(JSON.stringify(value)).toContain(JSON.stringify(suffix).slice(1, -1));
+                for (const value of [historyContent, eventContent])
+                    expect(value).toContainEqual({
+                        type: "text",
+                        text: "private_account has no credentials. Check its settings, then retry.",
+                    });
             } finally {
                 unsubscribe();
             }

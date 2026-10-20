@@ -15,7 +15,10 @@ import {
     type Context,
 } from "@steve.kite/stdlib";
 
+import type { MessageFailureFallback } from "@slopus/happy-agent-client";
+
 import { ConfigModule } from "../config/index.js";
+import { rankFallbackProviders } from "./impl/rankFallbackProviders.js";
 
 /** How often every account is asked in the background, after the read at startup. */
 export const PROVIDER_USAGE_POLL_INTERVAL_MS = 24 * 60 * 60 * 1_000;
@@ -155,6 +158,33 @@ export class ProviderUsageModule implements AgentModule {
             ...entry,
             usage: entry.usage === null ? null : structuredClone(entry.usage),
         }));
+    }
+
+    /**
+     * The usable accounts and models to switch to after `providerId` failed serving `modelId`,
+     * ranked the same way for every client. Only accounts with a fresh reading that is not
+     * exhausted qualify; spent accounts and accounts that need a sign-in are never listed.
+     */
+    fallbackProviders(providerId: string, modelId: string): MessageFailureFallback[] {
+        const providers = this.#config.configuration.values.providers;
+        return rankFallbackProviders({
+            failedProviderId: providerId,
+            failedModelId: modelId,
+            failedType: this.#config.providerType(providerId),
+            models: this.#config.models,
+            accounts: [...this.#entries.values()].map((entry) => ({
+                providerId: entry.providerId,
+                type: this.#config.providerType(entry.providerId),
+                label: providers[entry.providerId]?.name ?? entry.providerId,
+                offered:
+                    providers[entry.providerId]?.type !== "smart" &&
+                    !this.#config.isProviderHidden(entry.providerId) &&
+                    !this.#config.providerNeedsSignIn(entry.providerId),
+                usage: entry.usage,
+                refreshedAt: entry.refreshedAt,
+            })),
+            now: Date.now(),
+        });
     }
 
     /**

@@ -168,12 +168,12 @@ it("defends against an injected provider that shares sessions across different c
             .soft(
                 equalRun.messages
                     .filter((message) => message.role === "service")
-                    .find((message) =>
-                        message.content.some(
-                            (block) =>
-                                block.type === "text" &&
-                                block.text.includes("Equal snapshot failure"),
-                        ),
+                    // The rejected key is a typed sign-in failure; its row reads the failure's own
+                    // sentence rather than the provider's text.
+                    .find(
+                        (message) =>
+                            message.role === "service" &&
+                            message.failure?.kind === "signin_missing",
                     )?.error?.credentialSource,
             )
             .toMatchObject({ kind: "configuration", location: firstSelector });

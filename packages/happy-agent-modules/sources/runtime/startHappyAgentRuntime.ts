@@ -440,7 +440,9 @@ export async function startHappyAgentRuntime(
         });
 
         const events = new EventsModule();
-        const history = new HistoryModule(events, botSettings, config);
+        const providerUsage = new ProviderUsageModule(config);
+        registerShutdown("provider-usage", async () => await providerUsage.close());
+        const history = new HistoryModule(events, botSettings, config, providerUsage);
         history.onAppend(observation.recordHistory);
         const presence = new PresenceModule(config);
         const systemPrompt = new SystemPromptModule(config, compute.computeModule);
@@ -613,8 +615,6 @@ export async function startHappyAgentRuntime(
             "connections",
             async (shutdownCtx) => await connections.close(shutdownCtx),
         );
-        const providerUsage = new ProviderUsageModule(config);
-        registerShutdown("provider-usage", async () => await providerUsage.close());
         const happy = new HappyModule(
             config,
             compute.computeModule,

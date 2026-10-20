@@ -24,6 +24,7 @@ import {
     messageModeSchema,
     userIdSchema,
     type AgentSpawnPresentation,
+    type MessageFailure,
     type MessageMode,
 } from "@slopus/happy-agent-client";
 import { afterCommit, withLogContext, type Context } from "@steve.kite/stdlib";
@@ -43,9 +44,15 @@ import {
 import { decodeRequestProfile } from "../impl/requestProfile.js";
 import type { BotSettingsModule } from "../botSettings/index.js";
 import type { EventsModule } from "../events/index.js";
-import type { ConfigModule, ProviderExecutionAttempt } from "../config/index.js";
+import type {
+    ConfigModule,
+    ProviderExecutionAttempt,
+    UnavailableCredentialFailure,
+} from "../config/index.js";
+import type { ProviderUsageModule } from "../providerUsage/index.js";
 import { executionConfigurationChanged } from "./impl/executionConfigurationChanged.js";
 import { executionFailure } from "./impl/executionFailure.js";
+import { messageFailure } from "./impl/messageFailure.js";
 import { ExecutionConfigurationReservations } from "./impl/ExecutionConfigurationReservations.js";
 import { queryToolCallMessage } from "./persistence/queryToolCallMessage.js";
 import { queryRecordToolSpawnPresentation } from "./persistence/queryToolSpawnPresentation.js";
@@ -214,6 +221,7 @@ export class HistoryModule implements AgentModule {
     readonly #events: EventsModule | undefined;
     readonly #botSettings: BotSettingsModule | undefined;
     readonly #config: ConfigModule | undefined;
+    readonly #providerUsage: ProviderUsageModule | undefined;
     readonly #executionReservations = new ExecutionConfigurationReservations();
 
     /** Who is watching the archive: the live subscriptions this module supervises. */
@@ -226,10 +234,16 @@ export class HistoryModule implements AgentModule {
      * @param botSettings Whether a bot keeps the agents it governs from reading the history of
      * agents outside its own tree. Without it, any agent may read any agent's history.
      */
-    constructor(events?: EventsModule, botSettings?: BotSettingsModule, config?: ConfigModule) {
+    constructor(
+        events?: EventsModule,
+        botSettings?: BotSettingsModule,
+        config?: ConfigModule,
+        providerUsage?: ProviderUsageModule,
+    ) {
         this.#events = events;
         this.#botSettings = botSettings;
         this.#config = config;
+        this.#providerUsage = providerUsage;
         // Compile during module construction, not while the first history request owns the
         // database transaction. The cache contains fixed schemas, never transcript content.
         for (const schema of [
@@ -1315,16 +1329,29 @@ export class HistoryModule implements AgentModule {
             });
         }
         if (inference.errorMessage !== undefined) {
+            const attempt = attempts?.at(-1);
+            // A smart route reports a candidate that had no credential as its own failure.
+            const unavailable =
+                attempt?.errorCode === undefined
+                    ? this.#config?.unavailableCredentialFailure(
+                          inference.errorMessage,
+                          scope.agent.provider,
+                      )
+                    : undefined;
+            const failure = this.#failure(scope, inference.errorMessage, attempt, unavailable);
             messages.push({
                 role: "error",
-                blocks: [{ type: "text", text: inference.errorMessage }],
+                blocks: [{ type: "text", text: failure?.message ?? inference.errorMessage }],
                 recordId: createRecordId(),
                 // A thrown exception may be translated by a router after the native boundary.
                 // Keep its sanitized text, but do not invent native terminal classification.
                 // API.md:4658-4659,4689 make structured error details optional on these rows.
-                ...(attempts?.at(-1)?.errorCode === undefined
-                    ? {}
-                    : { error: executionFailure(attempts.at(-1)) }),
+                ...(attempt?.errorCode !== undefined
+                    ? { error: executionFailure(attempt) }
+                    : unavailable === undefined
+                      ? {}
+                      : { error: unavailable.error }),
+                ...(failure === undefined ? {} : { failure }),
                 ...attribution,
             });
         }
@@ -1512,15 +1539,47 @@ export class HistoryModule implements AgentModule {
                 LIMIT 1`,
         );
         if (existing[0] !== undefined) return;
+        // A provider with no credential fails while opening, before any attempt exists.
+        const unavailable = this.#config?.unavailableCredentialFailure(error, scope.agent.provider);
+        const failure = this.#failure(scope, error, undefined, unavailable);
         await this.#append(ctx, scope.agent.id, {
             at: Date.now(),
-            blocks: [{ type: "text", text: error }],
+            blocks: [{ type: "text", text: failure?.message ?? error }],
             recordId: settlementId,
             role: "error",
-            error: executionFailure(undefined),
+            error: unavailable?.error ?? executionFailure(undefined),
+            ...(failure === undefined ? {} : { failure }),
             runId,
             ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
             provider: scope.agent.provider,
+        });
+    }
+
+    /**
+     * The typed failure for a failed turn, with the alternatives the person can switch to. Without
+     * configuration there is no provider to describe, so the row keeps only its text.
+     */
+    #failure(
+        scope: AgentModuleScope,
+        text: string,
+        attempt: ProviderExecutionAttempt | undefined,
+        unavailable: UnavailableCredentialFailure | undefined,
+    ): MessageFailure | undefined {
+        if (this.#config === undefined) return undefined;
+        const providerId =
+            unavailable?.providerId ?? attempt?.mode.providerId ?? scope.agent.provider;
+        const modelId = attempt?.mode.modelId ?? scope.agent.model;
+        return messageFailure({
+            text,
+            attempt,
+            unavailable,
+            provider: this.#config.failureProvider(providerId),
+            // The failed route itself is the one to move away from, even behind a smart alias.
+            fallbackProviders:
+                modelId === undefined
+                    ? []
+                    : (this.#providerUsage?.fallbackProviders(scope.agent.provider, modelId) ?? []),
+            now: Date.now(),
         });
     }
 

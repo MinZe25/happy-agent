@@ -238,6 +238,16 @@ export const messageSendBodySchema = Type.Object(
     { additionalProperties: false },
 );
 
+/** `POST /v0/agents/:agentId/messages/:messageId/switch`: one of the failure's fallbacks. */
+export const failureSwitchBodySchema = Type.Object(
+    {
+        providerId: Type.String({ minLength: 1, maxLength: 256 }),
+        modelId: Type.String({ minLength: 1, maxLength: 256 }),
+        mutationId: Type.Optional(mutationIdSchema),
+    },
+    { additionalProperties: false },
+);
+
 export const abortBodySchema = Type.Object(
     {
         expectedRunId: Type.Optional(apiIdSchema),

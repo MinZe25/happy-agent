@@ -13,6 +13,9 @@ import {
     type SessionProviderErrorDiagnostics,
 } from "@slopus/happy-providers";
 
+import { NATIVE_SIGN_IN, type NativeSignInVendor } from "./nativeSignIn.js";
+import type { ProviderSignIn } from "./ProviderCredentialsUnavailableError.js";
+
 const protectedSessions = new WeakMap<BaseSession, CredentialDiagnosticSanitizer>();
 // sharedNativeSessionDoesNotReuseCredentialSource.test.ts checks 260 + 260 overflow this cap.
 const MAX_DIAGNOSTIC_SOURCE_VALUES = 512;
@@ -29,6 +32,7 @@ export class CredentialDiagnosticSources {
     readonly #values = new Set<string>();
     #credentialSource: CredentialSource | null = null;
     #recovery: ErrorRecovery | undefined;
+    #signIn: ProviderSignIn | undefined;
 
     constructor(
         readonly providerId: string,
@@ -73,8 +77,20 @@ export class CredentialDiagnosticSources {
         return this.#recovery;
     }
 
-    /** Called only after the concrete credential loader has selected this source. */
-    selected(kind: CredentialSource["kind"], location: string, defaultClaude = false): void {
+    /** How a rejected sign-in is repaired, for the typed `signin_missing` failure. */
+    get signIn(): ProviderSignIn | undefined {
+        return this.#signIn;
+    }
+
+    /**
+     * Called only after the concrete credential loader has selected this source. `defaultNative`
+     * names the vendor whose own default sign-in was selected, so its login command is the fix.
+     */
+    selected(
+        kind: CredentialSource["kind"],
+        location: string,
+        defaultNative?: NativeSignInVendor,
+    ): void {
         const host = this.hosts.at(-1);
         this.#credentialSource = {
             kind,
@@ -86,14 +102,33 @@ export class CredentialDiagnosticSources {
                 ? `If retry still fails, check ${location} in this installation's configuration, replace it if needed, reload the configuration, and retry. Signing into the native assistant alone does not replace this override.`
                 : kind === "environment"
                   ? `If retry still fails, check ${location} in the daemon's environment, replace it if needed, reload that environment, and retry. Signing into the native assistant alone does not replace this override.`
-                  : defaultClaude
-                    ? "If retry still fails, run claude auth login on the machine hosting the agent as the same operating-system user that runs the daemon, complete the browser sign-in, then retry this conversation."
+                  : defaultNative !== undefined
+                    ? `Run ${NATIVE_SIGN_IN[defaultNative].command} on the machine hosting the agent as the same operating-system user that runs the daemon, complete the ${defaultNative === "claude" ? "browser " : ""}sign-in, then retry this conversation.`
                     : "If retry still fails, check the selected native assistant sign-in using its selected configuration on the machine hosting the agent, as the same operating-system user that runs the daemon. Then retry this conversation.";
+        this.#signIn =
+            defaultNative === undefined
+                ? { product: null, command: null }
+                : {
+                      product: NATIVE_SIGN_IN[defaultNative].product,
+                      command: NATIVE_SIGN_IN[defaultNative].command,
+                  };
         this.#recovery = {
-            steps: ["Retry this conversation first.", instruction],
+            // API.md: a default native login says to sign in first; retrying alone cannot help.
+            steps:
+                defaultNative === undefined
+                    ? ["Retry this conversation first.", instruction]
+                    : [instruction],
             actions: ["ask_chief"],
-            ...(defaultClaude
-                ? { commands: [{ label: "Sign in to Claude Code", command: "claude auth login" }] }
+            // API.md: the default native Claude Code login alone receives a copyable command.
+            ...(defaultNative === "claude"
+                ? {
+                      commands: [
+                          {
+                              label: "Sign in to Claude Code",
+                              command: NATIVE_SIGN_IN.claude.command,
+                          },
+                      ],
+                  }
                 : {}),
         };
     }

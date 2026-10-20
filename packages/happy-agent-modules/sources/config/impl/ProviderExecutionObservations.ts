@@ -20,6 +20,26 @@ const attemptSchema = Type.Object(
         credentialSource: Type.Union([credentialSourceSchema, Type.Null()]),
         errorCode: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
         recovery: Type.Optional(errorRecoverySchema),
+        /** How a rejected sign-in is repaired; present only with `authentication_failed`. */
+        signIn: Type.Optional(
+            Type.Object(
+                {
+                    product: Type.Union([
+                        Type.String({ minLength: 1, maxLength: 128 }),
+                        Type.Null(),
+                    ]),
+                    command: Type.Union([
+                        Type.String({ minLength: 1, maxLength: 256 }),
+                        Type.Null(),
+                    ]),
+                },
+                { additionalProperties: false },
+            ),
+        ),
+        /** When a spent limit resets, Unix milliseconds, when the provider reported it. */
+        resetsAt: Type.Optional(Type.Number({ minimum: 0 })),
+        /** The provider rejected the request because the conversation exceeds the window. */
+        contextOverflow: Type.Optional(Type.Literal(true)),
     },
     { additionalProperties: false },
 );

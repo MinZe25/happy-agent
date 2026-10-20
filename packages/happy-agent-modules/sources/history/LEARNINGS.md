@@ -203,8 +203,26 @@ outside the native observation boundary retains safe plain text without invented
 the API explicitly makes structured error metadata optional. Config exposes only public snapshot
 types through its module index; History never imports the observation store implementation.
 
+A run whose provider cannot even be opened has no attempt. Settlement failures, and smart-route
+failures without a typed attempt, ask Config for the missing-credential failure it raised for
+exactly that text; any other text keeps the generic legacy fallback.
+
 Base can currently resume a settled failure as an unsolicited inference after restart. Such an
 inference has no accepted visible History run, so History does not manufacture configuration rows
 or make its existing raw orphan error visible. This deliberate Base behavior (8be07b97) remains
 under maintainer discussion #9, outside the writer, and is recorded by an explicit expected-failure
 test of the alternative: one foreground request per send.
+
+## A failed turn carries a typed failure that every reader shares
+
+Clients used to receive the provider's prose plus owner-only recovery steps, and wrote nothing of
+their own. Error rows now also carry `failure`, discriminated by `kind` and identical for every
+reader; the row's text block is `failure.message`, the plain-text fallback for agents and older
+clients. The kind comes only from typed classification — the last actual attempt's error code, or
+Config's missing credential — never from the text, which survives only as `internal`'s detail and
+message. A usage reset is written as a duration ("in about 2 hours") because the reader's time zone
+is unknown here; clients format `resetsAt` themselves. `fallbackProviders` comes from
+ProviderUsage: accounts with a reading at most fifteen minutes old that is not exhausted, ranked
+same model, same family, other provider, lowest usage first. Retry and Switch record `resolution`
+on the failed row in the transaction that queues a hidden notice, so the history line survives a
+reload and no user message is added; a resolved failure starts nothing again.

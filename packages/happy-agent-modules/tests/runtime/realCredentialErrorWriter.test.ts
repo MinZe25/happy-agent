@@ -9,7 +9,7 @@ import { diagnosticRuntime } from "../support/diagnosticRuntime.js";
 import {
     credentialWriterRuntime,
     writerMode,
-    writerText,
+    writerFailureText,
 } from "../support/credentialWriterRuntime.js";
 
 const hasErrorSchema = Type.Object({ error: Type.Unknown() });
@@ -104,9 +104,7 @@ inference_max_retries = 0
                     (message) =>
                         message.role === "service" &&
                         message.content.some(
-                            (block) =>
-                                block.type === "text" &&
-                                block.text.includes("Authentication failed."),
+                            (block) => block.type === "text" && block.text === writerFailureText,
                         ),
                 );
             expect(error).toMatchObject({
@@ -175,7 +173,7 @@ describe.each(["owner", "member", "unresolved"] as const)("real writer for %s", 
                                     message.content.some(
                                         (block) =>
                                             block.type === "text" &&
-                                            block.text.includes(writerText),
+                                            block.text === writerFailureText,
                                     ),
                             ).length;
                         const original = await fixture.runtime.modules.history.message(
@@ -259,7 +257,7 @@ describe.each(["owner", "member", "unresolved"] as const)("real writer for %s", 
                                         payload.message.content.some(
                                             (block) =>
                                                 block.type === "text" &&
-                                                block.text.includes(writerText),
+                                                block.text === writerFailureText,
                                         )
                                     );
                                 });
@@ -286,7 +284,7 @@ describe.each(["owner", "member", "unresolved"] as const)("real writer for %s", 
                                 row.role === "service" &&
                                 row.content.some(
                                     (block) =>
-                                        block.type === "text" && block.text.includes(writerText),
+                                        block.type === "text" && block.text === writerFailureText,
                                 ) &&
                                 row.id !== firstFailure?.id,
                         );
@@ -360,7 +358,8 @@ describe.each(["owner", "member", "unresolved"] as const)("real writer for %s", 
                         const errors = (message: Message) =>
                             message.role === "service" &&
                             message.content.some(
-                                (block) => block.type === "text" && block.text.includes(writerText),
+                                (block) =>
+                                    block.type === "text" && block.text === writerFailureText,
                             );
                         expect.soft(userRun?.messages.filter(errors)).toHaveLength(1);
                         const allErrors = page.runs.flatMap((run) => run.messages).filter(errors);
@@ -514,7 +513,8 @@ async function fail(
                             entry.id !== previous &&
                             entry.role === "service" &&
                             entry.content.some(
-                                (block) => block.type === "text" && block.text.includes(writerText),
+                                (block) =>
+                                    block.type === "text" && block.text === writerFailureText,
                             ),
                     );
                 expect(message).toBeDefined();
@@ -585,7 +585,7 @@ function check(message: Message, disclose: boolean) {
     expect
         .soft(
             message.content.some(
-                (block) => block.type === "text" && block.text.includes(writerText),
+                (block) => block.type === "text" && block.text === writerFailureText,
             ),
         )
         .toBe(true);

@@ -10,6 +10,8 @@ import {
 } from "@slopus/happy-providers";
 import { withLifetime, type Context } from "@steve.kite/stdlib";
 
+import { ProviderCredentialsUnavailableError } from "./ProviderCredentialsUnavailableError.js";
+
 export interface RoundRobinRouterCandidate {
     readonly providerId: string;
 }
@@ -366,7 +368,10 @@ function routingFailureFromError(
     error: unknown,
 ): Extract<SessionEvent, { type: "done"; state: "error" }> | undefined {
     const message = errorMessage(error);
-    const type = routingFailureKind(message);
+    const type =
+        error instanceof ProviderCredentialsUnavailableError
+            ? "authentication"
+            : routingFailureKind(message);
     if (type === undefined) return undefined;
     return {
         type: "done",

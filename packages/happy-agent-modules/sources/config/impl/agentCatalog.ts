@@ -30,6 +30,8 @@ import {
 import type { HappyAgentConfigValues, HappyAgentConfiguration } from "../ConfigModule.js";
 import { RoundRobinRouterProvider } from "./RoundRobinRouterProvider.js";
 import { CredentialDiagnosticSources } from "./credentialDiagnosticSanitizer.js";
+import type { ProviderCredentialFailures } from "./ProviderCredentialFailures.js";
+import { ProviderCredentialsUnavailableError } from "./ProviderCredentialsUnavailableError.js";
 import type { ProviderExecutionObservations } from "./ProviderExecutionObservations.js";
 import { observeProviderExecution } from "./observeProviderExecution.js";
 import { resolveDefaultNodeName } from "./resolveDefaultNodeName.js";
@@ -426,6 +428,7 @@ export function agentProviders(
     providerSignal: (providerId: string) => AbortSignal | undefined = () => undefined,
     concreteProviders?: AgentProviders,
     observations?: ProviderExecutionObservations,
+    credentialFailures?: ProviderCredentialFailures,
 ): AgentProviders {
     const providers = new AgentProviders();
     const retryLimit = configuration.values.settings.inferenceMaxRetries;
@@ -468,6 +471,7 @@ export function agentProviders(
                         sources,
                         onAccountUsage,
                     );
+                    credentialFailures?.clear(id);
                     const diagnostics = sources.snapshot();
                     const protectedProvider = diagnostics.protect(concrete);
                     return observations === undefined
@@ -480,11 +484,15 @@ export function agentProviders(
                               sources.recovery,
                               provider.type,
                               diagnostics,
+                              sources.signIn,
                           );
                 } catch (error) {
                     // Discovery may throw before a credential exists. Only inputs already passed
                     // to that discovery can be removed; no after-the-fact source inference.
-                    throw sources.snapshot().error(error);
+                    const safe = sources.snapshot().error(error);
+                    if (safe instanceof ProviderCredentialsUnavailableError)
+                        credentialFailures?.record(safe);
+                    throw safe;
                 }
             },
             provider.type,
@@ -647,6 +655,12 @@ async function createProvider(
               (provider.authFile === undefined
                   ? null
                   : await CodexSessionCredential.tryLoad({ authFile: provider.authFile })));
+        // Codex's own default sign-in, the one its login command repairs, was the source consulted.
+        const defaultCodexLogin =
+            ambient &&
+            provider.apiKey === undefined &&
+            provider.authFile === undefined &&
+            !environment.CODEX_HOME?.trim();
         if (ambient && !provider.apiKey?.trim() && credential instanceof CodexApiKeyCredential)
             sources.environment("OPENAI_API_KEY", environment.OPENAI_API_KEY);
         if (credential instanceof CodexSessionCredential) {
@@ -662,10 +676,15 @@ async function createProvider(
                 environment.OPENAI_API_KEY?.trim()
             )
                 sources.selected("environment", "OPENAI_API_KEY");
-            else sources.selected("native_login", "Codex sign-in");
+            else
+                sources.selected(
+                    "native_login",
+                    "Codex sign-in",
+                    defaultCodexLogin ? "codex" : undefined,
+                );
         }
         return new CodexProvider({
-            credential: required(credential, "Codex", id),
+            credential: required(credential, id, "codex", defaultCodexLogin),
             parallelToolCalls: true,
             ...(provider.baseUrl === undefined ? {} : { endpoint: provider.baseUrl }),
             ...(provider.transport === undefined || provider.transport === "auto"
@@ -740,7 +759,9 @@ async function createProvider(
             sources.selected(
                 "native_login",
                 "Claude Code sign-in",
-                provider.configDir === undefined && !process.env.CLAUDE_CONFIG_DIR?.trim(),
+                provider.configDir === undefined && !process.env.CLAUDE_CONFIG_DIR?.trim()
+                    ? "claude"
+                    : undefined,
             );
         } else if (credential !== null) {
             const [key, value, variable] =
@@ -756,7 +777,17 @@ async function createProvider(
         }
         await ensureClaudeWorkingDirectory(claudeWorkingDirectory);
         return new AnthropicProvider({
-            credential: required(credential, "Claude", id),
+            credential: required(
+                credential,
+                id,
+                "claude",
+                ambient &&
+                    provider.oauthToken === undefined &&
+                    provider.apiKey === undefined &&
+                    provider.authToken === undefined &&
+                    provider.configDir === undefined &&
+                    !process.env.CLAUDE_CONFIG_DIR?.trim(),
+            ),
             cwd: claudeWorkingDirectory,
             // Bun cannot use the SDK's runtime require.resolve from its compiled filesystem.
             // The standalone build adapts this resolver to materialize its embedded executable.
@@ -779,6 +810,12 @@ async function createProvider(
         // may also reuse the default Grok CLI session; isolated ones must name their auth file.
         const env = ambient ? { ...process.env } : {};
         const withEnv = <T extends object>(input: T) => ({ ...input, env });
+        // Grok's own default sign-in, the one its login command repairs, was the source consulted.
+        const defaultGrokLogin =
+            ambient &&
+            provider.apiKey === undefined &&
+            provider.authFile === undefined &&
+            !env.GROK_HOME?.trim();
         sources.configured("api_key", provider.apiKey);
         if (!provider.apiKey?.trim()) {
             sources.environment("XAI_API_KEY", env.XAI_API_KEY);
@@ -815,10 +852,15 @@ async function createProvider(
             if (provider.apiKey?.trim())
                 sources.selected("configuration", `providers.${id}.api_key`);
             else if (env.XAI_API_KEY?.trim()) sources.selected("environment", "XAI_API_KEY");
-            else sources.selected("native_login", "Grok sign-in");
+            else
+                sources.selected(
+                    "native_login",
+                    "Grok sign-in",
+                    defaultGrokLogin ? "grok" : undefined,
+                );
         }
         return new GrokProvider({
-            credential: required(credential, "Grok", id),
+            credential: required(credential, id, "grok", defaultGrokLogin),
             ...(provider.baseUrl === undefined ? {} : { endpoint: provider.baseUrl }),
             ...retries,
         });
@@ -882,8 +924,9 @@ async function createProvider(
             (explicitAws || (ambient && !explicitBearer)
                 ? await BedrockAwsCredential.tryLoad(aws)
                 : null),
-        "Bedrock",
         id,
+        "bedrock",
+        false,
     );
     if (bearerCredential !== null) {
         sources.selected(
@@ -984,9 +1027,14 @@ async function ensureClaudeWorkingDirectory(directory: string): Promise<void> {
     await ensurePrivateDirectory(directory);
 }
 
-function required<T>(credential: T | null, vendor: string, id: string): T {
+function required<T>(
+    credential: T | null,
+    id: string,
+    vendor: ConstructorParameters<typeof ProviderCredentialsUnavailableError>[1],
+    defaultNativeLogin: boolean,
+): T {
     if (credential === null) {
-        throw new Error(`${vendor} authentication is unavailable for provider "${id}".`);
+        throw new ProviderCredentialsUnavailableError(id, vendor, defaultNativeLogin);
     }
     return credential;
 }

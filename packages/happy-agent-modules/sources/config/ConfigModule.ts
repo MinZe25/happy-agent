@@ -64,6 +64,11 @@ import { ProviderEnablement, providerRegistryUntil } from "./impl/providerRegist
 import { ProviderServiceTiers } from "./impl/ProviderServiceTiers.js";
 import { RoundRobinRouterProvider } from "./impl/RoundRobinRouterProvider.js";
 import {
+    ProviderCredentialFailures,
+    type UnavailableCredentialFailure,
+} from "./impl/ProviderCredentialFailures.js";
+import { ProviderCredentialsUnavailableError } from "./impl/ProviderCredentialsUnavailableError.js";
+import {
     ProviderExecutionObservations,
     type CurrentProviderExecutionAttempt,
     type ProviderExecutionAttempt,
@@ -114,6 +119,7 @@ import {
     connectionIdSchema,
     nodeNameSchema,
     type LiveCredential,
+    type MessageFailureProvider,
     type ServiceTierOption,
 } from "@slopus/happy-agent-client";
 import { resolveDefaultNodeName } from "./impl/resolveDefaultNodeName.js";
@@ -1428,9 +1434,53 @@ export interface RuntimeProviderStateUpdate {
  * The resolved Happy Agent configuration and filesystem layout. It is loaded before the agent
  * system and passed to every module that needs configuration.
  */
+/** How each provider family is named in a sentence, such as "Couldn't reach Claude". */
+const VENDOR_NAMES: Readonly<Record<string, string>> = {
+    bedrock: "Amazon Bedrock",
+    claude: "Claude",
+    codex: "Codex",
+    grok: "Grok",
+};
+
 export class ConfigModule implements AgentModule {
     readonly migrations = nativeAccountIdentityMigrations;
     readonly #executionObservations = new ProviderExecutionObservations();
+    readonly #credentialFailures = new ProviderCredentialFailures();
+
+    /**
+     * The typed details of a failure configuration raised because a provider had no credential,
+     * matched by the exact text it raised for the selected provider or, behind a smart alias, one
+     * of the accounts it routes to; any other text has none.
+     */
+    unavailableCredentialFailure(
+        message: string,
+        providerId: string,
+    ): UnavailableCredentialFailure | undefined {
+        const candidates =
+            smartProviderRoute(this.configuration, providerId)?.models.flatMap(
+                (route) => route.candidates,
+            ) ?? [];
+        return this.#credentialFailures.find(message, [providerId, ...new Set(candidates)]);
+    }
+
+    /** Whether this provider's last construction found no credential to sign in with. */
+    providerNeedsSignIn(providerId: string): boolean {
+        return this.#credentialFailures.has(providerId);
+    }
+
+    /**
+     * The provider entry a failure is about, as a failure card names it: its family, the vendor as
+     * people say it in a sentence, and the configured entry's display label.
+     */
+    failureProvider(providerId: string): MessageFailureProvider {
+        const type = this.providerType(providerId) ?? "unknown";
+        return {
+            id: providerId,
+            type,
+            vendorName: VENDOR_NAMES[type] ?? this.providerName(providerId),
+            label: this.configuration.values.providers[providerId]?.name ?? providerId,
+        };
+    }
 
     beginExecutionObservation(
         agentId: string,
@@ -2528,9 +2578,7 @@ export class ConfigModule implements AgentModule {
                 ? "missing"
                 : "available";
         } catch (error: unknown) {
-            if (error instanceof Error && error.message.includes("authentication is unavailable")) {
-                return "missing";
-            }
+            if (error instanceof ProviderCredentialsUnavailableError) return "missing";
             throw error;
         }
     }
@@ -2800,6 +2848,7 @@ export class ConfigModule implements AgentModule {
                     (id) => this.#providerEnablement?.signal(id),
                     undefined,
                     this.#executionObservations,
+                    this.#credentialFailures,
                 ),
             },
             this.configuration,
@@ -2835,6 +2884,7 @@ export class ConfigModule implements AgentModule {
                 (id) => this.#providerEnablement?.signal(id),
                 scripted,
                 this.#executionObservations,
+                this.#credentialFailures,
             );
             // A test-owned inference registry is already authenticated. Initialize all its
             // accounts as usable, including canonical IDs whose production defaults are off. This

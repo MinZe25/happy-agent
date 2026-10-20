@@ -6,6 +6,7 @@ import {
     clientMetadataValueSchema,
     configurationBlockSchema,
     messageErrorSchema,
+    messageFailureSchema,
     toolCallRequestBlockSchema,
     userIdSchema,
     type ClientMetadata,
@@ -475,6 +476,8 @@ const historyMessageFields = {
     blocks: Type.Array(historyBlockSchema, { maxItems: MAX_HISTORY_BLOCKS_PER_MESSAGE }),
     /** Display-only diagnostics, never part of model input or caller-authored message content. */
     error: Type.Optional(messageErrorSchema),
+    /** Typed failure of an error row, protocol 30; identical for every reader. */
+    failure: Type.Optional(messageFailureSchema),
     /** Stable identity for this archive record. Reuse is a storage conflict. */
     recordId: historyRecordIdSchema,
     /** The accepted run this message belongs to. */

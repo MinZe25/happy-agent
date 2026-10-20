@@ -28,6 +28,30 @@ snapshots combine sanitization and permanently invalidate that shared session's 
 The bounded union never drops old strings: overflow replaces the entire diagnostic with safe
 generic text. Per-session state is weakly held and contains no provider or execution context.
 
+## A missing or rejected sign-in is a typed failure with one short sentence
+
+A provider with no credential used to throw `Claude authentication is unavailable for provider
+"claude".`; the owner was told to retry and then ask "the person who manages this installation",
+retrying always failed, and parent agents saw only that first sentence. Construction now throws
+`ProviderCredentialsUnavailableError`, whose text is the one line every reader gets: "Claude Code
+isn't signed in. Run claude auth login, then retry." for the vendor's own default login (likewise
+`codex login`, `grok login`), and "{label} has no credentials. Check its settings, then retry." for
+a configured, isolated, custom-directory, or Bedrock source. API.md allows naming the vendor's own
+sign-in command in shared text; credential paths, keys, variables and hosts stay out.
+
+History turns it into the typed `signin_missing` failure (`provider`, `product`, `command`). A 401
+after a loaded token takes the same path: the observed attempt carries the selection-time
+`signIn`, so the failure names the command only for a default native login. Agent Base reports an
+opening failure only as text, so Configuration remembers the exact text it raised per provider —
+cleared on the next successful construction, forgotten after fifteen minutes, matched only for the
+selected provider or the accounts its smart alias routes to, because two default logins of one
+vendor raise the same sentence. Scans and smart routing recognize the error by type.
+
+The legacy owner-only `error.recovery` stays for older clients, reduced to one step. A default
+native login says to sign in first rather than "retry first", as API.md now requires. Not signed
+in and an unreadable macOS keychain still look identical here, because Claude Code's loader returns
+nothing for both.
+
 ## Execution provenance belongs to one actual operation
 
 A provider session can outlive many runs, so a session-level last-account value is not evidence
@@ -40,8 +64,9 @@ invalidate the whole observation rather than retaining an earlier source as if i
 Observations retain at most 512 operations for fifteen minutes from begin, with at most 64 actual
 attempts each. Snapshots are copied, bounded and frozen; no credential, provider, session, or
 context enters the store. Source descriptors come from successful credential selection, not error
-prose or a later configuration read. Default native Claude alone receives the curated login
-command; configured tokens, environment overrides and custom directories get their own guidance.
+prose or a later configuration read. Default native Claude alone receives the copyable login
+command; default native Codex and Grok name `codex login` and `grok login` in their steps only.
+Configured tokens, environment overrides and custom directories get their own guidance.
 Unknown native account identity stays null, and scripted providers do not manufacture native
 family or account provenance.
 

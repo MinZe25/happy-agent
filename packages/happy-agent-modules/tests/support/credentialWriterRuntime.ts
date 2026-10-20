@@ -15,6 +15,9 @@ import {
 } from "../../sources/runtime/startHappyAgentRuntime.js";
 
 export const writerText = "Authentication failed.\n\nRetry this conversation.";
+/** What every reader sees once the rejected configured key becomes a typed sign-in failure. */
+export const writerFailureText =
+    "private_account has no credentials. Check its settings, then retry.";
 export const writerMode = {
     providerId: "private_account",
     modelId: "openai/gpt-5.6-sol",

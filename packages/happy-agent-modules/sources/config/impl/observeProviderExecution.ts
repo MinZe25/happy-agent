@@ -9,6 +9,7 @@ import {
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 import type { ProviderExecutionObservations } from "./ProviderExecutionObservations.js";
+import type { ProviderSignIn } from "./ProviderCredentialsUnavailableError.js";
 import type { CredentialDiagnosticSanitizer } from "./credentialDiagnosticSanitizer.js";
 import { nativeAccountIdentity } from "../persistence/nativeAccountIdentity.js";
 
@@ -31,6 +32,7 @@ export function observeProviderExecution(
     recovery?: ErrorRecovery,
     providerType?: string,
     diagnostics?: CredentialDiagnosticSanitizer,
+    signIn?: ProviderSignIn,
 ): BaseProvider {
     if (observedProviders.has(provider)) return provider;
     const createSession = provider.session.bind(provider);
@@ -99,7 +101,10 @@ export function observeProviderExecution(
                 }
             };
             let recorded = false;
-            const record = (errorCode?: string) => {
+            const record = (
+                errorCode?: string,
+                failure: { resetsAt?: number; contextOverflow?: true } = {},
+            ) => {
                 if (recorded) return;
                 recorded = true;
                 if (handle !== undefined && observation.ambiguous) {
@@ -112,6 +117,10 @@ export function observeProviderExecution(
                         credentialSource,
                         ...(recovery === undefined ? {} : { recovery }),
                         ...(errorCode === undefined ? {} : { errorCode }),
+                        ...(errorCode === "authentication_failed" && signIn !== undefined
+                            ? { signIn }
+                            : {}),
+                        ...failure,
                     });
             };
             let stream: ReturnType<BaseSession["run"]>;
@@ -147,6 +156,18 @@ export function observeProviderExecution(
                                         : event.providerError?.type === "authentication"
                                           ? "authentication_failed"
                                           : (event.providerError?.type ?? "inference_failed"),
+                                    event.state !== "error"
+                                        ? {}
+                                        : {
+                                              ...((event.providerError?.type === "out_of_tokens" ||
+                                                  event.providerError?.type === "rate_limit") &&
+                                              event.providerError.resetAt !== undefined
+                                                  ? { resetsAt: event.providerError.resetAt }
+                                                  : {}),
+                                              ...(event.kind === "context_overflow"
+                                                  ? { contextOverflow: true as const }
+                                                  : {}),
+                                          },
                                 );
                             }
                             return result;

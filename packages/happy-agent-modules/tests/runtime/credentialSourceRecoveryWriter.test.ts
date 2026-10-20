@@ -7,6 +7,7 @@ import {
     CodexProvider,
     type BaseProvider,
 } from "@slopus/happy-providers";
+import type { ServiceMessage } from "@slopus/happy-agent-client";
 import { describe, expect, it, vi } from "vitest";
 import { ScriptedSession } from "../support/ScriptedProvider.js";
 import {
@@ -116,15 +117,38 @@ describe.each([
                 const history = await fixture.reader.getMessages(fixture.agent.id);
                 const message = history.runs
                     .flatMap((run) => run.messages)
-                    .filter((row) => row.role === "service")
                     .find(
-                        (row) =>
-                            row.role === "service" &&
-                            row.content.some(
-                                (block) => block.type === "text" && block.text.includes(writerText),
-                            ),
+                        (row): row is ServiceMessage =>
+                            row.role === "service" && row.failure !== undefined,
                     );
                 expect(message).toBeDefined();
+                // A rejected sign-in is a typed signin_missing failure, identical for every reader.
+                // Only the vendor's own default login names its command; the text is the fallback.
+                const command =
+                    source === "default Claude"
+                        ? "claude auth login"
+                        : source === "native Codex"
+                          ? "codex login"
+                          : null;
+                expect(message?.failure).toEqual({
+                    kind: "signin_missing",
+                    message:
+                        command === null
+                            ? "private_account has no credentials. Check its settings, then retry."
+                            : `${codex ? "Codex" : "Claude Code"} isn't signed in. Run ${command}, then retry.`,
+                    provider: {
+                        id: "private_account",
+                        type: codex ? "codex" : "claude",
+                        vendorName: codex ? "Codex" : "Claude",
+                        label: "private_account",
+                    },
+                    product: command === null ? null : codex ? "Codex" : "Claude Code",
+                    command,
+                    fallbackProviders: [],
+                });
+                expect(message?.content).toEqual([
+                    { type: "text", text: message?.failure?.message },
+                ]);
                 expect.soft(message?.error).toMatchObject({
                     code: "authentication_failed",
                     mode: {
@@ -181,11 +205,13 @@ describe.each([
                         .toEqual([
                             "Retry this conversation. If it still fails, ask the person who manages this installation to check the selected provider.",
                         ]);
+                    // The vendor's own sign-in command is in the shared failure (API.md); the
+                    // legacy owner-only details still never reach a member.
+                    expect(message).not.toHaveProperty("error.recovery.commands");
                     for (const marker of [
                         "Private writer host",
                         "CLAUDE_CODE_OAUTH_TOKEN",
                         "providers.private_account.oauth_token",
-                        "claude auth login",
                     ])
                         expect(JSON.stringify(history)).not.toContain(marker);
                 }

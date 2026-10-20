@@ -13,7 +13,7 @@ import { ScriptedSession } from "../support/ScriptedProvider.js";
 import {
     credentialWriterRuntime,
     writerMode,
-    writerText,
+    writerFailureText,
 } from "../support/credentialWriterRuntime.js";
 
 const configuration = `[providers]
@@ -49,7 +49,7 @@ it("settles a real failed inference only after consuming its observation, then r
     });
     try {
         await fixture.owner.sendMessage(fixture.agent.id, { text: "Fail once.", mode: writerMode });
-        const error = await failure(fixture, fixture.agent.id, "Foreground failed.");
+        const error = await failure(fixture, fixture.agent.id, "private_account");
         expectSource(error, "private_account");
         probe.expectEnded(fixture.agent.id);
     } finally {
@@ -93,13 +93,10 @@ it("concurrent agents retain only their own actually selected credential source"
         await vi.waitFor(() => expect(entered).toBe(2));
         gate.resolve();
         expectSource(
-            await failure(fixture, fixture.agent.id, "private_account failed concurrently."),
+            await failure(fixture, fixture.agent.id, "private_account"),
             "private_account",
         );
-        expectSource(
-            await failure(fixture, second.id, "other_account failed concurrently."),
-            "other_account",
-        );
+        expectSource(await failure(fixture, second.id, "other_account"), "other_account");
         probe.expectEnded(fixture.agent.id);
         probe.expectEnded(second.id);
     } finally {
@@ -174,7 +171,7 @@ it.each(["naming", "reviewer", "compaction"] as const)(
                 ]);
             gate.resolve();
             expectSource(
-                await failure(fixture, foregroundId, "Foreground after background."),
+                await failure(fixture, foregroundId, "private_account"),
                 "private_account",
             );
             const page = await fixture.owner.getMessages(foregroundId);
@@ -271,10 +268,7 @@ it("abort releases the old observation and a late provider error cannot enter th
             .soft(current?.filter((attempt) => attempt.mode.providerId === "private_account"))
             .toEqual([]);
         nextGate.resolve();
-        expectSource(
-            await failure(fixture, fixture.agent.id, "New inference failed."),
-            "other_account",
-        );
+        expectSource(await failure(fixture, fixture.agent.id, "other_account"), "other_account");
         const page = await fixture.owner.getMessages(fixture.agent.id);
         expect(JSON.stringify(page)).not.toContain("Late obsolete provider error.");
         probe.expectEnded(fixture.agent.id);
@@ -309,7 +303,7 @@ it("the terminal real smart-route attempt supplies the failure source rather tha
             text: "Try both selected credentials.",
             mode: { ...writerMode, providerId: "router" },
         });
-        const error = await failure(fixture, fixture.agent.id, "Terminal routed failure.");
+        const error = await failure(fixture, fixture.agent.id);
         expect(new Set(attempted)).toEqual(new Set(["private_account", "other_account"]));
         expect(attempted).toHaveLength(2);
         expectSource(error, attempted.at(-1)!);
@@ -423,7 +417,7 @@ it("restart recovery and the accepted user's sequential inference each own only 
                 (row) =>
                     row.role === "service" &&
                     row.content.some(
-                        (block) => block.type === "text" && block.text.includes(writerText),
+                        (block) => block.type === "text" && block.text === writerFailureText,
                     ),
             ))
             expectSource(row, "private_account");
@@ -434,10 +428,14 @@ it("restart recovery and the accepted user's sequential inference each own only 
     }
 }, 30_000);
 
+/**
+ * The failed run's typed sign-in failure. A rejected configured key reads "{account} has no
+ * credentials…", which names the account whose attempt failed; omit it to accept any account.
+ */
 async function failure(
     fixture: Awaited<ReturnType<typeof credentialWriterRuntime>>,
     agentId: string,
-    text: string,
+    providerId?: string,
 ) {
     let message: Message | undefined;
     await vi.waitFor(
@@ -446,13 +444,20 @@ async function failure(
             message = page.runs
                 .filter((run) => run.status === "failed")
                 .flatMap((run) => run.messages)
-                .find(
-                    (row) =>
-                        row.role === "service" &&
+                .find((row) => {
+                    if (row.role !== "service" || row.failure?.kind !== "signin_missing")
+                        return false;
+                    const account = (row.failure as { provider: { id: string } }).provider.id;
+                    return (
+                        (providerId === undefined || account === providerId) &&
                         row.content.some(
-                            (block) => block.type === "text" && block.text.includes(text),
-                        ),
-                );
+                            (block) =>
+                                block.type === "text" &&
+                                block.text ===
+                                    `${account} has no credentials. Check its settings, then retry.`,
+                        )
+                    );
+                });
             expect(message).toBeDefined();
         },
         { timeout: 10_000, interval: 10 },

@@ -80,8 +80,11 @@ import {
     type ArtifactFileInput as ArtifactRequestFile,
     type ArtifactSourceInput as ArtifactRequestSource,
     type AuthenticationChallenge,
+    type AgentRetrying,
     type AuthenticationResponse,
     type DrainWaitingFor,
+    messageModeSchema,
+    type MessageFailure,
     type MessageMode,
     type ServiceTierOption,
     agentWaitSchema,
@@ -308,6 +311,7 @@ import {
 } from "./ApiResourceProjection.js";
 import {
     abortBodySchema,
+    failureSwitchBodySchema,
     agentCreateBodySchema,
     apiIdSchema,
     cloudMutationRequestSchema,
@@ -344,7 +348,7 @@ import {
 } from "./projectCredentialDiagnostics.js";
 import { SubtaskInputError, SubtasksModule } from "../subtasks/index.js";
 
-const API_PROTOCOL_VERSION = 29;
+const API_PROTOCOL_VERSION = 30;
 
 /**
  * How many archived agents the desktop bootstrap carries. Recent history is what the desktop
@@ -626,6 +630,8 @@ export class ApiModule implements AgentModule {
     /** HTTP mutations admitted before draining published its read-only boundary. */
     readonly #apiMutations = new Map<symbol, ApiAdmittedMutation>();
     readonly #announcedPendingMessages = new Set<string>();
+    /** Each working agent's live provider retry, bounded like the other per-agent caches. */
+    readonly #liveRetries = new Map<string, AgentRetrying>();
     readonly #apiPendingMessageIds = new Set<string>();
     readonly #announcedExecutionConfigurations = new Map<string, string>();
     readonly #announcedAgentCreations = new Set<string>();
@@ -3285,6 +3291,7 @@ export class ApiModule implements AgentModule {
         if (event.type === "loop.started") {
             await this.#appendAgentUpdate(ctx, event, {
                 status: "working",
+                ...(await this.#retryingChange(ctx, agentId, event.type, payload)),
                 updatedAt: event.occurredAt,
             });
             return;
@@ -3299,6 +3306,13 @@ export class ApiModule implements AgentModule {
             return;
         }
         if (event.type === "loop.settled") {
+            // A settled run retries nothing; announce the clear before the settlement's own updates.
+            const cleared = await this.#retryingChange(ctx, agentId, event.type, payload);
+            if (cleared.retrying !== undefined)
+                await this.#appendAgentUpdate(ctx, event, {
+                    ...cleared,
+                    updatedAt: event.occurredAt,
+                });
             await this.#flushAcceptedMessages(ctx, agentId);
             for (const [recordId, owner] of this.#announcedExecutionConfigurations) {
                 if (owner === agentId) this.#announcedExecutionConfigurations.delete(recordId);
@@ -3392,6 +3406,7 @@ export class ApiModule implements AgentModule {
         const status = statusForAgentEvent(event.type, payload);
         await this.#appendAgentUpdate(ctx, event, {
             ...(status === undefined ? {} : { status }),
+            ...(await this.#retryingChange(ctx, agentId, event.type, payload)),
             updatedAt: event.occurredAt,
         });
     }
@@ -3722,6 +3737,62 @@ export class ApiModule implements AgentModule {
                 message: messageResource(message),
             });
         });
+    }
+
+    /**
+     * The `retrying` change a provider event makes, or nothing. A provider's own retry sets it;
+     * the first output of the attempt, its terminal event, or the run's settlement clears it.
+     * Provider retry events carry no typed reason, so the kind is the generic
+     * `provider_unavailable` rather than one guessed from their prose.
+     */
+    async #retryingChange(
+        ctx: Context,
+        agentId: string,
+        eventType: string,
+        payload: Readonly<Record<string, unknown>> | undefined,
+    ): Promise<{ readonly retrying?: AgentRetrying | null }> {
+        if (eventType === "loop.settled" || eventType === "loop.started") {
+            return this.#liveRetries.delete(agentId) ? { retrying: null } : {};
+        }
+        if (eventType !== "provider.event") return {};
+        const event = recordValue(payload?.["event"]);
+        const type = stringValue(event?.["type"]);
+        if (type === "retrying") {
+            const reported = event?.["attempt"];
+            const attempt =
+                typeof reported === "number" && Number.isInteger(reported) && reported >= 1
+                    ? reported
+                    : 1;
+            // The mode the person last sent with names the route being retried.
+            const config = await this.#agentSystem().config(ctx, agentId);
+            const mode = config === undefined ? undefined : agentModeFromConfig(config);
+            const provider = Value.Check(messageModeSchema, mode) ? mode.providerId : undefined;
+            const retrying: AgentRetrying = {
+                attempt,
+                maxAttempts: Math.max(
+                    attempt,
+                    this.#config.configuration.values.settings.inferenceMaxRetries,
+                ),
+                kind: "provider_unavailable",
+                vendorName:
+                    provider === undefined
+                        ? "The provider"
+                        : this.#config.failureProvider(provider).vendorName,
+            };
+            boundedSet(this.#liveRetries, agentId, retrying, MAX_ANNOUNCED_AGENT_CREATIONS);
+            return { retrying };
+        }
+        if (
+            this.#liveRetries.has(agentId) &&
+            (type === "done" ||
+                type === "text_start" ||
+                type === "reasoning_start" ||
+                type === "toolcall_start")
+        ) {
+            this.#liveRetries.delete(agentId);
+            return { retrying: null };
+        }
+        return {};
     }
 
     async #appendAgentUpdate(
@@ -4109,6 +4180,21 @@ export class ApiModule implements AgentModule {
                 profiles: requestProfilesForAgent(created.id),
                 slashCommands,
             });
+            return true;
+        }
+        const failureAction =
+            /^\/v0\/agents\/([a-z][a-z0-9]*)\/messages\/([a-z][a-z0-9]*)\/(retry|switch)$/.exec(
+                url.pathname,
+            );
+        if (failureAction !== null && request.method === "POST") {
+            await this.#handleFailureResolution(
+                ctx,
+                request,
+                response,
+                failureAction[1] as string,
+                failureAction[2] as string,
+                failureAction[3] as "retry" | "switch",
+            );
             return true;
         }
         const agentMatch = /^\/v0\/agents\/([a-z][a-z0-9]*)$/.exec(url.pathname);
@@ -4736,6 +4822,105 @@ export class ApiModule implements AgentModule {
         });
     }
 
+    /**
+     * Retry a failed turn on its own route, or switch to one of the failure's fallbacks and
+     * continue there. The resolution is recorded on the failed message in the same transaction
+     * that queues a hidden notice asking the agent to answer the person's last request again, so
+     * no user message is added and every client sees the same history line. A resolved failure
+     * answers with its current state and starts nothing.
+     */
+    async #handleFailureResolution(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        agentId: string,
+        messageId: string,
+        action: "retry" | "switch",
+    ): Promise<void> {
+        await this.#assertUserControlledAgent(ctx, agentId);
+        const body: { mutationId?: string; providerId?: string; modelId?: string } =
+            action === "switch"
+                ? await bodyAs(request, failureSwitchBodySchema, "failure switch")
+                : await bodyAs(request, emptyMutationBodySchema, "failure retry");
+        const cursor = this.#journal.cursor();
+        const stored = await this.#history.message(ctx, agentId, messageId);
+        if (stored?.failure === undefined || messageHiddenFromUser(stored)) {
+            throw new ApiError(404, "not_found", "No failed turn has that message ID.");
+        }
+        if (stored.failure.resolution !== undefined) {
+            sendJson(response, 202, {
+                ...(await this.#focusedAgentResponse(ctx, agentId)),
+                message: messageResource(stored),
+                cursor,
+            });
+            return;
+        }
+        if ((await this.#activeRunId(ctx, agentId)) !== undefined) {
+            throw new ApiError(409, "conflict", "The agent is still working.");
+        }
+        let options: AgentBaseMessageOptions = { id: createId(), metadata: { hideFromUser: true } };
+        let text =
+            "The person asked to retry the turn that just failed. Answer their last request again.";
+        let resolution: NonNullable<MessageFailure["resolution"]> = {
+            at: Date.now(),
+            action: "retried",
+        };
+        if (body.providerId !== undefined) {
+            const fallback = stored.failure.fallbackProviders.find(
+                (entry) => entry.providerId === body.providerId && entry.modelId === body.modelId,
+            );
+            const model = this.#config.models.find(
+                (entry) => entry.providerId === body.providerId && entry.id === body.modelId,
+            );
+            if (fallback === undefined || model === undefined) {
+                throw invalidRequest("That route is not one of this failure's alternatives.");
+            }
+            const failedEffort = stored.error?.mode?.effort;
+            options = {
+                ...options,
+                provider: model.providerId,
+                model: model.id,
+                effort:
+                    model.effortLevels.find((effort) => effort === failedEffort) ??
+                    model.defaultEffort,
+            };
+            text = `The person switched this chat to ${fallback.providerLabel} · ${model.name} after the turn failed. Answer their last request again.`;
+            resolution = {
+                at: resolution.at,
+                action: "switched",
+                providerId: model.providerId,
+                modelId: model.id,
+            };
+        }
+        const resolved: HistoryMessage = {
+            ...stored,
+            failure: { ...stored.failure, resolution },
+        };
+        await this.#withMutationId(body.mutationId, async () => {
+            await ctx.inTx(async (txCtx) => {
+                await this.#history.replace(txCtx, agentId, resolved);
+                await this.#agentSystem().send(
+                    txCtx,
+                    agentId,
+                    { role: "system", content: [{ type: "text", text }] },
+                    options,
+                );
+                afterCommit(txCtx, () => {
+                    this.#journal.append("message.updated", {
+                        agentId,
+                        runId: resolved.runId ?? null,
+                        message: messageResource(resolved),
+                    });
+                });
+            });
+        });
+        sendJson(response, 202, {
+            ...(await this.#focusedAgentResponse(ctx, agentId)),
+            message: messageResource(resolved),
+            cursor,
+        });
+    }
+
     async #handleAgentMessages(
         ctx: Context,
         response: ServerResponse,
@@ -5008,6 +5193,7 @@ export class ApiModule implements AgentModule {
             runningSubagents,
             working: activeRunId !== undefined,
             wait,
+            retrying: activeRunId === undefined ? null : (this.#liveRetries.get(agentId) ?? null),
         });
     }
 
@@ -9618,6 +9804,21 @@ function artifactSourceInput(source: ArtifactRequestSource): ArtifactSourceInput
             };
         case "agent":
             return { kind: "agent", agentId: source.agentId };
+    }
+}
+
+function boundedSet<Value>(
+    map: Map<string, Value>,
+    key: string,
+    value: Value,
+    maximum: number,
+): void {
+    map.delete(key);
+    map.set(key, value);
+    while (map.size > maximum) {
+        const oldest = map.keys().next();
+        if (oldest.done === true) break;
+        map.delete(oldest.value);
     }
 }
 
