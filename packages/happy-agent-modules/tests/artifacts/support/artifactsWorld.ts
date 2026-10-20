@@ -123,10 +123,12 @@ export async function artifactsWorld(
     const machine = new FakeCompute();
     const places = new ArtifactPlaces();
     const agents = new ArtifactAgents();
+    const compute = scriptedComputeModule(async () => machine);
+    const networkId = vi.spyOn(compute, "networkId").mockResolvedValue("host");
     const artifacts = new ArtifactsModule(
         config,
         durableFunctions,
-        scriptedComputeModule(async () => machine),
+        compute,
         places.projectsModule,
         places.workspacesModule,
         places.bots,
@@ -156,6 +158,7 @@ export async function artifactsWorld(
         database,
         events,
         machine,
+        networkId,
         places,
         tools,
         tool: async (agentId: string, toolName: string): Promise<AnyAgentTool> => {

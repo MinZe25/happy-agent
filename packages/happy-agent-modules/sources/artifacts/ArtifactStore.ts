@@ -37,6 +37,7 @@ interface ArtifactRow {
     readonly latest_major: number | string;
     readonly latest_minor: number | string;
     readonly entry_json: string;
+    readonly live_json: string | null;
     readonly file_count: number | string;
     readonly size: number | string;
     readonly background: string | null;
@@ -60,6 +61,7 @@ interface VersionRow {
     readonly minor: number | string;
     readonly title: string;
     readonly entry_path: string;
+    readonly live_json: string | null;
     readonly background: string | null;
     readonly display: string | null;
     readonly created_by_json: string;
@@ -282,7 +284,7 @@ export async function insertArtifact(
             txCtx.db,
             sql`INSERT INTO ${sql.raw(ARTIFACTS_TABLE)} (
                 id, type, title, status, latest_version, latest_major, latest_minor, entry_json,
-                file_count, size, background, display, source_json, source_kind, source_id, source_agent_id,
+                file_count, size, background, display, live_json, source_json, source_kind, source_id, source_agent_id,
                 created_by_json, created_by_kind, created_by_id, created_at,
                 updated_by_json, updated_source_json, updated_at,
                 deleted_by_json, deleted_source_json, deleted_at, revision
@@ -291,7 +293,7 @@ export async function insertArtifact(
                 ${artifact.latestVersion}, ${artifact.latestMajor}, ${artifact.latestMinor},
                 ${JSON.stringify(artifact.entry)},
                 ${artifact.fileCount}, ${artifact.size}, ${artifact.background ?? null},
-                ${artifact.display ?? null}, ${json(source)}, ${source?.kind ?? null},
+                ${artifact.display ?? null}, ${json(artifact.live)}, ${json(source)}, ${source?.kind ?? null},
                 ${source === undefined ? null : artifactSourceId(source)},
                 ${source?.agentId ?? null},
                 ${JSON.stringify(artifact.createdBy)}, ${artifact.createdBy.kind},
@@ -336,7 +338,7 @@ export async function insertArtifactVersion(
                 entry_json = ${JSON.stringify(artifact.entry)},
                 file_count = ${artifact.fileCount}, size = ${artifact.size},
                 background = ${artifact.background ?? null},
-                display = ${artifact.display ?? null}`,
+                display = ${artifact.display ?? null}, live_json = ${json(artifact.live)}`,
         );
         await insertVersion(txCtx, version, operationId);
     });
@@ -442,11 +444,11 @@ async function insertVersion(
     await agentDatabaseRun(
         ctx.db,
         sql`INSERT INTO ${sql.raw(ARTIFACT_VERSIONS_TABLE)}
-            (artifact_id, number, major, minor, title, entry_path, background, display,
+            (artifact_id, number, major, minor, title, entry_path, background, display, live_json,
                 created_by_json, source_json, created_at, operation_id)
             VALUES (${version.artifactId}, ${version.number}, ${version.major}, ${version.minor},
                 ${version.title},
-                ${version.entry.path}, ${version.background ?? null}, ${version.display ?? null},
+                ${version.entry.path}, ${version.background ?? null}, ${version.display ?? null}, ${json(version.live)},
                 ${JSON.stringify(version.createdBy)},
                 ${json(version.source)}, ${version.createdAt}, ${operationId ?? null})`,
     );
@@ -514,6 +516,7 @@ function artifactFromRow(row: ArtifactRow): ArtifactRecord {
         latestMajor: Number(row.latest_major),
         latestMinor: Number(row.latest_minor),
         entry: JSON.parse(row.entry_json) as unknown,
+        ...(row.live_json === null ? {} : { live: JSON.parse(row.live_json) as unknown }),
         fileCount: Number(row.file_count),
         size: Number(row.size),
         ...(row.background === null ? {} : { background: row.background }),
@@ -545,6 +548,7 @@ function versionFromRow(row: VersionRow, files: readonly ArtifactFile[]): Artifa
         title: row.title,
         entry,
         files: [...files],
+        ...(row.live_json === null ? {} : { live: JSON.parse(row.live_json) as unknown }),
         ...(row.background === null ? {} : { background: row.background }),
         ...(row.display === null ? {} : { display: row.display }),
         createdBy: JSON.parse(row.created_by_json) as unknown,

@@ -107,7 +107,7 @@ async function textAt(w: ArtifactsWorld, artifactId: string, path: string): Prom
 }
 
 describe("the artifact tools", () => {
-    it("offers every agent the eight artifact tools", async () => {
+    it("offers every agent the artifact tools and deprecated page alias", async () => {
         const w = await world("artifact-tools-offer");
         expect((await w.tools(AGENT)).map((tool) => tool.name)).toEqual([
             "create_artifact",
@@ -118,7 +118,199 @@ describe("the artifact tools", () => {
             "read_artifact",
             "read_artifact_file",
             "delete_artifact",
+            "show_page",
         ]);
+    });
+
+    it("creates live artifacts with inert files, fixed networks, review, and idempotent calls", async () => {
+        const w = await world("live-artifact-create");
+        const tool = await w.tool(AGENT, "create_artifact");
+        const args = {
+            type: "html",
+            title: "Live <script>alert(1)</script>",
+            url: "http://localhost:5173",
+            display: "inline_expanded",
+        };
+        const ctx = withAgentPermissionMode(w.ctx, "auto");
+        const remembered = new Map<string, unknown>();
+        expect(await tool.shouldReviewInAutoMode(args, ctx)).toBe(true);
+        expect(await tool.shouldRunInFullAccessInAutoMode?.(args, ctx)).toBe(false);
+        expect(tool.describeAutoPermissionAction?.(args, ctx)).toContain('network "host"');
+        const artifact = (await call(ctx, tool, args, { remembered })) as ArtifactRecord;
+        expect(artifact).toMatchObject({
+            live: { url: "http://localhost:5173/", networkId: "host" },
+            fileCount: 1,
+            latestVersion: 1,
+            latestMajor: 1,
+            latestMinor: 0,
+        });
+        expect(Value.Check(tool.returnType, artifact)).toBe(true);
+        const text = await textAt(w, artifact.id, "index.html");
+        expect(text).not.toContain("alert(1)");
+        expect(text).toContain("This is a live page.");
+        expect(text).toContain("newer Happy");
+        expect(text).not.toMatch(/<script|<iframe|http:\/\/localhost|http-equiv|href=/i);
+        expect(textOf(tool, artifact)).toContain("Change its URL with update_artifact");
+        w.networkId.mockResolvedValue("r-other");
+        expect(await call(ctx, tool, args, { remembered })).toEqual(artifact);
+        expect(w.events).toHaveLength(1);
+
+        const nextArgs = { ...args };
+        await tool.shouldReviewInAutoMode(nextArgs, ctx);
+        w.networkId.mockResolvedValue("r-moved");
+        await expect(call(ctx, tool, nextArgs)).rejects.toThrow("network changed");
+        expect((await w.artifacts.list(w.ctx)).artifacts).toHaveLength(1);
+        await expect(call(withAgentPermissionMode(w.ctx, "read_only"), tool, args)).rejects.toThrow(
+            "Read only",
+        );
+    });
+
+    it("reviews every live update and rejects file changes and stale reviewed versions", async () => {
+        const w = await world("live-artifact-update");
+        const artifact = (await call(
+            withAgentPermissionMode(w.ctx, "full_access"),
+            await w.tool(AGENT, "create_artifact"),
+            { type: "html", title: "Preview", url: "http://localhost:5173/" },
+        )) as ArtifactRecord;
+        const tool = await w.tool(AGENT, "update_artifact");
+        const ctx = withAgentPermissionMode(w.ctx, "auto");
+        const args = { artifactId: artifact.id, url: "HTTPS://EXAMPLE.COM/new" };
+        await expect(tool.shouldReviewInAutoMode(args, ctx)).resolves.toBe(true);
+        expect(await tool.shouldRunInFullAccessInAutoMode?.(args, ctx)).toBe(false);
+        expect(tool.describeAutoPermissionAction?.(args, ctx)).toContain('recorded network "host"');
+        expect(tool.describeAutoPermissionAction?.(args, ctx)).toContain(
+            'to "https://example.com/new"',
+        );
+        w.networkId.mockRejectedValue(new Error("The creator moved."));
+        const updated = (await call(ctx, tool, args, { id: "live-update" })) as ArtifactRecord;
+        expect(updated).toMatchObject({
+            latestVersion: 2,
+            latestMinor: 1,
+            live: { url: "https://example.com/new", networkId: "host" },
+        });
+        expect((await w.artifacts.getVersion(w.ctx, artifact.id, 1)).live?.url).toBe(
+            "http://localhost:5173/",
+        );
+        expect(await call(ctx, tool, args, { id: "live-update" })).toEqual(updated);
+        const rename = { artifactId: artifact.id, title: "Retitled <page>" };
+        expect(await tool.shouldReviewInAutoMode(rename, ctx)).toBe(true);
+        const retitled = (await call(ctx, tool, rename, { id: "live-rename" })) as ArtifactRecord;
+        expect(retitled.live).toEqual(updated.live);
+        expect(retitled.entry).toEqual(artifact.entry);
+        expect(await textAt(w, artifact.id, "index.html")).not.toContain("Retitled");
+        await expect(call(ctx, tool, args, { id: "stale-review" })).rejects.toThrow(
+            "changed or was not reviewed",
+        );
+        const count = w.events.length;
+        await expect(write(w, artifact.id, "index.html", "replacement")).rejects.toThrow(
+            "live URL",
+        );
+        await expect(
+            call(w.ctx, await w.tool(AGENT, "edit_artifact_file"), {
+                artifactId: artifact.id,
+                path: "index.html",
+                old_string: "missing",
+                new_string: "changed",
+            }),
+        ).rejects.toThrow("live URL");
+        for (const changes of [{ files: [] }, { remove: [] }, { replaceAll: false }]) {
+            await expect(
+                w.artifacts.update(w.ctx, {
+                    artifactId: artifact.id,
+                    author: { kind: "user" },
+                    ...changes,
+                }),
+            ).rejects.toThrow("live URL");
+        }
+        expect(w.events).toHaveLength(count);
+        expect((await w.artifacts.get(w.ctx, artifact.id))?.latestVersion).toBe(3);
+    });
+
+    it("composes live version changes with caller transactions and keeps the original network across authors", async () => {
+        const w = await world("live-artifact-transactions");
+        const artifact = (await call(
+            withAgentPermissionMode(w.ctx, "full_access"),
+            await w.tool(AGENT, "create_artifact"),
+            {
+                type: "html",
+                title: "Preview",
+                url: "http://localhost:5173/",
+            },
+        )) as ArtifactRecord;
+        const input = {
+            artifactId: artifact.id,
+            author: { kind: "agent" as const, agentId: OTHER },
+        };
+        const noChange = await w.artifacts.update(w.ctx, {
+            ...input,
+            url: "http://localhost:5173",
+        });
+        expect(noChange.latestVersion).toBe(1);
+        await expect(w.artifacts.update(w.ctx, { ...input, major: 2 })).rejects.toThrow(
+            "already a major version",
+        );
+        await expect(
+            w.ctx.inTx(async (ctx) => {
+                await w.artifacts.update(ctx, { ...input, title: "Rolled-back title" });
+                expect((await w.artifacts.get(ctx, artifact.id))?.title).toBe("Rolled-back title");
+                expect(w.events).toHaveLength(1);
+                throw new Error("Rollback the caller");
+            }),
+        ).rejects.toThrow("Rollback the caller");
+        expect(await w.artifacts.get(w.ctx, artifact.id)).toEqual(noChange);
+        expect(w.events).toHaveLength(1);
+        await w.ctx.inTx(async (ctx) => {
+            await w.artifacts.update(ctx, { ...input, url: "https://example.com/committed" });
+            expect(w.events).toHaveLength(1);
+        });
+        expect(w.events).toHaveLength(2);
+        const major = await w.artifacts.update(w.ctx, { ...input, major: 2 });
+        expect(major).toMatchObject({
+            latestVersion: 3,
+            latestMajor: 2,
+            latestMinor: 0,
+            live: { url: "https://example.com/committed", networkId: "host" },
+            updatedBy: input.author,
+        });
+        expect((await w.artifacts.getVersion(w.ctx, artifact.id, 1)).live).toEqual(artifact.live);
+    });
+
+    it("keeps show_page as a reviewed live artifact alias and rejects unsafe URLs", async () => {
+        const w = await world("live-page-alias");
+        const tool = await w.tool(AGENT, "show_page");
+        expect(tool.description).toContain("Deprecated: use create_artifact with url");
+        const ctx = withAgentPermissionMode(w.ctx, "auto");
+        const args = { title: "Checkout\u202e", url: "http://localhost:5173/", display: "side" };
+        expect(await tool.shouldReviewInAutoMode(args, ctx)).toBe(true);
+        expect(tool.describeAutoPermissionAction?.(args, ctx)).toContain(
+            'titled "Checkout\\u{202e}"',
+        );
+        expect(tool.shouldRunInFullAccessInAutoMode).toBeUndefined();
+        const result = (await call(ctx, tool, args)) as ArtifactRecord;
+        expect(result).toMatchObject({
+            type: "html",
+            display: "side",
+            live: { networkId: "host", url: args.url },
+            presentation: { type: "artifact", shows: "latest", artifactId: result.id },
+        });
+        for (const url of [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "not a url",
+            "https://me:pw@example.com/",
+        ]) {
+            await expect(call(w.ctx, tool, { title: "Invalid", url })).rejects.toThrow();
+        }
+        const createTool = await w.tool(AGENT, "create_artifact");
+        for (const invalid of [
+            { type: "markdown", url: args.url },
+            { type: "html", url: args.url, files: [] },
+        ]) {
+            await expect(call(w.ctx, createTool, { title: "Invalid", ...invalid })).rejects.toThrow(
+                "requires type html",
+            );
+        }
+        expect((await w.artifacts.list(w.ctx)).artifacts).toHaveLength(1);
     });
 
     it("tells every agent to mention artifacts by their reference tags", async () => {

@@ -13,6 +13,10 @@ export function formatArtifactLine(artifact: ArtifactRecord): string {
     ];
     if (artifact.source !== undefined)
         parts.push(`made in ${formatArtifactSource(artifact.source)}`);
+    if (artifact.live !== undefined)
+        parts.push(
+            `live URL ${JSON.stringify(artifact.live.url)} through network ${JSON.stringify(artifact.live.networkId)}`,
+        );
     return `- ${parts.join(" · ")}`;
 }
 

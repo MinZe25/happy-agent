@@ -110,6 +110,10 @@ function formatArtifactRead({
         ...version.files.map(formatArtifactFile),
     );
     if (entryText !== undefined) {
+        if (version.live !== undefined)
+            lines.push(
+                `Live content: ${JSON.stringify(version.live.url)}, through network ${JSON.stringify(version.live.networkId)}. The file below is only the compatibility notice; the daemon does not fetch the live page.`,
+            );
         lines.push("", `${version.entry.path}:`, entryText);
         if (entryTextTruncated === true) {
             lines.push(

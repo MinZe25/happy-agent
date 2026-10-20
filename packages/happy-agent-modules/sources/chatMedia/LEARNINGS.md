@@ -23,9 +23,10 @@ Generation is billed. If the snapshot of a generated image fails, the generation
 without a presentation, and the model is told the image could not be shown and how to present
 it. `present_files` has no such cost, so its snapshot failures fail the call.
 
-## Showing a page is reviewed
+## Live pages belong to artifacts
 
-`show_page` only records an address, but the client then opens that page through the agent's
-network and runs its scripts in the chat, which can reach the agent's local servers and the
-internet. Kirill asked for every call to be reviewed in Auto, so the reviewer sees and decides on
-the exact URL and title before the user is shown anything.
+Kirill replaced standalone page presentations with live-URL artifacts. The deprecated
+`show_page` is now registered by Artifacts, where it creates the same versioned artifact as
+`create_artifact` with a URL. Chat Media owns only media snapshots and `present_files`, and its
+instructions direct new live pages to artifact creation. The client loads live pages through
+their recorded network, so every live create or update remains reviewed in Auto.

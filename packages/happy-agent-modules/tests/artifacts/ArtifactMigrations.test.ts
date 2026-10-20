@@ -56,6 +56,18 @@ describe("the artifact migrations", () => {
             { number: 2, major: 1, minor: 1 },
             { number: 3, major: 1, minor: 2 },
         ]);
+        expect(
+            await agentDatabaseRows(
+                database.database,
+                sql`SELECT live_json FROM ${sql.raw(ARTIFACTS_TABLE)}`,
+            ),
+        ).toEqual([{ live_json: null }]);
+        expect(
+            await agentDatabaseRows(
+                database.database,
+                sql`SELECT live_json FROM ${sql.raw(ARTIFACT_VERSIONS_TABLE)} ORDER BY number`,
+            ),
+        ).toEqual([{ live_json: null }, { live_json: null }, { live_json: null }]);
         database.close();
     });
 });

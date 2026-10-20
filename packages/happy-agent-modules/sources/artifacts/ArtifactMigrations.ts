@@ -190,4 +190,17 @@ export const artifactMigrations = [
             );
         },
     ],
+    [
+        "005-artifact-live-url",
+        async (_ctx: Context, database: AgentDatabaseFacade<AgentDatabase>): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE ${sql.raw(ARTIFACTS_TABLE)} ADD COLUMN live_json TEXT`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE ${sql.raw(ARTIFACT_VERSIONS_TABLE)} ADD COLUMN live_json TEXT`,
+            );
+        },
+    ],
 ] as const;

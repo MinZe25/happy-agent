@@ -98,6 +98,12 @@ import {
     type ArtifactContentSource,
 } from "./impl/artifactContentFiles.js";
 import { ARTIFACT_REFERENCE_INSTRUCTIONS } from "./tools/common.js";
+import {
+    LIVE_ARTIFACT_FALLBACK,
+    normalizeArtifactUrl,
+    requireFileArtifact,
+} from "./impl/liveArtifact.js";
+import { showPageTool } from "./tools/show_page.js";
 import { createArtifactTool } from "./tools/create_artifact.js";
 import { deleteArtifactTool } from "./tools/delete_artifact.js";
 import { editArtifactFileTool } from "./tools/edit_artifact_file.js";
@@ -201,6 +207,7 @@ export class ArtifactsModule implements AgentModule {
             readArtifactTool(this),
             readArtifactFileTool(this),
             deleteArtifactTool(this, scope.agent.id),
+            showPageTool(this, this.#compute, scope.agent.id),
         ],
     };
 
@@ -455,6 +462,19 @@ export class ArtifactsModule implements AgentModule {
                 }
             }
             const { files, entry } = await this.#placeFiles(txCtx, input.type, [], input.files);
+            if (input.live !== undefined) {
+                const fallback = LIVE_ARTIFACT_FALLBACK;
+                if (
+                    input.type !== "html" ||
+                    files.length !== 1 ||
+                    entry.sha256 !== createHash("sha256").update(fallback).digest("hex") ||
+                    normalizeArtifactUrl(input.live.url) !== input.live.url
+                ) {
+                    throw new ArtifactInputError(
+                        "A live artifact must be HTML with its generated fallback entry and normalized URL.",
+                    );
+                }
+            }
             const background = input.background?.toLowerCase();
             const display = input.display;
             const now = Date.now();
@@ -471,6 +491,7 @@ export class ArtifactsModule implements AgentModule {
                 size: totalSize(files),
                 ...(background === undefined ? {} : { background }),
                 ...(display === undefined ? {} : { display }),
+                ...(input.live === undefined ? {} : { live: input.live }),
                 ...(input.source === undefined ? {} : { source: input.source }),
                 createdBy: input.author,
                 createdAt: now,
@@ -489,6 +510,7 @@ export class ArtifactsModule implements AgentModule {
                 files,
                 ...(background === undefined ? {} : { background }),
                 ...(display === undefined ? {} : { display }),
+                ...(input.live === undefined ? {} : { live: input.live }),
                 createdBy: input.author,
                 ...(input.source === undefined ? {} : { source: input.source }),
                 createdAt: now,
@@ -525,12 +547,14 @@ export class ArtifactsModule implements AgentModule {
             input.files === undefined &&
             input.remove === undefined &&
             input.replaceAll === undefined &&
-            input.major === undefined
+            input.major === undefined &&
+            input.url === undefined
         ) {
             throw new ArtifactInputError(
-                "Change the title, the background, the display, or the files, or make a major version.",
+                "Change the title, the background, the display, the URL, or the files, or make a major version.",
             );
         }
+        const url = input.url === undefined ? undefined : normalizeArtifactUrl(input.url);
         return await ctx.inTx(async (txCtx) => {
             const current = await this.#required(txCtx, input.artifactId);
             if (
@@ -547,6 +571,30 @@ export class ArtifactsModule implements AgentModule {
                 );
             }
             this.#assertRevision(current, input.expectedRevision);
+            if (
+                current.live !== undefined &&
+                (input.files !== undefined ||
+                    input.remove !== undefined ||
+                    input.replaceAll !== undefined)
+            ) {
+                requireFileArtifact(current);
+            }
+            if (url !== undefined && current.live === undefined) {
+                throw new ArtifactInputError(
+                    "This artifact contains files. Create a new HTML artifact with a URL instead.",
+                );
+            }
+            if (
+                current.live !== undefined &&
+                input.major === undefined &&
+                (url === undefined || url === current.live.url) &&
+                (input.title === undefined || input.title === current.title) &&
+                (input.background === undefined ||
+                    (input.background?.toLowerCase() ?? undefined) === current.background) &&
+                (input.display === undefined || (input.display ?? undefined) === current.display)
+            ) {
+                return current;
+            }
             if (input.major !== undefined) {
                 if (input.major !== current.latestMajor + 1) {
                     throw new ArtifactInputError(
@@ -587,6 +635,10 @@ export class ArtifactsModule implements AgentModule {
                     : (input.background?.toLowerCase() ?? undefined);
             const display =
                 input.display === undefined ? current.display : (input.display ?? undefined);
+            const live =
+                current.live === undefined
+                    ? undefined
+                    : { ...current.live, url: url ?? current.live.url };
             const next: ArtifactRecord = {
                 ...current,
                 title,
@@ -599,6 +651,7 @@ export class ArtifactsModule implements AgentModule {
                 updatedBy: input.author,
                 updatedAt: now,
                 revision: current.revision + 1,
+                ...(live === undefined ? {} : { live }),
             };
             delete next.updatedSource;
             if (input.source !== undefined) next.updatedSource = input.source;
@@ -616,6 +669,7 @@ export class ArtifactsModule implements AgentModule {
                 files,
                 ...(background === undefined ? {} : { background }),
                 ...(display === undefined ? {} : { display }),
+                ...(live === undefined ? {} : { live }),
                 createdBy: input.author,
                 ...(input.source === undefined ? {} : { source: input.source }),
                 createdAt: now,
@@ -738,6 +792,7 @@ export class ArtifactsModule implements AgentModule {
         const done = await this.madeByOperation(ctx, changes.artifactId, changes.operationId);
         if (done !== undefined) return { artifact: done, changed: true };
         const current = await this.#requiredActiveOutsideTx(ctx, changes.artifactId);
+        requireFileArtifact(current);
         if (
             changes.expectedRevision !== undefined &&
             current.revision !== changes.expectedRevision

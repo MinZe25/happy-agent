@@ -50,9 +50,8 @@ empty file, an image over 32 MiB, a video over 256 MiB, another file over 64 MiB
 Full access only when allowed, through compute's shared path-boundary helpers. The tool is
 durable: a repeated call reads the same files and records the same items.
 
-`show_page` presents a web page inline by its `url`, `title`, and `display`. It records only the
-presentation; the daemon never fetches the page, and the client opens it through the agent's
-network. Every call is reviewed in Auto, with the URL and title shown to the reviewer.
+Live pages belong to the Artifacts module. Use `create_artifact` with `type: "html"` and `url`;
+that module also keeps the deprecated `show_page` alias registered for older prompts.
 
 Every agent is told, through this module's instructions, that generated images, artifact cards,
 and presented files appear inline in its own chat only, not in parent or child chats.

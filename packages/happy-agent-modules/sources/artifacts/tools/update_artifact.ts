@@ -1,9 +1,15 @@
-import { cuid2Schema, defineAgentTool } from "@slopus/happy-agent-base";
+import { agentPermissionMode, cuid2Schema, defineAgentTool } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 import { formatHappyReferenceTag } from "@slopus/happy-agent-client";
 
 import type { ComputeModule } from "../../compute/index.js";
-import { artifactPathSchema, artifactTitleSchema, MAX_ARTIFACT_FILES } from "../Artifact.js";
+import {
+    ArtifactInputError,
+    artifactPathSchema,
+    artifactTitleSchema,
+    MAX_ARTIFACT_FILES,
+    type ArtifactRecord,
+} from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
 import {
     describeArtifactWrite,
@@ -11,6 +17,8 @@ import {
     shouldReviewArtifactWrite,
 } from "../impl/artifactWriteAccess.js";
 import { formatArtifactBackground, formatArtifactVersion } from "../impl/formatArtifact.js";
+import { normalizeArtifactUrl, requireFileArtifact } from "../impl/liveArtifact.js";
+import { quoteVisibleExact } from "../../impl/quoteVisibleExact.js";
 import {
     describeArtifactSources,
     shouldReviewArtifactSources,
@@ -30,6 +38,14 @@ const updateArtifactToolInputSchema = Type.Object(
     {
         artifactId: cuid2Schema,
         title: Type.Optional(artifactTitleSchema),
+        url: Type.Optional(
+            Type.String({
+                minLength: 1,
+                maxLength: 4096,
+                description:
+                    "Replace a live artifact's http or https URL, keeping its original network. Not available for file artifacts.",
+            }),
+        ),
         background: Type.Optional(artifactToolBackgroundChangeSchema),
         display: Type.Optional(artifactToolDisplayChangeSchema),
         files: Type.Optional(artifactToolSourcesSchema),
@@ -62,6 +78,7 @@ export function updateArtifactTool(
     compute: ComputeModule,
     agentId: string,
 ) {
+    const reviewed = new WeakMap<UpdateArtifactToolInput, ArtifactRecord>();
     return defineAgentTool({
         name: "update_artifact",
         defer: true,
@@ -70,6 +87,7 @@ export function updateArtifactTool(
             "rename artifact",
             "artifact title",
             "artifact display",
+            "live url",
             "artifact background",
             "major version",
             "add image to artifact",
@@ -79,20 +97,38 @@ export function updateArtifactTool(
             "Change an artifact in one new version that keeps every earlier one, recorded as made by you, where you are working. title renames it, background changes the colour behind it, which almost every artifact leaves unset, and display changes where an html artifact is shown.",
             'files copies files from your machine in, adding each path or replacing the file there — for example { "fromPath": "out/chart.png", "path": "images/chart.png" } to place an image you generated, or the files of an app you built and tried with the shell. A copy keeps its own name unless you give it a path. remove takes paths out. Write and edit text files with write_artifact_file and edit_artifact_file instead.',
             "Every change makes a minor version, such as 1.3 after 1.2. When the artifact reaches a meaningful milestone, mark it with major, exactly one more than the latest major version: 2 makes this version 2.0, alone or together with the other changes. A major version needs at least one change since the last one.",
+            "For a live-URL artifact, url replaces its address while keeping the network captured at creation. Every update is reviewed in Auto. Do not supply files or remove: the fallback entry is generated, not editable. File artifacts and live artifacts cannot be converted into one another.",
         ].join("\n\n"),
         parameters: updateArtifactToolInputSchema,
         returnType: artifactToolResultSchema,
         durable: true,
-        shouldReviewInAutoMode: async ({ artifactId, files }, ctx) =>
-            (await shouldReviewArtifactWrite(ctx, artifacts, agentId, artifactId)) ||
-            (await shouldReviewArtifactSources(ctx, compute, agentId, files)),
+        shouldReviewInAutoMode: async (input, ctx) => {
+            const current = await artifacts.get(ctx, input.artifactId);
+            if (current !== undefined) reviewed.set(input, current);
+            return (
+                input.url !== undefined ||
+                current?.live !== undefined ||
+                (await shouldReviewArtifactWrite(ctx, artifacts, agentId, input.artifactId)) ||
+                (await shouldReviewArtifactSources(ctx, compute, agentId, input.files))
+            );
+        },
         // Only reading files outside the workspace needs the machine; the catalog never does.
-        shouldRunInFullAccessInAutoMode: ({ files }, ctx) =>
-            shouldReviewArtifactSources(ctx, compute, agentId, files),
-        describeAutoPermissionAction: ({ artifactId, files }) =>
-            files === undefined || files.length === 0
+        shouldRunInFullAccessInAutoMode: async ({ artifactId, files, url }, ctx) =>
+            url === undefined &&
+            (await artifacts.get(ctx, artifactId))?.live === undefined &&
+            (await shouldReviewArtifactSources(ctx, compute, agentId, files)),
+        describeAutoPermissionAction: (input) => {
+            const { artifactId, files, url, title } = input;
+            const current = reviewed.get(input);
+            if (current?.live !== undefined) {
+                const effectiveUrl =
+                    url === undefined ? current.live.url : normalizeArtifactUrl(url);
+                return `updating live artifact ${quoteVisibleExact(artifactId)} to ${quoteVisibleExact(effectiveUrl)}, titled ${quoteVisibleExact(title ?? current.title)}. The user's client loads it through recorded network ${quoteVisibleExact(current.live.networkId)}, reaching local servers and the internet and running the page's scripts in an isolated artifact browser profile. No Full access is granted`;
+            }
+            return files === undefined || files.length === 0
                 ? describeArtifactWrite(artifactId, "changing it")
-                : `publishing ${describeArtifactSources(files)} in a new version of artifact ${JSON.stringify(artifactId)}, which may be one this agent did not create, in this installation's shared artifact catalog for everyone who uses it. Access: local file read (outside-workspace or symlink targets require full access) and a write to the artifact catalog`,
+                : `publishing ${describeArtifactSources(files)} in a new version of artifact ${JSON.stringify(artifactId)}, which may be one this agent did not create, in this installation's shared artifact catalog for everyone who uses it. Access: local file read (outside-workspace or symlink targets require full access) and a write to the artifact catalog`;
+        },
         // The call's own ID keys the version, so a call repeated after an interruption finds the
         // version it already made instead of making another.
         execute: async (ctx, input: UpdateArtifactToolInput, call) => {
@@ -104,9 +140,22 @@ export function updateArtifactTool(
                 agentId,
                 input.artifactId,
             );
+            const target = reviewed.get(input);
+            if (
+                current.live !== undefined &&
+                agentPermissionMode(ctx) === "auto" &&
+                target?.revision !== current.revision
+            ) {
+                throw new ArtifactInputError(
+                    "The live artifact changed or was not reviewed. Read it again and repeat the call for a new review.",
+                );
+            }
             if (input.files !== undefined || input.remove !== undefined) {
+                requireFileArtifact(current);
                 await artifacts.assertAgentVersionBudget(ctx, agentId, current.id);
             }
+            if (current.live !== undefined)
+                await artifacts.assertAgentVersionBudget(ctx, agentId, current.id);
             const files =
                 input.files === undefined
                     ? undefined
@@ -122,7 +171,9 @@ export function updateArtifactTool(
             const updated = await artifacts.update(ctx, {
                 artifactId: input.artifactId,
                 operationId: call.id,
+                ...(current.live === undefined ? {} : { expectedRevision: current.revision }),
                 ...(input.title === undefined ? {} : { title: input.title }),
+                ...(input.url === undefined ? {} : { url: input.url }),
                 ...(input.background === undefined ? {} : { background: input.background }),
                 ...(input.display === undefined ? {} : { display: input.display }),
                 ...(files === undefined ? {} : { files }),
@@ -139,6 +190,11 @@ export function updateArtifactTool(
                 text: [
                     `Artifact ${artifact.id} is now at ${formatArtifactVersion(artifact)}: ${JSON.stringify(artifact.title)}, ${String(artifact.fileCount)} ${artifact.fileCount === 1 ? "file" : "files"}, opening ${JSON.stringify(artifact.entry.path)}${formatArtifactBackground(artifact.background)}${artifact.display === undefined ? "" : `, shown ${artifact.display}`}.`,
                     ARTIFACT_PRESENTED_NOTICE,
+                    ...(artifact.live === undefined
+                        ? []
+                        : [
+                              `Live content: ${JSON.stringify(artifact.live.url)}, through the original network ${JSON.stringify(artifact.live.networkId)}.`,
+                          ]),
                     `Reference it in chat as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id })}, or as ${formatHappyReferenceTag({ kind: "artifact", id: artifact.id, version: artifact.latestVersion })} for this version only.`,
                 ].join(" "),
             },

@@ -1,5 +1,6 @@
 import { cuid2Schema } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
+import { artifactLiveSchema } from "@slopus/happy-agent-client";
 
 export const artifactTypeSchema = Type.Union([
     Type.Literal("markdown"),
@@ -169,6 +170,7 @@ export const artifactRecordSchema = Type.Object(
         background: Type.Optional(artifactBackgroundSchema),
         /** The latest version's display preference; absent leaves it to the client. */
         display: Type.Optional(artifactDisplaySchema),
+        live: Type.Optional(artifactLiveSchema),
         source: Type.Optional(artifactSourceSchema),
         createdBy: artifactAuthorSchema,
         createdAt: artifactTimestampSchema,
@@ -204,6 +206,7 @@ export const artifactVersionSchema = Type.Object(
         background: Type.Optional(artifactBackgroundSchema),
         /** How this version's author wants it shown; absent leaves it to the client. */
         display: Type.Optional(artifactDisplaySchema),
+        live: Type.Optional(artifactLiveSchema),
         createdBy: artifactAuthorSchema,
         source: Type.Optional(artifactSourceSchema),
         createdAt: artifactTimestampSchema,
@@ -255,6 +258,7 @@ export const createArtifactInputSchema = Type.Object(
         background: Type.Optional(artifactBackgroundInputSchema),
         /** The first version's display preference; absent leaves it to the client. */
         display: Type.Optional(artifactDisplaySchema),
+        live: Type.Optional(artifactLiveSchema),
         author: artifactAuthorSchema,
         source: Type.Optional(artifactSourceSchema),
     },
@@ -269,6 +273,8 @@ export const updateArtifactInputSchema = Type.Object(
         /** A retry key: a version already made under it is not made again. */
         operationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         title: Type.Optional(artifactTitleSchema),
+        /** A live artifact's URL; its network cannot be changed. */
+        url: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
         /** Files added at new paths or replacing the file already at a path. */
         files: Type.Optional(Type.Array(artifactPlacementSchema, { maxItems: MAX_ARTIFACT_FILES })),
         /** Paths taken out of the version. */

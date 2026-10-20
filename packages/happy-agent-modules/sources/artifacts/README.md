@@ -45,6 +45,16 @@ are kept in path order by Unicode code point. Paths are `/`-joined segments of 1
 none empty, `.`, or `..`, with no `\` or control characters, so no path can name anything outside
 the artifact; a version never holds a file at a path another of its files uses as a folder.
 
+## Live URLs
+
+Live HTML artifacts carry `live: { url, networkId }` instead of authored files. Their one file is
+an inert, title-independent `index.html` notice for older clients, unchanged across versions.
+New clients use the URL through its
+recorded network in a browser profile scoped to the artifact ID; the daemon never fetches it.
+The network is captured at creation and cannot change. `url` on `update_artifact` makes a new
+version; metadata edits preserve it, and file edits are refused. `show_page` is a deprecated
+creation alias owned by this module. Every live create or update is reviewed in Auto.
+
 ## Backgrounds
 
 Clients show an artifact on a transparent slot, so the surface around it shows through. A version
@@ -88,7 +98,7 @@ exactly as it is makes no version. One agent makes at most
 `MAX_AGENT_ARTIFACT_VERSIONS_PER_HOUR` (100) versions of one artifact in an hour through its tools,
 so a model stuck repeating an edit cannot bury an artifact's history.
 
-Writing an artifact the agent created itself is never reviewed. Writing one someone else made —
+Writing a file artifact the agent created itself is never reviewed. Writing one someone else made —
 another agent or a person — publishes a version everyone sees: Auto reviews it, Workspace write
 refuses it, and Full access allows it. Read only refuses every write, creation included. None of
 this needs the agent's machine, so only a `fromPath` crossing the workspace boundary is lent Full
@@ -96,19 +106,19 @@ access.
 
 ## Tools
 
-Every agent gets eight tools. The author and source of a change are always the calling agent and
+Every agent gets eight artifact tools plus the deprecated `show_page` alias. The author and source of a change are always the calling agent and
 the place it works in, found by `actorFor`.
 
-| Tool                  | Behavior                                                                                                                                                                                        | Auto review                                                                      | Durability                                          |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `create_artifact`     | Issues the ID and makes version 1.0. A Markdown or HTML artifact starts from a short entry; `files` copies files from the agent's machine in, which an image, series, video, or document needs. | Only when a `fromPath` crosses the workspace boundary.                           | Durable; the artifact ID is kept in the call's KV.  |
-| `write_artifact_file` | Writes one whole text file, adding it or replacing the one at that path.                                                                                                                        | Only for an artifact the agent did not create.                                   | Durable; the call ID is the version's operation ID. |
-| `edit_artifact_file`  | Replaces exact text in one text file of the latest version.                                                                                                                                     | Only for an artifact the agent did not create.                                   | Durable; the call ID is the version's operation ID. |
-| `update_artifact`     | Changes the title, background, or display, copies files in with `fromPath`, removes files, and marks a major version.                                                                           | For an artifact the agent did not create, or a `fromPath` crossing the boundary. | Durable; the call ID is the version's operation ID. |
-| `list_artifacts`      | Pages the catalog newest first, everything or only what was made `here`, by type, with tombstones on request.                                                                                   | Never.                                                                           | Reloadable.                                         |
-| `read_artifact`       | One version's metadata and whole manifest, with a Markdown or HTML entry's first 64 KiB.                                                                                                        | Never.                                                                           | Reloadable.                                         |
-| `read_artifact_file`  | One file by path: text as numbered lines, 2,000 at a time from `offset`; raster images shown to the model scaled to 2,048 pixels; other binary files described only.                            | Never.                                                                           | Reloadable.                                         |
-| `delete_artifact`     | Leaves a tombstone for everyone.                                                                                                                                                                | Always, because deletion is final.                                               | Durable and transactional.                          |
+| Tool                  | Behavior                                                                                                                                                             | Auto review                                                                                       | Durability                                          |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `create_artifact`     | Issues the ID and makes version 1.0, with files or a live HTML URL.                                                                                                  | Every live URL, or a `fromPath` crossing the workspace boundary.                                  | Durable; the artifact ID is kept in the call's KV.  |
+| `write_artifact_file` | Writes one whole text file, adding it or replacing the one at that path.                                                                                             | Only for an artifact the agent did not create.                                                    | Durable; the call ID is the version's operation ID. |
+| `edit_artifact_file`  | Replaces exact text in one text file of the latest version.                                                                                                          | Only for an artifact the agent did not create.                                                    | Durable; the call ID is the version's operation ID. |
+| `update_artifact`     | Changes metadata or a live URL, copies or removes files on file artifacts, and marks a major version.                                                                | Every live artifact, an artifact the agent did not create, or a `fromPath` crossing the boundary. | Durable; the call ID is the version's operation ID. |
+| `list_artifacts`      | Pages the catalog newest first, everything or only what was made `here`, by type, with tombstones on request.                                                        | Never.                                                                                            | Reloadable.                                         |
+| `read_artifact`       | One version's metadata and whole manifest, with a Markdown or HTML entry's first 64 KiB.                                                                             | Never.                                                                                            | Reloadable.                                         |
+| `read_artifact_file`  | One file by path: text as numbered lines, 2,000 at a time from `offset`; raster images shown to the model scaled to 2,048 pixels; other binary files described only. | Never.                                                                                            | Reloadable.                                         |
+| `delete_artifact`     | Leaves a tombstone for everyone.                                                                                                                                     | Always, because deletion is final.                                                                | Durable and transactional.                          |
 
 Agents mention an artifact in their replies by its reference tag, `<happy-artifact id="…"/>`, with
 `version="N"` to point at one version. The module's instructions tell every agent so, and

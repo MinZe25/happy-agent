@@ -154,14 +154,36 @@ from the `write_artifact_file` and `edit_artifact_file` calls after `create_arti
 presentation therefore says `shows: "latest"`, and a client keeps that place in the
 chat on the artifact's newest version, which is where an HTML artifact appears inline at its full
 height. `update_artifact` records one change, so it says `"version"`. A missing `shows` means
-`"version"`, so older history keeps its cards. `show_page` presents any web page the same way
-inline, through the agent's network; the daemon never fetches it.
+`"version"`, so older history keeps its cards. Live pages now use the same artifact presentation;
+the deprecated `show_page` creates a live artifact rather than a separate page presentation.
 
 The prompt says what an inline page must look like because the default a model reaches for — a
 stack of rounded cards, tinted callouts, a coloured stripe down the left edge — is exactly what the
 master plan rules out. An inline page is part of the reply: laid on the chat with no frame or
 background, never capped and never scrolling inside. Anything that needs its own scrolling is
 shown beside the chat instead.
+
+## A live page is an artifact, not a separate presentation
+
+Kirill replaced the separate `show_page` concept with HTML artifacts whose content is a URL.
+The artifact and every version carry `live: { url, networkId }`; the original agent's network is
+captured at creation and never changes, even when another agent changes the URL. Only HTTP(S)
+without embedded credentials is accepted. The daemon never fetches the page. Every create or
+update is reviewed in Auto, including an owner's metadata-only update, without granting Full
+access. Clients use an artifact-scoped browser profile, never workspace or other-artifact cookies.
+
+The published API still requires file entries, so a live version retains one fixed inert HTML
+notice. It contains no artifact title, live address, redirect, iframe, or script. Kirill chose a
+title-independent notice so renaming remains a catalog-only transaction: it neither stages new
+bytes nor needs background materialization. The notice is staged once before creation; versions
+keep it unchanged, and identical notices share their content-addressed copy. File edits are
+refused at the module boundary. `show_page` stays registered in this module as a deprecated
+creation alias, with its old arguments and ordinary artifact result, identity, and retry semantics.
+
+Review descriptions are synchronous in Agent Base. The async review predicate resolves a target
+snapshot, weakly keyed by that invocation's arguments, for the description to read. Execution
+checks the reviewed network or revision again, and a changed target requires another review;
+concurrent invocations do not share a mutable last-target slot.
 
 ## A few standard components, served with the daemon
 

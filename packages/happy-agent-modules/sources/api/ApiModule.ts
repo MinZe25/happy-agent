@@ -391,6 +391,7 @@ const ARTIFACT_UPDATED_FIELDS = [
     "size",
     "background",
     "display",
+    "live",
     "updatedBy",
     "updatedSource",
     "updatedAt",
@@ -6781,6 +6782,16 @@ export class ApiModule implements AgentModule {
                         "conflict",
                         "The artifact was deleted, so it cannot change.",
                         conflict,
+                    );
+                }
+                if (
+                    current.live !== undefined &&
+                    (body.files !== undefined ||
+                        body.remove !== undefined ||
+                        body.replaceAll !== undefined)
+                ) {
+                    throw invalidRequest(
+                        "This artifact's content is a live URL; its generated fallback files cannot be edited.",
                     );
                 }
                 const source = await this.#artifactSource(ctx, body.source);

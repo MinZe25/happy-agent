@@ -11,6 +11,7 @@ import {
 } from "../impl/artifactWriteAccess.js";
 import { formatArtifactVersion } from "../impl/formatArtifact.js";
 import { replaceArtifactText } from "../impl/replaceArtifactText.js";
+import { requireFileArtifact } from "../impl/liveArtifact.js";
 import {
     ARTIFACT_TOOL_CAPABILITY,
     artifactFileWriteResultSchema,
@@ -71,7 +72,9 @@ export function editArtifactFileTool(artifacts: ArtifactsModule, agentId: string
             const operationId = call.id;
             const done = await artifacts.madeByOperation(ctx, input.artifactId, operationId);
             if (done !== undefined) return { ...done, path: input.path, changed: true };
-            await requireWritableArtifact(ctx, artifacts, agentId, input.artifactId);
+            requireFileArtifact(
+                await requireWritableArtifact(ctx, artifacts, agentId, input.artifactId),
+            );
             const read = await artifacts.readText(ctx, input.artifactId, input.path);
             const edited = replaceArtifactText(read.text, input.path, {
                 oldText: input.old_string,
