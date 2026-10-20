@@ -235,6 +235,31 @@ describe("AcpSession", () => {
         expect(prompts[1]!.text).toBe(prompts[0]!.text);
     }, 30_000);
 
+    it("does not send a refused prompt again once the agent reported acting on it", async () => {
+        const h = harness();
+        const session = await h.session();
+        h.user("throttled late");
+        const events = await h.run(session);
+        expect(events.some((event) => event.type === "retrying")).toBe(false);
+        expect(done(events)).toMatchObject({ state: "error" });
+        expect(String((done(events) as { message?: string }).message)).toContain("429");
+        expect(h.log().filter((entry) => entry.method === "prompt")).toHaveLength(1);
+    }, 30_000);
+
+    it("stops waiting to send a refused prompt again when the response is stopped", async () => {
+        const h = harness();
+        const session = await h.session();
+        h.user("throttled hello");
+        const stop = new AbortController();
+        const started = Date.now();
+        const running = h.run(session, stop.signal);
+        setTimeout(() => stop.abort(), 500);
+        const events = await running;
+        expect(done(events)).toMatchObject({ state: "cancelled" });
+        expect(Date.now() - started).toBeLessThan(2_500);
+        expect(h.log().filter((entry) => entry.method === "prompt")).toHaveLength(1);
+    }, 30_000);
+
     it("catches a session up on turns another account or harness answered, keeping the session", async () => {
         const h = harness();
         const session = await h.session();

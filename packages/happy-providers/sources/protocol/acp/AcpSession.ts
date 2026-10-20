@@ -235,6 +235,9 @@ export class AcpSession extends BaseSession {
         const steered = abortPromise(request.steered).then((): typeof STEERED => STEERED);
         let finished = false;
         let retries = 0;
+        // Anything the agent reported — text, reasoning, its own tool calls — means it acted on
+        // the prompt, and sending it again could repeat that work.
+        let reported = false;
         try {
             for (;;) {
                 turn.reading ??= turn.items.next();
@@ -274,6 +277,7 @@ export class AcpSession extends BaseSession {
                     return;
                 }
                 if (item.kind === "update") {
+                    reported = true;
                     yield* events.update(item.update);
                     continue;
                 }
@@ -294,7 +298,7 @@ export class AcpSession extends BaseSession {
                         wait !== undefined &&
                         turn.sent !== undefined &&
                         isRateLimited(item.error) &&
-                        events.outputCharacters === 0 &&
+                        !reported &&
                         turn.awaiting.size === 0 &&
                         this.#connection === connection &&
                         this.#turn === turn
@@ -302,10 +306,11 @@ export class AcpSession extends BaseSession {
                         // Refused before saying anything: the same prompt, a little later.
                         retries++;
                         yield { type: "retrying", attempt: retries, reason: errorText(item.error) };
+                        let timer: NodeJS.Timeout | undefined;
                         const waited = await Promise.race([
-                            new Promise<void>((resolve) => setTimeout(resolve, wait)),
+                            new Promise<void>((resolve) => (timer = setTimeout(resolve, wait))),
                             aborted,
-                        ]);
+                        ]).finally(() => clearTimeout(timer));
                         if (waited !== ABORTED) {
                             this.#sendPrompt(connection, turn, turn.sent);
                             continue;
