@@ -36,6 +36,8 @@ export interface FetchClaudeProviderUsageOptions {
      */
     onUsageEndpointRefused?: (refusal: ClaudeUsageEndpointRefusal) => void;
     probeModel?: string;
+    /** Called only before fallback inference; false defers that probe without spending tokens. */
+    shouldProbe?: () => boolean;
     providerId?: string;
     timeoutMs?: number;
     /**
@@ -177,6 +179,7 @@ async function probeRateLimitHeaders(
     token: string,
     options: FetchClaudeProviderUsageOptions,
 ): Promise<ProviderUsage | null> {
+    if (options.shouldProbe?.() === false) return null;
     const now = options.now ?? Date.now;
     const baseUrl = (options.baseUrl ?? DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/u, "");
     const response = await (options.fetch ?? fetch)(`${baseUrl}/v1/messages`, {

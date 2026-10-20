@@ -576,7 +576,10 @@ from the credential: a stored `claude auth login` with the `user:profile` scope 
 endpoint, while a `CLAUDE_CODE_OAUTH_TOKEN`, a login without that scope, or `usageEndpoint: false`
 measures a one-token inference response's unified headers instead. A throttled endpoint also falls
 back to those headers, and `onUsageEndpointRefused` reports the endpoint's `403`, `404`, or `429`
-with its retry instant so a caller can stop asking it. Internal request builders, transports, native
+with its retry instant so a caller can stop asking it. Optional `shouldProbe` runs only just before
+fallback inference; returning `false` defers that probe while inexpensive endpoint reads remain
+available. This gate also covers inference-only credentials and throttled-endpoint fallbacks.
+Internal request builders, transports, native
 prompts, native tool catalogs, and trace fixtures are not exported.
 
 More reference documentation:

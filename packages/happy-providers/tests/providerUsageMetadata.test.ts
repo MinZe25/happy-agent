@@ -38,6 +38,39 @@ afterEach(async () => {
 });
 
 describe("provider usage metadata", () => {
+    it.each(["inference-only", "refused", "throttled", "available"])(
+        "admits fallback inference separately from %s account reads",
+        async (kind) => {
+            const paths: string[] = [];
+            let admissions = 0;
+            const read = fetchClaudeProviderUsage({
+                oauthToken: "fixture-token",
+                ...(kind === "inference-only" ? { usageEndpoint: false } : {}),
+                shouldProbe: () => {
+                    admissions += 1;
+                    return false;
+                },
+                fetch: async (input) => {
+                    const path = new URL(String(input)).pathname;
+                    paths.push(path);
+                    if (path === "/api/oauth/profile") return Response.json({});
+                    if (path === "/api/oauth/usage")
+                        return kind === "available"
+                            ? Response.json({ five_hour: { utilization: 42 } })
+                            : new Response(null, { status: kind === "throttled" ? 429 : 403 });
+                    throw new Error("Deferred inference must not be dispatched");
+                },
+            });
+            if (kind === "throttled") await expect(read).rejects.toMatchObject({ status: 429 });
+            else if (kind === "available")
+                expect((await read)?.windows.fiveHour?.usedPercent).toBe(42);
+            else expect(await read).toBeNull();
+            expect(admissions).toBe(kind === "available" ? 0 : 1);
+            expect(paths).toEqual(
+                kind === "inference-only" ? [] : ["/api/oauth/usage", "/api/oauth/profile"],
+            );
+        },
+    );
     it.each([
         {
             label: "workspace spend control",
