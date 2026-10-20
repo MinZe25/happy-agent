@@ -33,16 +33,28 @@ the `# ` prefix. The type and its admin tool are withdrawn. Rows an earlier daem
 unchanged rather than rewritten, but the catalog read filters them out, so every list, route, and
 chat treats their IDs as not found and creation with one of their IDs is refused.
 
+## Names and pictures can change after creation
+
+Surfaces were named and pictured only at creation, so an agent that generated an icon for an
+existing document could not apply it and told the person to do it by hand. Steve asked that agents
+can rename a Surface and change or remove its picture. `PATCH /v0/surfaces/:surfaceId` and the
+ordinary `update_surface` tool now do both for every Surface type, for any person or agent, like
+other shared Surface data. Equal values are exact no-ops, so a repeated picture or name appends no
+version or event; an image is equal when its normalized bytes match. `surface.updated` carries the
+new `name` or `image` only when it changed. The tool reads its image outside the transaction,
+keeps the bytes in its call state for replay, and settles its result in the edit's transaction.
+
 ## References resolve their target on every read
 
 Copying a bot's, task's, or artifact's title into the Surface would drift as soon as the target
-was renamed. A reference Surface instead keeps an immutable label and a separately stored target
-binding. Reads resolve the target's live name, image flag, and own version; the Surface's version
-and events stay unchanged when only the target changes. Every authenticated person can already
-read every bot, task, and artifact, so availability follows the target's lifecycle alone. Deleted
-or archived targets read as unavailable with no identifying fields, and creation refuses them
-as not found. Shared creation events carry only the stored record, so a caller-relative
-projection is never published. A reference joins nobody to the target and grants no rights.
+was renamed. A reference Surface instead keeps its own label, edited only through the ordinary
+Surface edit, and a separately stored target binding. Reads resolve the target's live name, image
+flag, and own version; the Surface's version and events stay unchanged when only the target
+changes. Every authenticated person can already read every bot, task, and artifact, so
+availability follows the target's lifecycle alone. Deleted or archived targets read as unavailable
+with no identifying fields, and creation refuses them as not found. Shared creation events carry
+only the stored record, so a caller-relative projection is never published. A reference joins
+nobody to the target and grants no rights.
 
 ## A Surface chat is reserved before it is prepared
 

@@ -19,6 +19,7 @@ import {
     surfaceIdSchema,
     todoSchema,
     todoRevisionSchema,
+    updateSurfaceRequestSchema,
     updateTodoRequestSchema,
     todoListScopeSchema,
     surfaceCreatedPayloadSchema,
@@ -35,6 +36,7 @@ import {
     type UpdateCalendarEventRequest,
     type CreateSurfaceRequest,
     type CreateTodoRequest,
+    type UpdateSurfaceRequest,
     type UpdateTodoRequest,
     type Surface,
     type SurfaceTarget,
@@ -243,8 +245,8 @@ export class SurfacesModule implements AgentModule {
             (await this.compute.shouldReviewPath(ctx, compute, path, { write: false }))
         );
     }
+    /** Reads through the agent's own filesystem boundary; callers check their own authority. */
     async imageFromPath(ctx: Context, agentId: string, path: string): Promise<string> {
-        await this.requireAdmin(ctx, agentId);
         const compute = await this.compute.resolve(ctx, agentId);
         if (compute === undefined)
             throw new SurfaceError("invalid_request", "The agent filesystem is unavailable.");
@@ -277,24 +279,7 @@ export class SurfacesModule implements AgentModule {
         const input = checked(createSurfaceRequestSchema, request);
         const reference = referenceFor(input);
         if (reference !== undefined) checked(surfaceReferenceSchema, reference);
-        let image: SurfaceImageAsset | null = null;
-        if (input.image !== undefined) {
-            try {
-                const normalized = await normalizeManagedImage(
-                    Buffer.from(input.image.data, "base64"),
-                );
-                image = {
-                    data: Buffer.from(normalized.bytes).toString("base64"),
-                    etag: normalized.etag,
-                    thumbhash: normalized.thumbhash,
-                };
-            } catch (error) {
-                throw new SurfaceError(
-                    "invalid_request",
-                    error instanceof Error ? error.message : "The Surface image is invalid.",
-                );
-            }
-        }
+        const image = input.image === undefined ? null : await normalizedImage(input.image.data);
         return ctx.inTx(async (tx) => {
             if (adminAgentId !== undefined) await this.requireAdmin(tx, adminAgentId);
             await this.#validateUser(tx, creatorUserId);
@@ -430,6 +415,58 @@ export class SurfacesModule implements AgentModule {
             if (image === undefined)
                 throw new SurfaceError("not_found", "This Surface has no image.");
             return checked(surfaceImageAssetSchema, image);
+        });
+    }
+    /**
+     * Rename a Surface or replace or remove its image. The image is normalized before the
+     * transaction; values equal to the stored ones change nothing, and an edit that changes
+     * nothing is an exact no-op. `settle` runs in the same transaction, so a durable tool commits
+     * its result atomically with the edit.
+     */
+    async update(
+        ctx: Context,
+        id: string,
+        request: UpdateSurfaceRequest,
+        settle: (tx: Context, surface: Surface) => Promise<Surface> = async (_tx, surface) =>
+            surface,
+    ): Promise<Surface> {
+        const input = checked(updateSurfaceRequestSchema, request);
+        const image =
+            input.image === undefined || input.image === null
+                ? input.image
+                : await normalizedImage(input.image.data);
+        return ctx.inTx(async (tx) => {
+            const current = await this.#surface(tx, id);
+            const changes: Partial<Pick<Surface, "name" | "image">> = {};
+            if (input.name !== undefined && input.name !== current.name) changes.name = input.name;
+            if (image === null && current.image !== null) changes.image = null;
+            if (image != null) {
+                const stored = await this.#kv.read(tx, `image.${id}`);
+                if (!Value.Check(surfaceImageAssetSchema, stored) || stored.etag !== image.etag)
+                    changes.image = { thumbhash: image.thumbhash };
+            }
+            if (Object.keys(changes).length === 0)
+                return settle(tx, await this.#present(tx, current));
+            const surface = {
+                ...current,
+                ...changes,
+                updatedAt: Date.now(),
+                version: createUuidV7Factory(Date.now, current.version)(),
+            };
+            await this.#kv.write(tx, `surface.${id}`, surface);
+            if (changes.image === null) await this.#kv.delete(tx, `image.${id}`);
+            else if (changes.image !== undefined) await this.#kv.write(tx, `image.${id}`, image);
+            await this.#event(tx, {
+                type: "surface.updated",
+                payload: {
+                    surfaceId: id,
+                    previousVersion: current.version,
+                    version: surface.version,
+                    changes: { members: surface.members, updatedAt: surface.updatedAt, ...changes },
+                    ...echo(input.mutationId),
+                },
+            });
+            return settle(tx, await this.#present(tx, surface));
         });
     }
     async changeMember(
@@ -1209,6 +1246,22 @@ function referenceFor(input: CreateSurfaceRequest): SurfaceReference | undefined
     if (input.type === "bot") return { type: "bot", botId: input.botId };
     if (input.type === "task") return { type: "task", taskId: input.taskId };
     return undefined;
+}
+/** One managed normalization for every Surface image, mapped to the Surface's own error. */
+async function normalizedImage(data: string): Promise<SurfaceImageAsset> {
+    try {
+        const normalized = await normalizeManagedImage(Buffer.from(data, "base64"));
+        return {
+            data: Buffer.from(normalized.bytes).toString("base64"),
+            etag: normalized.etag,
+            thumbhash: normalized.thumbhash,
+        };
+    } catch (error) {
+        throw new SurfaceError(
+            "invalid_request",
+            error instanceof Error ? error.message : "The Surface image is invalid.",
+        );
+    }
 }
 function echo(mutationId?: string) {
     return mutationId === undefined ? {} : { mutationId };

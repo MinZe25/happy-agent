@@ -22,8 +22,10 @@ import {
     surfaceDocumentChangeListResponseSchema,
     resourceVersionSchema,
     systemMonitorSnapshotSchema,
+    type Surface,
 } from "@slopus/happy-agent-client";
 import type { SurfacesModule } from "../SurfacesModule.js";
+import { SurfaceError } from "../SurfaceError.js";
 import { calendarTools } from "./calendarTools.js";
 import { formatSystemMonitor } from "../systemMonitor/formatSystemMonitor.js";
 
@@ -54,13 +56,12 @@ const list = (items: readonly string[]) =>
     items.length < 3
         ? items.join(" and ")
         : `${items.slice(0, -1).join(", ")}, and ${items.at(-1)}`;
-const imagePath = Type.Optional(
-    Type.String({
-        minLength: 1,
-        maxLength: 4096,
-        pattern: "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\u0000]*$",
-    }),
-);
+const absoluteImagePath = Type.String({
+    minLength: 1,
+    maxLength: 4096,
+    pattern: "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\u0000]*$",
+});
+const imagePath = Type.Optional(absoluteImagePath);
 const fromImage = (path: string | undefined) =>
     path === undefined ? "" : ` from image ${JSON.stringify(path)}`;
 const referenceRules =
@@ -127,6 +128,71 @@ export function surfaceTools(surfaces: SurfacesModule, scope: AgentModuleScope, 
                     surfaces: all.slice(start, end),
                     nextOffset: end < all.length ? end : null,
                 };
+            },
+            toLLM: textResult,
+        }),
+        defineAgentTool({
+            name: "update_surface",
+            defer: true,
+            capabilities: ["Rename a shared Surface or change or remove its picture."],
+            searchKeywords: [
+                "rename surface",
+                "surface picture",
+                "change document icon",
+                "remove surface image",
+            ],
+            description:
+                "Rename a shared Surface of any type, or change or remove its picture. Supply a new name, an absolute PNG, JPEG, or WebP imagePath (8 MiB maximum) to replace the picture, or imagePath null to remove it; at least one is required. Write or generate the image first, then point this tool at it. For artifact, bot, and task Surfaces the name is the label shown while the target is unavailable. Values equal to the current ones change nothing. This never joins anyone or changes the Surface's content.",
+            parameters: Type.Object(
+                {
+                    surfaceId: surfaceIdSchema,
+                    name: Type.Optional(surfaceNameSchema),
+                    imagePath: Type.Optional(Type.Union([absoluteImagePath, Type.Null()])),
+                },
+                { additionalProperties: false },
+            ),
+            returnType: surfaceSchema,
+            durable: true,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: (input, ctx) =>
+                surfaces.shouldElevateImage(ctx, scope.agent.id, input.imagePath ?? undefined),
+            describeAutoPermissionAction: ({ surfaceId, name, imagePath }) => {
+                const edits = [
+                    ...(name === undefined ? [] : [`renaming it to ${JSON.stringify(name)}`]),
+                    ...(imagePath === undefined
+                        ? []
+                        : imagePath === null
+                          ? ["removing its picture"]
+                          : [`setting its picture${fromImage(imagePath)}`]),
+                ];
+                return `editing shared Surface ${JSON.stringify(surfaceId)}${edits.length === 0 ? "" : `: ${edits.join(" and ")}`}. ${imageAccess}`;
+            },
+            // Replays reuse the first image bytes, and the result commits with the edit.
+            execute: async (ctx, { surfaceId, name, imagePath: path }, call) => {
+                const settle = (tx: ToolContext, surface: Surface) => call.commit(tx, surface);
+                if (path === undefined) {
+                    if (name === undefined)
+                        throw new SurfaceError(
+                            "invalid_request",
+                            "Supply a new name, an imagePath, or imagePath null to remove the picture.",
+                        );
+                    return surfaces.update(ctx, surfaceId, { name }, settle);
+                }
+                const image =
+                    path === null
+                        ? null
+                        : {
+                              data: await call.kv.getOrCreate(ctx, "image", () =>
+                                  surfaces.imageFromPath(ctx, scope.agent.id, path),
+                              ),
+                          };
+                return surfaces.update(
+                    ctx,
+                    surfaceId,
+                    { image, ...(name === undefined ? {} : { name }) },
+                    settle,
+                );
             },
             toLLM: textResult,
         }),

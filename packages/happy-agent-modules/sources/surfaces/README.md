@@ -16,6 +16,8 @@ changes across lists. History pagination selects only a bounded prefix range. Du
 Agent Base's transactional settlement; image creation retains a call-stable ID and image bytes.
 The admin tools check active admin authority at selection and execution. Images pass through
 Compute's filesystem boundary and bounded managed normalization, never an arbitrary served path.
+Anyone may rename a Surface or replace or remove its image afterwards; the edit, its image bytes,
+and `surface.updated` commit together, and equal values change nothing.
 
 Separators are withdrawn. Rows an earlier daemon stored stay untouched, but the catalog read
 filters them out, so listing, membership, ordering, content routes, and chats all treat their IDs

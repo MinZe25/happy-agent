@@ -27,6 +27,7 @@ import { createId } from "@paralleldrive/cuid2";
 import {
     closeWorkspaceBridgeRequestSchema,
     createSurfaceRequestSchema,
+    updateSurfaceRequestSchema,
     surfaceIdSchema,
     surfaceMemberRequestSchema,
     reorderSurfaceRequestSchema,
@@ -5701,6 +5702,21 @@ export class ApiModule implements AgentModule {
                 }
                 return false;
             }
+            const edited = /^\/v0\/surfaces\/([a-z][a-z0-9]*)$/.exec(url.pathname);
+            if (edited !== null) {
+                const id = edited[1]!;
+                if (request.method !== "PATCH" || !Value.Check(surfaceIdSchema, id)) return false;
+                const body = await bodyAs(
+                    request,
+                    updateSurfaceRequestSchema,
+                    "Surface edit",
+                    14 * 1024 * 1024,
+                );
+                // Only onboarded people may edit shared Surfaces.
+                await surfaces.owner(ctx);
+                sendJson(response, 200, { surface: await surfaces.update(ctx, id, body) });
+                return true;
+            }
             const membership =
                 /^\/v0\/surfaces\/([a-z][a-z0-9]*)\/(join|leave|reorder|image|chat)$/.exec(
                     url.pathname,
@@ -8463,6 +8479,7 @@ export class ApiModule implements AgentModule {
                           collaborativeDocuments: true,
                           calendarSurfaces: true,
                           systemMonitorSurfaces: true,
+                          surfaceEditing: true,
                       }),
             },
             version: {

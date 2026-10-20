@@ -1,8 +1,10 @@
 # Surface model tools
 
 One fixed common array serves every model. Todo operations name their Surface instance and use
-current-version guards. A separate fixed admin array adds type-specific creation and user
-administration only for actual active admin bots. Every mutation owns its permission policy.
+current-version guards. `update_surface` renames any Surface or replaces or removes its picture
+from an absolute image path; it is reviewed in Auto, elevates only for outside-workspace or
+symlink images, and settles its durable result in the edit's own transaction. A separate fixed
+admin array adds type-specific creation and user administration only for actual active admin bots. Every mutation owns its permission policy.
 
 Document tools read the Markdown projection at the latest or an earlier `seq`, write full
 replacement Markdown against the `seq` the model read, and list the change log. A write applies

@@ -6,6 +6,7 @@ import {
 } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
 import { sql } from "drizzle-orm";
+import sharp from "sharp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ArtifactsModule } from "../../sources/artifacts/index.js";
 import type { BotsModule } from "../../sources/bots/index.js";
@@ -15,7 +16,7 @@ import type { RunnersModule } from "../../sources/runners/index.js";
 import type { TasksModule } from "../../sources/tasks/index.js";
 import type { TeamModule } from "../../sources/team/index.js";
 import { DurableFunctionsModule } from "../../sources/durableFunctions/index.js";
-import { SurfacesModule } from "../../sources/surfaces/index.js";
+import { SurfacesModule, type SurfaceEvent } from "../../sources/surfaces/index.js";
 import { SurfacesPersistence } from "../../sources/surfaces/persistence/SurfacesPersistence.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
@@ -45,9 +46,16 @@ async function fixture(teamEnabled = true) {
                   ? { id, authentication: "guest" }
                   : undefined,
     } as unknown as TeamModule;
+    const fs = {
+        stat: vi.fn(async () => ({ isFile: true, size: 64 })),
+        readFileBuffer: vi.fn(async (): Promise<Uint8Array> => {
+            throw new Error("No image file was prepared.");
+        }),
+    };
     const compute = {
-        resolve: vi.fn(async () => ({})),
+        resolve: vi.fn(async () => ({ fs })),
         shouldReviewPath: vi.fn(async () => false),
+        permissionsForContext: vi.fn(() => ({})),
     };
     const surfaces = new SurfacesModule(
         durable,
@@ -72,6 +80,7 @@ async function fixture(teamEnabled = true) {
         db,
         hooks,
         compute,
+        fs,
         kv: new SurfacesPersistence(db.database).kv(),
         revoke: () => {
             adminActive = false;
@@ -214,6 +223,7 @@ describe("installation-owned Surface state", () => {
         expect(ordinary.map((tool) => tool.name)).toEqual([
             "read_system_monitor",
             "list_surfaces",
+            "update_surface",
             "list_todos",
             "create_todo",
             "update_todo",
@@ -229,7 +239,7 @@ describe("installation-owned Surface state", () => {
             "delete_calendar_event",
             "list_calendar_event_versions",
         ]);
-        for (const tool of ordinary) {
+        for (const tool of ordinary.filter((tool) => tool.name !== "update_surface")) {
             const read =
                 tool.name.startsWith("list_") ||
                 tool.name === "read_document" ||
@@ -241,6 +251,22 @@ describe("installation-owned Surface state", () => {
             }
             expect(tool.shouldRunInFullAccessInAutoMode).toBeUndefined();
         }
+        // Reading an image cannot hold the transaction, so the edit settles its own result.
+        const update = ordinary.find((tool) => tool.name === "update_surface")!;
+        expect(update.shouldReviewInAutoMode!({}, ctx)).toBe(true);
+        expect(update.requiresAutoOrFullAccess).toBe(true);
+        expect(update.durable).toBe(true);
+        expect(update.transactional).toBeUndefined();
+        for (const input of [{ name: "Renamed" }, { imagePath: null }, { imagePath: "/w/a.png" }])
+            expect(await update.shouldRunInFullAccessInAutoMode!(input, ctx)).toBe(false);
+        expect(
+            update.describeAutoPermissionAction!(
+                { surfaceId: "s12345678901234567890123", name: "Plans", imagePath: null },
+                ctx,
+            ),
+        ).toBe(
+            'editing shared Surface "s12345678901234567890123": renaming it to "Plans" and removing its picture. Access: shared data write and, when supplied, filesystem image read; outside-workspace and symlink targets require Full access',
+        );
         const tools = await f.hooks.tools!(ctx, { agent: { id: "admin" } } as AgentModuleScope);
         for (const tool of tools) {
             if (await tool.shouldReviewInAutoMode!({}, ctx)) {
@@ -280,6 +306,12 @@ describe("installation-owned Surface state", () => {
         expect(
             createMonitor.describeAutoPermissionAction!({ imagePath: "/outside/image.png" }, ctx),
         ).toContain("shared System Monitor");
+        expect(
+            await update.shouldRunInFullAccessInAutoMode!({ imagePath: "/outside/a.png" }, ctx),
+        ).toBe(true);
+        expect(
+            update.describeAutoPermissionAction!({ imagePath: "/outside/a.png" }, ctx),
+        ).toContain('setting its picture from image "/outside/a.png"');
         f.revoke();
         await expect(
             add.execute(
@@ -514,4 +546,177 @@ describe("installation-owned Surface state", () => {
             ),
         ).toEqual([null, null]);
     });
+
+    it("renames and replaces images atomically, announcing only what changed", async () => {
+        const { surfaces: s, db } = await fixture();
+        const ctx = db.context;
+        const events: SurfaceEvent[] = [];
+        s.onEventTransactional((_ctx, event) => {
+            events.push(event);
+        });
+        const surface = await s.create(ctx, { type: "todo", name: "Libraries" }, "alice");
+        const actor = { userId: "alice", agentId: null };
+        const todo = await s.createTodo(ctx, surface.id, { text: "Read docs" }, actor, "alice");
+        await s.changeMember(ctx, surface.id, "bob", "join");
+        const [joined] = await s.list(ctx);
+        events.length = 0;
+        const red = (await png("#ff0000")).toString("base64");
+        const blue = (await png("#0000ff")).toString("base64");
+
+        const renamed = await s.update(ctx, surface.id, {
+            name: "Interesting Libraries",
+            mutationId: "rename",
+        });
+        expect(renamed).toMatchObject({
+            name: "Interesting Libraries",
+            image: null,
+            members: joined!.members,
+            creatorUserId: "alice",
+        });
+        expect(renamed.version > joined!.version).toBe(true);
+        expect(events).toEqual([
+            {
+                type: "surface.updated",
+                payload: {
+                    surfaceId: surface.id,
+                    previousVersion: joined!.version,
+                    version: renamed.version,
+                    changes: {
+                        members: joined!.members,
+                        updatedAt: renamed.updatedAt,
+                        name: "Interesting Libraries",
+                    },
+                    mutationId: "rename",
+                },
+            },
+        ]);
+
+        const pictured = await s.update(ctx, surface.id, { image: { data: red } });
+        expect(pictured.image).toEqual({ thumbhash: expect.any(String) });
+        const redImage = await s.image(ctx, surface.id);
+        await expect(sharp(Buffer.from(redImage.data, "base64")).metadata()).resolves.toMatchObject(
+            { format: "webp" },
+        );
+        expect(events.at(-1)!.payload).toMatchObject({
+            previousVersion: renamed.version,
+            changes: { image: pictured.image },
+        });
+        expect(events.at(-1)!.payload).not.toHaveProperty("changes.name");
+
+        // Equal values, including the same picture again, change nothing.
+        for (const same of [
+            { name: "Interesting Libraries" },
+            { image: { data: red } },
+            { name: "Interesting Libraries", image: { data: red } },
+        ])
+            expect(await s.update(ctx, surface.id, same)).toEqual(pictured);
+        expect(events).toHaveLength(2);
+
+        const both = await s.update(ctx, surface.id, { name: "Libraries", image: { data: blue } });
+        expect(both.name).toBe("Libraries");
+        expect(both.image).not.toEqual(pictured.image);
+        expect((await s.image(ctx, surface.id)).etag).not.toBe(redImage.etag);
+        expect(events.at(-1)!.payload).toMatchObject({
+            changes: { name: "Libraries", image: both.image },
+        });
+
+        const cleared = await s.update(ctx, surface.id, { image: null });
+        expect(cleared.image).toBeNull();
+        await expect(s.image(ctx, surface.id)).rejects.toMatchObject({ code: "not_found" });
+        expect(events.at(-1)!.payload).toMatchObject({ changes: { image: null } });
+        expect(await s.update(ctx, surface.id, { image: null })).toEqual(cleared);
+        expect(events).toHaveLength(4);
+        expect(await s.listTodos(ctx, surface.id)).toEqual([todo]);
+
+        for (const invalid of [
+            {},
+            { mutationId: "only" },
+            { name: "" },
+            { name: "a\nb" },
+            { name: "Typed", type: "todo" },
+            { image: { data: "bm90LWFuLWltYWdl" } },
+        ])
+            await expect(s.update(ctx, surface.id, invalid as never)).rejects.toMatchObject({
+                code: "invalid_request",
+            });
+        await expect(
+            s.update(ctx, "s12345678901234567890123", { name: "Missing" }),
+        ).rejects.toMatchObject({ code: "not_found" });
+        const pending = () =>
+            agentDatabaseRows<{ id: string }>(
+                db.database,
+                sql`SELECT id FROM durable_function_calls ORDER BY id`,
+            );
+        const before = await pending();
+        await expect(
+            ctx.inTx(async (tx) => {
+                await s.update(tx, surface.id, { name: "Temporary", image: { data: red } });
+                throw new Error("rollback");
+            }),
+        ).rejects.toThrow("rollback");
+        expect(await s.list(ctx)).toEqual([cleared]);
+        await expect(s.image(ctx, surface.id)).rejects.toMatchObject({ code: "not_found" });
+        expect(await pending()).toEqual(before);
+    });
+
+    it("lets any agent edit a Surface and settles the result with the edit", async () => {
+        const f = await fixture();
+        const ctx = f.db.context;
+        const surface = await f.surfaces.create(ctx, { type: "todo", name: "Errands" }, "alice");
+        const tools = await f.hooks.tools!(ctx, {
+            agent: { id: "ordinary" },
+            kv: f.kv.scoped("ordinary-agent"),
+        } as AgentModuleScope);
+        const update = tools.find((tool) => tool.name === "update_surface")!;
+        expect(Value.Check(update.parameters, { surfaceId: surface.id, imagePath: "a.png" })).toBe(
+            false,
+        );
+        const call = (key: string) => ({
+            kv: f.kv.scoped(key),
+            commit: vi.fn(async (_tx: unknown, result: unknown) => result),
+        });
+
+        await expect(
+            update.execute(ctx, { surfaceId: surface.id }, call("empty") as never),
+        ).rejects.toMatchObject({ code: "invalid_request" });
+
+        f.fs.readFileBuffer.mockResolvedValue(await png("#00ff00"));
+        const first = call("picture");
+        const pictured = await update.execute(
+            ctx,
+            { surfaceId: surface.id, name: "Weekend errands", imagePath: "/work/icon.png" },
+            first as never,
+        );
+        expect(pictured).toMatchObject({
+            name: "Weekend errands",
+            image: { thumbhash: expect.any(String) },
+        });
+        expect(first.commit).toHaveBeenCalledWith(expect.anything(), pictured);
+        // A replay reuses the bytes read the first time instead of reading the file again.
+        f.fs.readFileBuffer.mockResolvedValue(await png("#ff00ff"));
+        expect(
+            await update.execute(
+                ctx,
+                { surfaceId: surface.id, name: "Weekend errands", imagePath: "/work/icon.png" },
+                first as never,
+            ),
+        ).toEqual(pictured);
+        expect(f.fs.readFileBuffer).toHaveBeenCalledTimes(1);
+
+        const cleared = await update.execute(
+            ctx,
+            { surfaceId: surface.id, imagePath: null },
+            call("clear") as never,
+        );
+        expect(cleared).toMatchObject({ name: "Weekend errands", image: null });
+        expect(f.fs.readFileBuffer).toHaveBeenCalledTimes(1);
+    });
 });
+
+function png(color: string): Promise<Buffer> {
+    return sharp({
+        create: { width: 4, height: 4, channels: 3, background: color },
+    })
+        .png()
+        .toBuffer();
+}
