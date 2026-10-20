@@ -6,6 +6,12 @@ import { EventStreamProtocolError } from "./readEventStream.js";
 const INITIAL_RECONNECT_DELAY_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 10_000;
 const STABLE_CONNECTION_MS = 30_000;
+/**
+ * How long after a daemon says it is draining its replacement is expected. Until then the feed
+ * keeps retrying at its first interval instead of backing off, so it is back within moments of
+ * the new process answering rather than seconds after.
+ */
+const REPLACEMENT_WINDOW_MS = 2 * 60_000;
 
 /** Options for the client's reconnecting event feed. */
 export interface HappyAgentUpdatesOptions {
@@ -53,6 +59,7 @@ export async function* reconnectingUpdates(
     let connection: "initial" | "connected" | "draining" | "disconnected" = "initial";
     let daemonId: Cuid2 | undefined;
     let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+    let replacementExpectedUntil = 0;
 
     while (!isAborted(options.signal)) {
         const attemptStartedAt = Date.now();
@@ -73,6 +80,8 @@ export async function* reconnectingUpdates(
                         );
                     }
                     receivedHello = true;
+                    // A daemon that answers without draining is the replacement, or never left.
+                    if (frame.hello.draining !== true) replacementExpectedUntil = 0;
 
                     const stateLost =
                         frame.hello.gap || (cursor !== undefined && !frame.hello.resumed);
@@ -104,6 +113,7 @@ export async function* reconnectingUpdates(
                     if (stateLost) yield { kind: "state_lost", cursor };
                     if (frame.hello.draining === true) {
                         connection = "draining";
+                        replacementExpectedUntil = Date.now() + REPLACEMENT_WINDOW_MS;
                         yield {
                             kind: "draining",
                             cursor,
@@ -131,6 +141,7 @@ export async function* reconnectingUpdates(
                 yield { kind: "event", event: frame.event, cursor };
                 if (frame.event.type === "daemon.draining" && connection !== "draining") {
                     connection = "draining";
+                    replacementExpectedUntil = Date.now() + REPLACEMENT_WINDOW_MS;
                     yield {
                         kind: "draining",
                         cursor,
@@ -159,7 +170,8 @@ export async function* reconnectingUpdates(
             reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
         }
         if (!(await delay(reconnectDelayMs, options.signal))) return;
-        reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
+        if (Date.now() >= replacementExpectedUntil)
+            reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
     }
 }
 

@@ -386,6 +386,67 @@ describe("HappyAgentClient updates", () => {
         await expect(updates.next()).resolves.toEqual({ done: true, value: undefined });
     });
 
+    it("keeps retrying at its first interval while a drained daemon is being replaced", async () => {
+        vi.useFakeTimers();
+        let attempts = 0;
+        const fetch: typeof globalThis.fetch = async () => {
+            attempts += 1;
+            if (attempts === 1)
+                return sseResponse(
+                    hello(CURSOR_0, false, true, {
+                        daemonId: DAEMON_A,
+                        daemonStartedAt: 10,
+                        draining: false,
+                    }),
+                    daemonDraining(CURSOR_1, DAEMON_A),
+                );
+            throw new TypeError("connect ECONNREFUSED");
+        };
+        const controller = new AbortController();
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+        const updates = client.updates({ after: CURSOR_0, signal: controller.signal });
+        while ((await updates.next()).value?.kind !== "disconnected");
+        const pending = updates.next();
+
+        // Ten retries a first interval apart, where backing off would have made three.
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(attempts).toBeGreaterThanOrEqual(10);
+
+        controller.abort();
+        await pending;
+    });
+
+    it("backs off again once the drained daemon has been away past its replacement window", async () => {
+        vi.useFakeTimers();
+        let attempts = 0;
+        const fetch: typeof globalThis.fetch = async () => {
+            attempts += 1;
+            if (attempts === 1)
+                return sseResponse(
+                    hello(CURSOR_0, false, true, {
+                        daemonId: DAEMON_A,
+                        daemonStartedAt: 10,
+                        draining: false,
+                    }),
+                    daemonDraining(CURSOR_1, DAEMON_A),
+                );
+            throw new TypeError("connect ECONNREFUSED");
+        };
+        const controller = new AbortController();
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+        const updates = client.updates({ after: CURSOR_0, signal: controller.signal });
+        while ((await updates.next()).value?.kind !== "disconnected");
+        const pending = updates.next();
+
+        await vi.advanceTimersByTimeAsync(3 * 60_000);
+        const before = attempts;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(attempts - before).toBeLessThanOrEqual(1);
+
+        controller.abort();
+        await pending;
+    });
+
     it("stops an in-flight reconnect delay as soon as the caller aborts", async () => {
         vi.useFakeTimers();
         let attempts = 0;
