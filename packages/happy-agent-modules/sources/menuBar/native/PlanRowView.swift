@@ -1,53 +1,23 @@
 import AppKit
 
-/// One provider's plan windows, stacked: who they belong to, how much is spent, and a bar each.
+/// One provider account on a single line: its name and plan, a small gauge for each window, and
+/// when the window holding it back starts over.
 ///
-/// Menu items only carry text, so the bars need a view of their own. The row never highlights and
-/// never accepts a click; it is a readout inside the menu. Session and week each get a full-width
-/// line so the reset time is not cut off.
+/// A gauge reads like a battery — the ring and the number are what is left, not what is spent —
+/// and turns yellow when little is left and red when almost nothing is. The row never highlights
+/// and never accepts a click; it is a readout inside the menu.
 final class PlanRowView: NSView {
-    private let title = NSTextField(labelWithString: "")
-    private let meters: [Meter]
+    private let entry: PlanEntry
+    private let columns: [PlanWindowKind]
 
-    static let width: CGFloat = 244
-    private static let meterHeight: CGFloat = 28
-    private static let meterGap: CGFloat = 4
-
-    init(entry: PlanEntry) {
-        meters = entry.windows.map { Meter(window: $0, exhausted: entry.exhausted) }
-        let height = PlanRowView.height(windowCount: meters.count)
-        super.init(frame: NSRect(x: 0, y: 0, width: PlanRowView.width, height: height))
-        // Longer conversation titles widen the menu; the bars follow it rather than ending short.
+    init(entry: PlanEntry, columns: [PlanWindowKind]) {
+        self.entry = entry
+        self.columns = columns
+        super.init(
+            frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: MenuMetrics.rowHeight)
+        )
         autoresizingMask = [.width]
-
-        title.stringValue = "\(entry.vendor) · \(entry.name)"
-        title.font = .menuFont(ofSize: 13)
-        title.textColor = .labelColor
-        title.lineBreakMode = .byTruncatingTail
-        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        title.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(title)
-        NSLayoutConstraint.activate([
-            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 21),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -14),
-            title.topAnchor.constraint(equalTo: topAnchor, constant: 4),
-        ])
-
-        var previous: NSView = title
-        for (index, meter) in meters.enumerated() {
-            meter.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(meter)
-            NSLayoutConstraint.activate([
-                meter.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 21),
-                meter.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-                meter.heightAnchor.constraint(equalToConstant: PlanRowView.meterHeight),
-                meter.topAnchor.constraint(
-                    equalTo: previous.bottomAnchor,
-                    constant: index == 0 ? 2 : PlanRowView.meterGap
-                ),
-            ])
-            previous = meter
-        }
+        toolTip = PlanRowView.tooltip(entry)
     }
 
     @available(*, unavailable)
@@ -55,129 +25,296 @@ final class PlanRowView: NSView {
         fatalError("PlanRowView is created in code.")
     }
 
-    private static func height(windowCount: Int) -> CGFloat {
-        let meters = CGFloat(max(windowCount, 0))
-        let gaps = CGFloat(max(windowCount - 1, 0)) * meterGap
-        // Title, then each window on its own line: label, percent, reset, bar.
-        return 4 + 18 + 2 + meters * meterHeight + gaps + 8
-    }
+    override var isFlipped: Bool { true }
 
-    /// One full-width window: name, spent share and reset, and a bar underneath.
-    private final class Meter: NSView {
-        private let percent: Double
-        private let exhausted: Bool
-
-        init(window: PlanWindow, exhausted: Bool) {
-            percent = min(max(window.usedPercent, 0), 100)
-            self.exhausted = exhausted
-            super.init(frame: .zero)
-
-            let name = NSTextField(labelWithString: window.label)
-            name.font = .menuFont(ofSize: 11)
-            name.textColor = .secondaryLabelColor
-            name.lineBreakMode = .byTruncatingTail
-            name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-            let value = NSTextField(labelWithString: share(window))
-            value.font = .menuFont(ofSize: 11)
-            value.textColor = .secondaryLabelColor
-            value.alignment = .right
-            value.setContentCompressionResistancePriority(.required, for: .horizontal)
-            value.setContentHuggingPriority(.required, for: .horizontal)
-
-            for label in [name, value] {
-                label.translatesAutoresizingMaskIntoConstraints = false
-                addSubview(label)
-            }
-            NSLayoutConstraint.activate([
-                name.leadingAnchor.constraint(equalTo: leadingAnchor),
-                name.topAnchor.constraint(equalTo: topAnchor),
-                value.trailingAnchor.constraint(equalTo: trailingAnchor),
-                value.firstBaselineAnchor.constraint(equalTo: name.firstBaselineAnchor),
-                value.leadingAnchor.constraint(greaterThanOrEqualTo: name.trailingAnchor, constant: 8),
-            ])
+    override func draw(_ dirtyRect: NSRect) {
+        let layout = PlanColumns(columns: columns, width: bounds.width)
+        let limiting = entry.limiting
+        for (index, kind) in columns.enumerated() {
+            guard let window = entry.windows.first(where: { $0.kind == kind }) else { continue }
+            let level = GaugeLevel(window: window, blocked: entry.isBlocking(window))
+            drawGauge(window: window, level: level, in: layout.gauge(index))
         }
 
-        @available(*, unavailable)
-        required init?(coder: NSCoder) {
-            fatalError("Meter is created in code.")
+        if let reset = limiting?.resetsAt {
+            drawLine(
+                resetPhrase(reset),
+                font: MenuMetrics.detailFont,
+                color: entry.isBlocked ? .systemRed : .secondaryLabelColor,
+                in: layout.reset,
+                alignment: .right
+            )
         }
 
-        override func draw(_ dirtyRect: NSRect) {
-            drawPlanBar(
-                in: NSRect(x: 0, y: 2, width: bounds.width, height: 3),
-                percent: percent,
-                exhausted: exhausted
+        // A long account name gives way to the plan, but only down to a readable length; past that
+        // the plan is shortened, and left out rather than squeezed into an unreadable stub.
+        let end = layout.namesEnd
+        let name = NSAttributedString(
+            string: entry.name,
+            attributes: [.font: MenuMetrics.font, .foregroundColor: NSColor.labelColor]
+        )
+        let fullName = ceil(name.size().width)
+        let plan = entry.planName.map {
+            ceil(NSAttributedString(string: $0, attributes: [.font: MenuMetrics.font]).size().width)
+        }
+        let room = end - MenuMetrics.inset
+        let besidePlan = plan.map { room - $0 - MenuMetrics.planGap } ?? room
+        let nameWidth = min(
+            fullName,
+            room,
+            max(besidePlan, min(fullName, MenuMetrics.nameMinimumWidth))
+        )
+        drawLine(
+            name,
+            in: NSRect(x: MenuMetrics.inset, y: 0, width: nameWidth, height: bounds.height)
+        )
+        let planStart = MenuMetrics.inset + nameWidth + MenuMetrics.planGap
+        if let planName = entry.planName, let plan,
+            end - planStart >= min(plan, MenuMetrics.planMinimumWidth)
+        {
+            drawLine(
+                planName,
+                font: MenuMetrics.font,
+                color: .secondaryLabelColor,
+                in: NSRect(x: planStart, y: 0, width: end - planStart, height: bounds.height)
             )
         }
     }
+
+    /// The share left, right-aligned against its ring, so rings line up down the column and
+    /// every number sits right beside its own.
+    private func drawGauge(window: PlanWindow, level: GaugeLevel, in cell: NSRect) {
+        let diameter = MenuMetrics.gaugeDiameter
+        let ring = NSRect(
+            x: cell.maxX - diameter,
+            y: cell.midY - diameter / 2,
+            width: diameter,
+            height: diameter
+        ).insetBy(dx: MenuMetrics.gaugeLine / 2, dy: MenuMetrics.gaugeLine / 2)
+        let track = NSBezierPath(ovalIn: ring)
+        track.lineWidth = MenuMetrics.gaugeLine
+        NSColor.quaternaryLabelColor.setStroke()
+        track.stroke()
+
+        let remaining = window.remainingPercent / 100
+        if remaining > 0 {
+            // Clockwise from twelve o'clock, like every other progress ring. The view is flipped,
+            // so increasing angles already run clockwise on screen.
+            let arc = NSBezierPath()
+            arc.appendArc(
+                withCenter: NSPoint(x: ring.midX, y: ring.midY),
+                radius: ring.width / 2,
+                startAngle: -90,
+                endAngle: -90 + 360 * CGFloat(remaining),
+                clockwise: false
+            )
+            arc.lineWidth = MenuMetrics.gaugeLine
+            arc.lineCapStyle = remaining < 1 ? .round : .butt
+            level.ring.setStroke()
+            arc.stroke()
+        }
+
+        let text = NSRect(
+            x: cell.minX,
+            y: 0,
+            width: cell.width - diameter - MenuMetrics.gaugeTextGap,
+            height: bounds.height
+        )
+        drawLine(
+            "\(Int(window.remainingPercent.rounded()))%",
+            font: MenuMetrics.detailFont,
+            color: level.text,
+            in: text,
+            alignment: .right
+        )
+    }
+
+    /// Every window the vendor reported, Fable included, with its exact local reset time; a
+    /// blocked account first says until when.
+    static func tooltip(_ entry: PlanEntry) -> String {
+        var lines = entry.allWindows.map { window -> String in
+            let left = "\(window.kind.label): \(Int(window.remainingPercent.rounded()))% left"
+            guard let reset = window.resetsAt else { return left }
+            return "\(left), resets \(resetPhrase(reset, precise: true))"
+        }
+        if entry.isBlocked, let limiting = entry.limiting {
+            let reached = limiting.isFull ? "\(limiting.kind.label) limit reached" : "Out of usage"
+            let reset = limiting.resetsAt.map { ", resets \(resetPhrase($0, precise: true))" } ?? ""
+            lines.insert(reached + reset, at: 0)
+        }
+        return lines.joined(separator: "\n")
+    }
 }
 
-private func share(_ window: PlanWindow) -> String {
-    let percent = "\(Int(window.usedPercent.rounded()))%"
-    guard let reset = resetPhrase(window) else { return percent }
-    return "\(percent) · \(reset)"
+/// A vendor's name above its accounts, with the names of the gauge columns when they differ from
+/// the vendor above.
+final class PlanHeaderView: NSView {
+    private let vendor: PlanVendor
+    private let labelsColumns: Bool
+
+    init(vendor: PlanVendor, labelsColumns: Bool) {
+        self.vendor = vendor
+        self.labelsColumns = labelsColumns
+        super.init(
+            frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: MenuMetrics.headerHeight)
+        )
+        autoresizingMask = [.width]
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("PlanHeaderView is created in code.")
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let layout = PlanColumns(columns: vendor.columns, width: bounds.width)
+        drawLine(
+            headerText(vendor.name.uppercased(), kern: 0.6),
+            in: line(MenuMetrics.inset, layout.namesEnd - MenuMetrics.inset)
+        )
+        guard labelsColumns else { return }
+        for (index, kind) in vendor.columns.enumerated() {
+            let cell = layout.gauge(index)
+            drawLine(headerText(kind.label), in: line(cell.minX, cell.width), alignment: .right)
+        }
+        let reset = layout.reset
+        drawLine(headerText("Resets"), in: line(reset.minX, reset.width), alignment: .right)
+    }
+
+    /// The header's text sits low in its row, close to the accounts it names.
+    private func line(_ x: CGFloat, _ width: CGFloat) -> NSRect {
+        NSRect(
+            x: x,
+            y: MenuMetrics.headerTop,
+            width: width,
+            height: bounds.height - MenuMetrics.headerTop
+        )
+    }
+
+    private func headerText(_ text: String, kern: CGFloat = 0) -> NSAttributedString {
+        NSAttributedString(
+            string: text,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+                .kern: kern,
+            ]
+        )
+    }
 }
 
-/// Clock time always. A weekday or date when the reset is not today. Remaining time when under 3 hours.
-private func resetPhrase(_ window: PlanWindow) -> String? {
-    guard let date = window.resetsAt else { return nil }
-    var parts = [resetWhen(date)]
+/// Where a vendor's columns sit, measured from the right edge so every vendor's week, session,
+/// and reset line up however many columns it has.
+private struct PlanColumns {
+    let columns: [PlanWindowKind]
+    let width: CGFloat
+
+    var reset: NSRect {
+        NSRect(
+            x: width - MenuMetrics.inset - PlanColumns.resetWidth,
+            y: 0,
+            width: PlanColumns.resetWidth,
+            height: MenuMetrics.rowHeight
+        )
+    }
+
+    func gauge(_ index: Int) -> NSRect {
+        let fromRight = CGFloat(columns.count - 1 - index)
+        let right = reset.minX - MenuMetrics.resetGap
+            - fromRight * (PlanColumns.gaugeWidth + MenuMetrics.gaugeGap)
+        return NSRect(
+            x: right - PlanColumns.gaugeWidth,
+            y: 0,
+            width: PlanColumns.gaugeWidth,
+            height: MenuMetrics.rowHeight
+        )
+    }
+
+    var namesEnd: CGFloat {
+        (columns.isEmpty ? reset.minX : gauge(0).minX) - MenuMetrics.resetGap
+    }
+
+    /// Wide enough for "100%" beside its ring.
+    static let gaugeWidth: CGFloat = {
+        let digits = NSAttributedString(string: "100%", attributes: [.font: MenuMetrics.detailFont])
+        return MenuMetrics.gaugeDiameter + MenuMetrics.gaugeTextGap + ceil(digits.size().width)
+    }()
+
+    /// Wide enough for the longest clock time this locale writes.
+    static let resetWidth: CGFloat = {
+        var parts = DateComponents()
+        parts.year = 2026
+        parts.month = 1
+        parts.day = 1
+        parts.hour = 22
+        parts.minute = 58
+        let sample = localCalendar.date(from: parts) ?? Date()
+        let text = NSAttributedString(
+            string: clockTime(sample),
+            attributes: [.font: MenuMetrics.detailFont]
+        )
+        return ceil(text.size().width)
+    }()
+}
+
+/// The gauge's colors: quiet while there is room, yellow when little is left, red when almost
+/// nothing is or the account cannot be used until this window starts over.
+private struct GaugeLevel {
+    let ring: NSColor
+    let text: NSColor
+
+    init(window: PlanWindow, blocked: Bool) {
+        let left = window.remainingPercent
+        if blocked || left < MenuMetrics.redBelow {
+            ring = .systemRed
+            text = .systemRed
+        } else if left < MenuMetrics.yellowBelow {
+            ring = .systemYellow
+            text = .secondaryLabelColor
+        } else {
+            ring = .secondaryLabelColor
+            text = .secondaryLabelColor
+        }
+    }
+}
+
+/// A clock time when the reset is under a day away; otherwise the weekday, or the date once the
+/// weekday could be mistaken for this week's. The tooltip adds the clock time to any reset that is
+/// not today, so nothing is lost by the brevity.
+func resetPhrase(_ date: Date, precise: Bool = false) -> String {
     let remaining = date.timeIntervalSinceNow
-    if remaining > 0 && remaining < 3 * 60 * 60 {
-        parts.append("in \(remainingDuration(remaining))")
+    if precise {
+        if localCalendar.isDateInToday(date) { return clockTime(date) }
+        let day = localFormatter(remaining < 6 * 24 * 60 * 60 ? "EEE" : "MMM d").string(from: date)
+        return "\(day) \(clockTime(date))"
     }
-    return parts.joined(separator: " · ")
-}
-
-private func resetWhen(_ date: Date) -> String {
-    let time = clockTime(date)
-    if Calendar.current.isDateInToday(date) { return time }
-    return "\(resetDay(date)) \(time)"
-}
-
-private func resetDay(_ date: Date) -> String {
-    let start = Calendar.current.startOfDay(for: Date())
-    let end = Calendar.current.startOfDay(for: date)
-    let days = Calendar.current.dateComponents([.day], from: start, to: end).day ?? 0
-    let formatter = DateFormatter()
-    if days > 0 && days < 7 {
-        formatter.setLocalizedDateFormatFromTemplate("EEE")
-    } else {
-        formatter.setLocalizedDateFormatFromTemplate("MMM d")
-    }
-    return formatter.string(from: date)
+    if remaining < 24 * 60 * 60 { return clockTime(date) }
+    return localFormatter(remaining < 6 * 24 * 60 * 60 ? "EEE" : "MMM d").string(from: date)
 }
 
 private func clockTime(_ date: Date) -> String {
-    let formatter = DateFormatter()
+    let formatter = localFormatter(nil)
     formatter.timeStyle = .short
     formatter.dateStyle = .none
     return formatter.string(from: date)
 }
 
-private func remainingDuration(_ interval: TimeInterval) -> String {
-    let totalSeconds = max(1, Int(interval.rounded(.up)))
-    let hours = totalSeconds / 3_600
-    let minutes = (totalSeconds % 3_600) / 60
-    if hours > 0 { return minutes == 0 ? "\(hours)h" : "\(hours)h \(minutes)m" }
-    if minutes > 0 { return "\(minutes)m" }
-    return "\(totalSeconds)s"
+/// Every reset is written in the Mac's own time zone and locale — never UTC, an ISO string, or
+/// the daemon's zone — and both follow the system, so a Mac that changes zone shows the new
+/// local time.
+private var localCalendar: Calendar {
+    var calendar = Calendar.autoupdatingCurrent
+    calendar.timeZone = TimeZone.autoupdatingCurrent
+    return calendar
 }
 
-private func drawPlanBar(in track: NSRect, percent: Double, exhausted: Bool) {
-    let radius = track.height / 2
-    NSColor.quaternaryLabelColor.setFill()
-    NSBezierPath(roundedRect: track, xRadius: radius, yRadius: radius).fill()
-
-    let filled = track.width * CGFloat(percent / 100)
-    guard filled > 0 else { return }
-    let fill = NSRect(
-        x: track.minX,
-        y: track.minY,
-        width: max(filled, track.height),
-        height: track.height
-    )
-    (exhausted ? NSColor.systemRed : NSColor.controlAccentColor).setFill()
-    NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius).fill()
+private func localFormatter(_ template: String?) -> DateFormatter {
+    let formatter = DateFormatter()
+    formatter.locale = Locale.autoupdatingCurrent
+    formatter.timeZone = TimeZone.autoupdatingCurrent
+    formatter.calendar = localCalendar
+    if let template { formatter.setLocalizedDateFormatFromTemplate(template) }
+    return formatter
 }

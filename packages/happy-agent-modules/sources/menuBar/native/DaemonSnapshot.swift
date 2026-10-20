@@ -1,22 +1,15 @@
 import Foundation
 
-/// One agent the person can see, and what it is doing right now.
-struct AgentEntry {
+/// One task or bot, and whether it or any agent working under it is busy right now.
+struct WorkEntry {
     let id: String
-    let title: String
-    let activity: String?
-
-    var isWorking: Bool { activity != nil }
-}
-
-/// The agents of one project, gathered from the project's own workspaces.
-struct ProjectEntry {
     let name: String
-    let working: [AgentEntry]
+    let isWorking: Bool
 }
 
-/// Which quota window this is. Session resets are a time of day; week and month can be a day.
-enum PlanWindowKind {
+/// Which quota window this is, in the order a row shows its gauges from left to right. Fable's
+/// allowance never gets a gauge; it is only ever named in the tooltip.
+enum PlanWindowKind: Int, Comparable {
     case session
     case week
     case month
@@ -30,6 +23,10 @@ enum PlanWindowKind {
         case .fable: return "Fable"
         }
     }
+
+    static func < (left: PlanWindowKind, right: PlanWindowKind) -> Bool {
+        left.rawValue < right.rawValue
+    }
 }
 
 /// One named quota window: how much is spent, and when it starts over.
@@ -38,106 +35,151 @@ struct PlanWindow {
     let usedPercent: Double
     let resetsAt: Date?
 
-    var label: String { kind.label }
+    /// What is left, the way a battery reads: 100 when nothing is spent, 0 when it is gone.
+    var remainingPercent: Double { min(max(100 - usedPercent, 0), 100) }
+    var isFull: Bool { usedPercent >= 100 }
 }
 
-/// A provider's plan, with the session and week windows the menu shows side by side.
+/// One provider account's plan: the windows its row draws as gauges, and Claude's separate Fable
+/// allowance, which has no gauge of its own.
 struct PlanEntry {
+    let vendorType: String
     let vendor: String
     let name: String
+    let planName: String?
     let windows: [PlanWindow]
+    let fable: PlanWindow?
     let exhausted: Bool
+
+    /// Every window the vendor reported that the menu speaks about, in tooltip order.
+    var allWindows: [PlanWindow] { windows + (fable.map { [$0] } ?? []) }
+
+    /// The window that holds the account back: while any window is full, Fable included, the one
+    /// that resets last, since the account stays blocked until every full window has started over;
+    /// otherwise the gauge with the least left.
+    var limiting: PlanWindow? {
+        let full = allWindows.filter(\.isFull)
+        if !full.isEmpty {
+            return full.max { ($0.resetsAt ?? .distantPast) < ($1.resetsAt ?? .distantPast) }
+        }
+        return windows.max { $0.usedPercent < $1.usedPercent }
+    }
+
+    var isBlocked: Bool { exhausted || allWindows.contains(where: \.isFull) }
+
+    /// Whether this gauge is the one keeping a blocked account blocked. Fable is a weekly
+    /// allowance without a gauge, so when it is the block the week's gauge stands in for it.
+    func isBlocking(_ window: PlanWindow) -> Bool {
+        guard isBlocked, let limiting else { return false }
+        return limiting.kind == window.kind || (limiting.kind == .fable && window.kind == .week)
+    }
+}
+
+/// The accounts of one vendor, in the order the desktop model picker lists them.
+struct PlanVendor {
+    let type: String
+    let name: String
+    let plans: [PlanEntry]
+
+    /// The gauge columns this vendor's rows share, so every row lines up under one header.
+    var columns: [PlanWindowKind] {
+        Array(Set(plans.flatMap { $0.windows.map(\.kind) })).sorted()
+    }
 }
 
 struct TokenTotals {
     var input = 0
     var output = 0
 
-    var isEmpty: Bool { input == 0 && output == 0 }
+    var total: Int { input + output }
+    var isEmpty: Bool { total == 0 }
 }
 
 /// Everything the menu draws, as of the last successful read.
 struct DaemonSnapshot {
     var connected = false
-    var projects: [ProjectEntry] = []
-    var plans: [PlanEntry] = []
-    var hour = TokenTotals()
+    var work: [WorkEntry] = []
+    var vendors: [PlanVendor] = []
     var day = TokenTotals()
 
-    var workingCount: Int { projects.reduce(0) { $0 + $1.working.count } }
+    var working: [WorkEntry] { work.filter(\.isWorking) }
 }
 
-/// Reads the daemon's projects, workspaces, and usage into the shape the menu draws.
+/// Reads the daemon's tasks, bots, and usage into the shape the menu draws.
 ///
-/// Agents live on workspaces — including each project's root workspace — so the workspace list
-/// alone carries every visible agent, and the project list supplies the names to group them under.
+/// Tasks and bots are the units a person thinks in, so the menu lists nothing else: a subtask or
+/// subagent is not a row of its own but makes the task or bot it works under count as working.
 enum DaemonSnapshotReader {
-    static func projects(projectsBody: Any?, workspacesBody: Any?) -> [ProjectEntry]? {
-        guard let projectRows = (projectsBody as? [String: Any])?["projects"] as? [[String: Any]],
-            let workspaceRows = (workspacesBody as? [String: Any])?["workspaces"] as? [[String: Any]]
-        else {
+    /// `nil` when the daemon is not answering. A daemon without tasks answers `404` on the task
+    /// list, which leaves the bots alone rather than looking like a lost connection.
+    static func work(botsBody: Any?, tasksBody: Any?) -> [WorkEntry]? {
+        guard let bots = (botsBody as? [String: Any])?["bots"] as? [[String: Any]] else {
             return nil
         }
-        var names: [String: String] = [:]
-        var order: [String] = []
-        for row in projectRows {
-            guard let id = row["id"] as? String else { continue }
-            names[id] = row["name"] as? String ?? "Untitled project"
-            order.append(id)
-        }
-        var working: [String: [AgentEntry]] = [:]
-        for row in workspaceRows {
-            guard let projectId = row["projectId"] as? String else { continue }
-            let agents = row["agents"] as? [[String: Any]] ?? []
-            for agent in agents {
-                guard let entry = agentEntry(agent), entry.isWorking else { continue }
-                working[projectId, default: []].append(entry)
+        let tasks = (tasksBody as? [String: Any])?["tasks"] as? [[String: Any]] ?? []
+        return (bots + tasks).compactMap { row in
+            guard let id = row["id"] as? String, row["status"] as? String == "active" else {
+                return nil
             }
-        }
-        return order.compactMap { id in
-            guard let agents = working[id], !agents.isEmpty else { return nil }
-            return ProjectEntry(name: names[id] ?? "Untitled project", working: agents)
+            let agent = row["agent"] as? [String: Any]
+            return WorkEntry(
+                id: id,
+                name: row["name"] as? String ?? "Untitled",
+                isWorking: agent.map(isWorking) ?? false
+            )
         }
     }
 
-    static func plans(usageBody: Any?, configBody: Any? = nil) -> ([PlanEntry], TokenTotals, TokenTotals)? {
+    /// An agent is working while it runs a turn, while one of its subagents runs, or while any
+    /// subtask under it is working.
+    private static func isWorking(_ agent: [String: Any]) -> Bool {
+        if let status = agent["status"] as? String, status != "idle" { return true }
+        if let subagents = agent["subagents"] as? [String: Any],
+            (number(subagents["running"]) ?? 0) > 0
+        {
+            return true
+        }
+        let subtasks = agent["subtasks"] as? [[String: Any]] ?? []
+        return subtasks.contains(where: isWorking)
+    }
+
+    /// Accounts arrive in configuration order, which is the order the desktop model picker uses:
+    /// a vendor appears where its first account does, and its accounts follow in the same order.
+    /// Hidden accounts are left out there, so they are left out here.
+    static func plans(usageBody: Any?, configBody: Any? = nil) -> ([PlanVendor], TokenTotals)? {
         guard let body = usageBody as? [String: Any] else { return nil }
         let config = (configBody as? [String: Any])?["config"] as? [String: Any]
         let configured = config?["providers"] as? [String: [String: Any]] ?? [:]
-        var plans: [PlanEntry] = []
+        var vendors: [(type: String, plans: [PlanEntry])] = []
         for provider in body["providers"] as? [[String: Any]] ?? [] {
             guard let id = provider["providerId"] as? String else { continue }
             guard provider["enabled"] as? Bool ?? true else { continue }
+            guard !(provider["hidden"] as? Bool ?? configured[id]?["hidden"] as? Bool ?? false)
+            else { continue }
             guard let usage = provider["usage"] as? [String: Any] else { continue }
-            let windows = usageWindows(usage["windows"] as? [String: Any])
+            let reported = usage["windows"] as? [String: Any]
+            let windows = usageWindows(reported)
             guard !windows.isEmpty else { continue }
-            plans.append(
-                PlanEntry(
-                    vendor: vendorName(provider["type"] as? String ?? "unknown"),
-                    name: configured[id]?["name"] as? String ?? providerName(id),
-                    windows: windows,
-                    exhausted: usage["exhausted"] as? Bool ?? false
-                )
+            let type = provider["type"] as? String ?? "unknown"
+            let plan = PlanEntry(
+                vendorType: type,
+                vendor: vendorName(type),
+                name: configured[id]?["name"] as? String ?? providerName(id),
+                planName: (usage["planName"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                windows: windows,
+                fable: window(reported?["fableWeekly"], kind: .fable),
+                exhausted: usage["exhausted"] as? Bool ?? false
             )
+            if let index = vendors.firstIndex(where: { $0.type == type }) {
+                vendors[index].plans.append(plan)
+            } else {
+                vendors.append((type, [plan]))
+            }
         }
-        return (plans, totals(body["hour"]), totals(body["day"]))
-    }
-
-    private static func agentEntry(_ agent: [String: Any]) -> AgentEntry? {
-        guard let id = agent["id"] as? String else { return nil }
-        let title = agent["title"] as? String ?? "Untitled conversation"
-        return AgentEntry(id: id, title: title, activity: activity(agent["status"] as? String))
-    }
-
-    /// The daemon's granular run status as something a person reads at a glance.
-    private static func activity(_ status: String?) -> String? {
-        switch status {
-        case "thinking": return "Thinking"
-        case "working": return "Responding"
-        case "generating_tools": return "Preparing tools"
-        case "running_tools": return "Running tools"
-        default: return nil
+        let grouped = vendors.map {
+            PlanVendor(type: $0.type, name: vendorName($0.type), plans: $0.plans)
         }
+        return (grouped, totals(body["day"]))
     }
 
     /// A configured provider's ID as something to read. A person names their own accounts, so an
@@ -165,8 +207,9 @@ enum DaemonSnapshotReader {
         }
     }
 
-    /// Every provider uses the same windows: session and week when the vendor reports them, and a
-    /// monthly window only when there is no session, so a week-and-month pair still has both.
+    /// Every provider shows the same pair: the session and the week when the vendor reports them,
+    /// and a monthly window only when there is no session, so a week-and-month pair still has
+    /// both. Claude's separate Fable allowance is read on its own and never becomes a gauge.
     private static func usageWindows(_ windows: [String: Any]?) -> [PlanWindow] {
         guard let windows else { return [] }
         var shown: [PlanWindow] = []
@@ -175,9 +218,6 @@ enum DaemonSnapshotReader {
         }
         if let week = window(windows["weekly"], kind: .week) {
             shown.append(week)
-        }
-        if let fable = window(windows["fableWeekly"], kind: .fable) {
-            shown.append(fable)
         }
         if shown.count < 2, let month = window(windows["monthly"], kind: .month) {
             shown.append(month)

@@ -37,27 +37,61 @@ keeps the app alive after the daemon is gone.
 
 ## The macOS status item shows no count and the menu has no footer
 
-The bar carries the glyph alone: no number, no badge. The menu ends after the token totals — there
-is no version line, no ready/draining state, and no Quit item. A Quit item would be a lie, because
+The bar carries the glyph alone: no number, no badge. The menu ends after plan usage — there is
+no version line, no ready/draining state, and no Quit item. A Quit item would be a lie, because
 the module would start the app again. These were explicit product decisions, not omissions.
 
-## What the menu shows
+## The menu is compact: one line per thing
 
-Working agents grouped by project, provider plan usage, and rolling token totals. Idle agents are
-not listed at all, not even collapsed into a count.
+The earlier menu grew to about 1,900 pixels: agents grouped by project on two lines each, a
+title plus three full-width bars per account, and two token lines, with nothing scrolling. The
+person asked for a minimal menu at native metrics — 13-point text, 22-point rows, standard insets
+— and for everything not needed to go. Every row is now one line, the last day's tokens sit
+quietly on the headline's right, and when the lists would pass 70% of the screen they scroll in
+their own view below the headline, because NSMenu only scrolls at the screen edge. The rows are
+replaced in place while the menu is open, so the once-a-second elapsed-time tick keeps the scroll
+position.
 
-## Plan usage shows the session and the week
+## What the menu shows: tasks and bots
 
-The menu used to pick the single window closest to running out. That hid the week whenever the
-session was the tighter limit, which is the usual case. Every provider uses the same pair: the
-five-hour session and the week, each on its own line so the reset time is not cut off. Claude
-also shows Fable's separate weekly allowance as a third row when Anthropic reports it. A monthly
-window is shown only when there is no session window, so a Grok-style week-and-month pair still
-has both numbers. Extra vendor meters such as Codex Spark are not shown.
+Tasks and bots are the core primitives, so they are the only things listed, by task or bot name,
+with no grouping by project. Subtasks and subagents are never rows of their own; a task or bot
+counts as working while its own agent, a running subagent, or any subtask under it is working.
+The elapsed time sits right-aligned on the same line; the granular "Responding"/"Thinking" text is
+gone. Idle tasks and bots are not listed at all, and the headline reads "3 working" or "All idle".
 
-Reset always includes a clock time. A weekday or date is added only when the reset is not today.
-When the window ends in less than three hours, remaining time is added too, such as
-"4:34 PM · in 2h 14m".
+## Plan usage: what is left, as a ring per window
+
+Each account is one line under a small vendor header: the friendly account name, the plan type in
+secondary text, a ring for the session and one for the week, and the reset. The person asked for
+remaining rather than spent, like a battery, so ring and number both show what is left; the ring
+turns yellow under 25% left and red under 10% or for the window that has the account blocked.
+Horizontal bars and rules were explicitly unwanted.
+
+The earlier menu picked the single window closest to running out, which hid the week whenever the
+session was tighter, so both are always shown. A monthly window appears only when there is no
+session, so a Grok-style week-and-month pair still has both. Extra vendor meters such as Codex
+Spark are not shown. Gauge columns are right-aligned so the same window lines up under every
+vendor, and a header names them only when its columns differ from the vendor above.
+
+Fable's weekly allowance never gets a gauge. A Fable column, shown whenever Fable was the tightest
+window, narrowed every Claude row and cut off names and plans, so it was removed at the person's
+request. Fable lives in the tooltip; when it is the window blocking the account, the week's ring
+turns red in its place and the reset column shows Fable's reset in red.
+
+The reset belongs to the window holding the account back — while any window is full, Fable
+included, the full window that resets last — and is red while the account is blocked. Under a day
+away it is a clock time, otherwise a weekday, or a date once a weekday would be ambiguous. The
+row's tooltip spells out every window with its reset time, led by which limit was reached when
+the account is blocked.
+
+Reset times are always the viewer's local time: the Mac's own time zone and locale, followed as
+the system changes, and never UTC, an ISO string, or the daemon's zone. This is a product-wide
+preference.
+
+Accounts follow the desktop model picker: configuration order, which is the order of `/v0/usage`
+`providers`, with each vendor placed where its first account appears. Hidden accounts are left
+out there, so they are left out here.
 
 ## The glyph is a star, drawn at full strength
 
@@ -74,8 +108,9 @@ tints and inverts a template image, so anything less than full strength is wrong
 A provider ID is whatever someone called their account, so `bulka_happy_codex` is shown as
 "Bulka Happy Codex". Never render a raw ID.
 Both native apps use configuration's friendly account name verbatim, with vendor context shown
-separately, such as "Codex · Current CLI". Account names never acquire plan suffixes or automatic
-email shortening. Opening a menu calls the existing `POST /v0/usage/refresh`; ordinary snapshot
+separately: under a vendor header on macOS, and as "Codex · Current CLI" on Windows. The name is
+never rewritten with a plan suffix or automatic email shortening; macOS shows the plan type as
+separate secondary text beside it. Opening a menu calls the existing `POST /v0/usage/refresh`; ordinary snapshot
 reads remain cached. macOS reacts to the existing usage events, while Windows reads cached
 snapshots on its existing open-menu timer.
 

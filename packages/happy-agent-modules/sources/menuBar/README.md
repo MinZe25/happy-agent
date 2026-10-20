@@ -1,13 +1,39 @@
 # Menu bar
 
-A small native macOS app that puts the agents in the system menu bar. Clicking it shows how many
-agents are working and in which projects, how much of each provider's session and week is spent,
-and the tokens spent in the last hour and day.
+A small native macOS app that puts the agents in the system menu bar. Clicking it shows a compact,
+read-only menu:
+
+```text
+3 working                    1.3M tokens in 24h
+──────────────────────────────────────────────
+Fix the login redirect loop            14m 3s
+Chief of Staff                          1m 44s
+Release 0.42 preview                       5s
+──────────────────────────────────────────────
+CLAUDE                  Session   Week  Resets
+Current CLI  Max 20x     64% ◔    82% ◕  3:30 AM
+Work  Max 5x             19% ◔    56% ◑  Thu
+CODEX
+Current CLI  Pro         88% ◕     9% ◔  Wed
+```
+
+- The headline counts the working tasks and bots, and carries the last 24 hours of tokens as a quiet
+  aside.
+- Only tasks and bots are listed, one line each, by name, with how long they have been working.
+  A task or bot counts as working while its own agent, a subagent, or any subtask under it is
+  working. Idle ones are not listed.
+- Plan usage is grouped by vendor, one line per account: the configured account name, the plan
+  type, a small ring for the session and the week showing what is left, and when the window
+  holding the account back resets, in the Mac's local time. Rings turn yellow under 25% left and
+  red under 10% or when the account is exhausted. Claude's Fable allowance has no ring; it is in
+  the row's tooltip, and when it blocks the account the week ring and the reset turn red.
+- When the lists would take more than 70% of the screen, they scroll below the headline instead
+  of the menu growing.
 
 ```text
 MenuBarModule ──spawns──> happy-menu-bar (Swift, AppKit)
       │                          │
-      └── ConfigModule           └── GET /v0/projects, /v0/workspaces, /v0/usage
+      └── ConfigModule           └── GET /v0/bots, /v0/tasks, /v0/usage, /v0/config
           socketPath, tokenPath      GET /v0/events/stream
 ```
 
@@ -16,7 +42,13 @@ every other client uses, with the same bearer token, so it can show nothing the 
 already see and can change nothing at all.
 
 The event stream is used only as a signal that something changed; the snapshots the menu draws are
-always re-read. An unfamiliar or missed event therefore cannot leave stale state on screen.
+always re-read. `agent.*`, `task.*`, and `bot.*` events re-read the tasks and bots;
+`provider.usage.updated` and `config.updated` re-read plan usage. An unfamiliar or missed event
+therefore cannot leave stale state on screen.
+
+Accounts are listed in the order the desktop model picker uses: configuration order, with each
+vendor placed where its first account appears, so Claude comes first and the built-in Current CLI
+account leads its vendor. Hidden and disabled accounts are left out.
 
 ## Only in a release
 

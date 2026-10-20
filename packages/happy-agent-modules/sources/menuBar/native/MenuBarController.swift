@@ -9,6 +9,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let client: DaemonClient
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
+    private let headlineItem = NSMenuItem()
+    private let separatorItem = NSMenuItem.separator()
+    private let bodyItem = NSMenuItem()
+    private let body = MenuBody()
     private let fetchQueue = DispatchQueue(label: "com.slopus.happy.menubar.fetch")
     private let streamQueue = DispatchQueue(label: "com.slopus.happy.menubar.stream")
 
@@ -35,6 +39,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func start() {
         menu.delegate = self
         menu.autoenablesItems = false
+        menu.showsStateColumn = false
+        bodyItem.view = body.view
+        for item in [headlineItem, separatorItem, bodyItem] {
+            item.isEnabled = false
+            menu.addItem(item)
+        }
         statusItem.menu = menu
         statusItem.button?.image = StatusIcon.image(phase: 0, working: false)
         statusItem.button?.toolTip = "Happy Agent"
@@ -64,7 +74,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func changesTheMenu(_ type: String) -> Bool {
         if type == "provider.usage.updated" || type == "config.updated" { refreshPlans() }
-        return type.hasPrefix("agent.") || type.hasPrefix("workspace.") || type.hasPrefix("project.")
+        return type.hasPrefix("agent.") || type.hasPrefix("task.") || type.hasPrefix("bot.")
     }
 
     /// Coalesces the bursts of events a single turn produces into one read.
@@ -84,16 +94,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func refreshAgents() {
         fetchQueue.async { [weak self] in
             guard let self else { return }
-            let projects = self.client.get("/v0/projects")
-            let workspaces = self.client.get("/v0/workspaces")
-            guard let entries = DaemonSnapshotReader.projects(
-                projectsBody: projects,
-                workspacesBody: workspaces
-            ) else {
+            let bots = self.client.get("/v0/bots")
+            let tasks = self.client.get("/v0/tasks")
+            guard let entries = DaemonSnapshotReader.work(botsBody: bots, tasksBody: tasks) else {
                 DispatchQueue.main.async { [weak self] in self?.markDisconnected() }
                 return
             }
-            DispatchQueue.main.async { [weak self] in self?.apply(projects: entries) }
+            DispatchQueue.main.async { [weak self] in self?.apply(work: entries) }
         }
     }
 
@@ -106,24 +113,23 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 return
             }
             DispatchQueue.main.async { [weak self] in
-                self?.snapshot.plans = read.0
-                self?.snapshot.hour = read.1
-                self?.snapshot.day = read.2
+                guard let self else { return }
+                self.snapshot.vendors = read.0
+                self.snapshot.day = read.1
+                if self.isMenuOpen { self.rebuildMenu() }
             }
         }
     }
 
     // MARK: - Applying what was read
 
-    private func apply(projects: [ProjectEntry]) {
+    private func apply(work: [WorkEntry]) {
         snapshot.connected = true
-        snapshot.projects = projects
+        snapshot.work = work
         let now = Date()
         var running: [String: Date] = [:]
-        for project in projects {
-            for agent in project.working {
-                running[agent.id] = workingSince[agent.id] ?? now
-            }
+        for entry in work where entry.isWorking {
+            running[entry.id] = workingSince[entry.id] ?? now
         }
         workingSince = running
         updateIcon()
@@ -132,7 +138,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func markDisconnected() {
         snapshot.connected = false
-        snapshot.projects = []
+        snapshot.work = []
         workingSince = [:]
         updateIcon()
         if isMenuOpen { rebuildMenu() }
@@ -141,7 +147,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: - Drawing
 
     private func updateIcon() {
-        let working = snapshot.workingCount > 0
+        let working = !snapshot.working.isEmpty
         if working, animation == nil {
             let timer = Timer.scheduledTimer(
                 withTimeInterval: MenuBarController.spinFrameInterval,
@@ -163,13 +169,26 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.button?.image = StatusIcon.image(phase: phase, working: working)
     }
 
+    /// Replaces the rows in place: the items stay, so an open menu keeps its scroll position.
     private func rebuildMenu() {
-        menu.removeAllItems()
-        for item in MenuContent.items(snapshot: snapshot, workingSince: { [weak self] id in
+        let headline = MenuContent.headline(snapshot)
+        headlineItem.view = headline
+        let rows = MenuContent.rows(snapshot: snapshot) { [weak self] id in
             self?.workingSince[id]
-        }) {
-            menu.addItem(item)
         }
+        let resized = body.show(rows, maxHeight: bodyMaxHeight(below: headline))
+        separatorItem.isHidden = body.isEmpty
+        bodyItem.isHidden = body.isEmpty
+        if resized { menu.itemChanged(bodyItem) }
+    }
+
+    /// What is left of the screen share once the headline, its separator, and the menu's own
+    /// padding are drawn.
+    private func bodyMaxHeight(below headline: NSView) -> CGFloat {
+        let screen = statusItem.button?.window?.screen ?? NSScreen.main
+        let available = (screen?.visibleFrame.height ?? 800) * MenuMetrics.screenShare
+        return available - headline.frame.height - MenuMetrics.separatorHeight
+            - MenuMetrics.menuPadding
     }
 
     // MARK: - NSMenuDelegate
@@ -180,6 +199,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         isMenuOpen = true
+        // Overlay scrollers stay hidden until someone scrolls, so a list that runs past the bottom
+        // shows its scroller once to say there is more.
+        RunLoop.main.perform(inModes: [.eventTracking, .default]) { [weak self] in
+            self?.body.view.flashScrollers()
+        }
         refreshPlans(refreshAccounts: true)
         // Elapsed times are the only thing that moves without an event to announce it.
         openMenuTick = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
