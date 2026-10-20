@@ -310,15 +310,22 @@ export class AcpSession extends BaseSession {
                         const waited = await Promise.race([
                             new Promise<void>((resolve) => (timer = setTimeout(resolve, wait))),
                             aborted,
+                            steered,
                         ]).finally(() => clearTimeout(timer));
-                        if (waited !== ABORTED) {
+                        if (waited !== ABORTED && waited !== STEERED) {
                             this.#sendPrompt(connection, turn, turn.sent);
                             continue;
                         }
                         this.#turn = undefined;
                         finished = true;
                         yield { type: "block_stop" };
-                        yield { type: "done", state: "cancelled" };
+                        if (waited === ABORTED) {
+                            yield { type: "done", state: "cancelled" };
+                            return;
+                        }
+                        // The agent never took the refused prompt, so nothing is recorded as
+                        // seen: the next run sends it together with the steering, once.
+                        yield { type: "done", state: "normal", tokens: { input: 0, output: 0 } };
                         return;
                     }
                     this.#turn = undefined;
@@ -814,9 +821,18 @@ function errorText(error: unknown): string {
     return typeof details === "string" && details.length > 0 ? `${message}: ${details}` : message;
 }
 
-/** The agent's service refused the request as too many, which passes in seconds. */
+/**
+ * The agent's service refused the request as too many, which passes in seconds. A quota or
+ * usage limit is often sent with the same status but resets in hours, so it is never retried.
+ */
 function isRateLimited(error: unknown): boolean {
-    return /\b429\b|too many requests|rate[ _-]?limit(?:ed)?\b/iu.test(errorText(error));
+    const text = errorText(error);
+    return (
+        /\b429\b|too many requests|rate[ _-]?limit(?:ed)?\b/iu.test(text) &&
+        !/quota|usage[ _-]?limit|weekly|monthly|daily|session limit|billing|credits?\b|plan limit|resets? (?:at|in|on)\b|try again (?:at|in \d+ ?(?:h|hours?|d|days?)\b)/iu.test(
+            text,
+        )
+    );
 }
 
 function errorDone(error: unknown, stderr: string): SessionEvent {

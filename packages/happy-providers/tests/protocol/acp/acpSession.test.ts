@@ -260,6 +260,38 @@ describe("AcpSession", () => {
         expect(h.log().filter((entry) => entry.method === "prompt")).toHaveLength(1);
     }, 30_000);
 
+    it("ends the wait to resend a refused prompt on steering, sending that prompt once with the steering", async () => {
+        const h = harness();
+        const session = await h.session();
+        h.user("throttled first");
+        const steer = new AbortController();
+        setTimeout(() => steer.abort(), 500);
+        const started = Date.now();
+        const first = await h.run(session, undefined, steer.signal);
+        expect(Date.now() - started).toBeLessThan(2_500);
+        expect(done(first)).toMatchObject({ state: "normal" });
+        expect(h.log().filter((entry) => entry.method === "prompt")).toHaveLength(1);
+
+        h.user("steered instead");
+        const second = await h.run(session);
+        const prompts = h.log().filter((entry) => entry.method === "prompt");
+        // The old prompt is not resent on its own; it goes once, joined by the steering.
+        expect(prompts).toHaveLength(2);
+        expect(prompts[1]!.text).toContain("throttled first");
+        expect(prompts[1]!.text).toContain("steered instead");
+        expect(done(second)).toMatchObject({ state: "normal" });
+    }, 30_000);
+
+    it("does not retry a 429 that names a quota resetting in hours", async () => {
+        const h = harness();
+        const session = await h.session();
+        h.user("over quota");
+        const events = await h.run(session);
+        expect(events.some((event) => event.type === "retrying")).toBe(false);
+        expect(String((done(events) as { message?: string }).message)).toContain("weekly limit");
+        expect(h.log().filter((entry) => entry.method === "prompt")).toHaveLength(1);
+    }, 30_000);
+
     it("catches a session up on turns another account or harness answered, keeping the session", async () => {
         const h = harness();
         const session = await h.session();

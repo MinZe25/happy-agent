@@ -64,7 +64,10 @@ a new agent process and restores the same foreign session, sending only what is 
 A prompt the agent's service refuses as too many requests before the agent says anything is sent
 again after 3, 10 and 30 seconds, with a `retrying` event each time. Agents retry only for a
 moment themselves, and bursts — several sessions on one account, or a restarted agent's first
-request — clear within seconds. A usage limit that resets in hours is not retried.
+request — clear within seconds. Only a prompt the agent has reported nothing on is resent, a
+stop ends the wait as a cancellation, and steering ends it without resending: the agent never took
+the refused prompt, so the next run sends it once, together with the steering. A 429 that names a
+quota, usage, weekly or session limit, or a reset hours away, is not retried.
 
 Agents whose adapter binds a new session to whichever native conversation appears next in a
 shared store set `serializeNewSessions`: a new session's first prompt waits until the previous new

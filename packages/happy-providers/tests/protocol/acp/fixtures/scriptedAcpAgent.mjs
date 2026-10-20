@@ -5,6 +5,7 @@
 // Prompt directives: "use happy" calls the bridged happy_secret tool and replies with its answer;
 // "wait" holds the prompt open until cancelled or steered; "throttled" is refused as too many
 // requests the first time it is sent, and "throttled late" only after reporting a tool call;
+// "over quota" fails with a 429 that names a weekly limit;
 // anything else is echoed back.
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
@@ -99,6 +100,11 @@ class ScriptedAgent {
             .map((block) => (block.type === "text" ? block.text : ""))
             .join("\n");
         log({ method: "prompt", sessionId: params.sessionId, text });
+        if (text.includes("over quota")) {
+            throw new Error(
+                "exceeded retry limit, last status: 429 Too Many Requests: usage_limit_reached, You've hit your weekly limit · resets Oct 21 at 6pm",
+            );
+        }
         if (text.includes("throttled") && !text.includes("late") && !this.#throttled) {
             this.#throttled = true;
             throw new Error("exceeded retry limit, last status: 429 Too Many Requests");
