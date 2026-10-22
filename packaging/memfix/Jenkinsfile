@@ -1,0 +1,35 @@
+// Builds the patched Happy Agent binary image (see Dockerfile beside this file) and
+// pushes it to the private registry as admin/happy-agent. Nothing is deployed here:
+// allway-happy and the app-matters images copy the binary from it at their own build.
+pipeline {
+    agent any
+    options {
+        disableConcurrentBuilds()
+    }
+    environment {
+        VERSION = '0.4.100-memfix.1'
+    }
+    stages {
+        stage('Push Image') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'registry-url', variable: 'REGISTRY_URL'),
+                    usernamePassword(credentialsId: 'gitea-registry', passwordVariable: 'DOCKER_PASSWORD', usernameVariable: 'DOCKER_USER')
+                ]) {
+                    script {
+                        docker.withRegistry(REGISTRY_URL, 'gitea-registry') {
+                            def image = docker.build(
+                                "${DOCKER_USER}/happy-agent:${env.VERSION}",
+                                "-f packaging/memfix/Dockerfile " +
+                                    "--build-arg HAPPY_AGENT_RELEASE_VERSION=${env.VERSION} ."
+                            )
+                            image.push(env.VERSION)
+                            image.push('memfix')
+                            echo "Pushed ${DOCKER_USER}/happy-agent:${env.VERSION} and :memfix"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
